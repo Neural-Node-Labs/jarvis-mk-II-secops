@@ -10,6 +10,7 @@ changelog:
            chat_stream call. Self-healing on tool failure. react_status events.
            auto_confirm flag. Max-iteration safety cap.
 """
+import os
 import json
 import logging
 from typing import AsyncGenerator
@@ -21,6 +22,37 @@ logger = logging.getLogger("agent.core")
 # ── Max ReAct iterations — safety cap to prevent runaway loops ────────────────
 REACT_MAX_ITERATIONS = 10
 
+# ── Skill Manifest Loader ─────────────────────────────────────────────
+MANIFEST_PATH = os.path.join(os.path.dirname(__file__), ".", "skills_manifest.json")
+
+
+def _load_skills_manifest() -> str:
+    """Load the static skills manifest and return a formatted prompt section."""
+    try:
+        with open(MANIFEST_PATH, "r") as f:
+            manifest = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        logger.warning("skills_manifest.json not found — falling back to minimal skill list")
+        return ""
+
+    lines = []
+    # SecOps skills
+    lines.append("### SecOps Skills (Security Operations)")
+    for s in manifest.get("secops_skills", []):
+        actions = ", ".join(s.get("actions", ["run"]))
+        lines.append(f"- **{s['name']}**: {s['description']} (actions: {actions})")
+
+    lines.append("")
+    # System skills
+    lines.append("### System Skills")
+    for s in manifest.get("system_skills", []):
+        actions = ", ".join(s.get("actions", []))
+        lines.append(f"- **{s['name']}**: {s['description']} (actions: {actions})")
+
+    return "\n".join(lines)
+
+_SKILLS_MANIFEST_SECTION = _load_skills_manifest()
+
 # ── Keywords that signal the LLM considers the task complete ─────────────────
 COMPLETION_SIGNALS = [
     "task complete", "task is complete", "task completed",
@@ -28,10 +60,8 @@ COMPLETION_SIGNALS = [
     "the task is done", "work is complete", "done.",
 ]
 
-AGENT_SYSTEM_PROMPT = """You are Jarvis a powerful AI agent with access to the following skills:
 
-## Available Skills & Actions:
-
+skills_section = _SKILLS_MANIFEST_SECTION if _SKILLS_MANIFEST_SECTION else """
 ### 1. filesystem
 Full host filesystem access.
 Actions: read_file, write_file, list_dir, delete, move, mkdir, search_files, stat
@@ -53,6 +83,18 @@ Actions:
   get_template, get_skills_registry
 Usage: SKILL:cbd_architect ACTION:analyze_request PARAMS:{"request": "Build a REST API..."}
 Usage: SKILL:cbd_architect ACTION:experienced_lookup PARAMS:{"task_context": {"symptom_observed": "error message here"}}
+"""
+
+
+
+AGENT_SYSTEM_PROMPT = """You are Jarvis a powerful AI agent with access to the following skills:
+
+## Available Skills & Actions:
+
+""" + skills_section + """
+
+
+
 
 ## Tool Call Format:
 When you need to use a skill, output EXACTLY this format on its own line:
@@ -408,3 +450,5 @@ class Agent:
                 i += 1
             start = idx + 1
         return calls
+
+

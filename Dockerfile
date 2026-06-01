@@ -15,11 +15,23 @@ RUN npm run build
 # ─── Stage 2: Combined runtime (nginx + FastAPI via supervisord) ────────────────
 FROM python:3.11-slim AS runtime
 
-# ── System packages: nginx + supervisor + wget (for healthcheck) ──────────────
+# ── System packages: added core tools needed for SecOps & System skills ───────
 RUN apt-get update && apt-get install -y --no-install-recommends \
         nginx \
         supervisor \
         wget \
+        # Dependencies for network_recon, port_scanner, and dns_lookup
+        nmap \
+        dnsutils \
+        whois \
+        # Dependencies for cryptographic/SSL tools and compilation if needed
+        build-essential \
+        libssl-dev \
+        libffi-dev \
+        # General utilities for OS execution skills
+        curl \
+        git \
+        procps \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Python dependencies ───────────────────────────────────────────────────────
@@ -41,9 +53,15 @@ COPY deploy/nginx.conf /etc/nginx/conf.d/agent.conf
 # ── supervisord config ────────────────────────────────────────────────────────
 COPY deploy/supervisord.conf /etc/supervisor/conf.d/agent.conf
 
-# ── Runtime directories ───────────────────────────────────────────────────────
+# Create persistent data directories and set permissions BEFORE switching user
+# /app/data  — settings.json (provider config)
+# /app/experienced — Experienced knowledge base entries + index.md
 RUN mkdir -p /app/data /app/experienced \
-    && mkdir -p /var/log/supervisor
+    && useradd -m -u 1001 jarvis \
+    && mkdir -p /var/log/supervisor \
+    && chown -R jarvis:jarvis /app
+
+# USER jarvis
 
 # ── Health check ──────────────────────────────────────────────────────────────
 HEALTHCHECK --interval=15s --timeout=5s --start-period=25s --retries=5 \

@@ -14,6 +14,7 @@ from typing import Optional
 
 from core.llm_router import LLMConfig, PROVIDER_DEFAULTS
 from core.skill_registry import SkillRegistry
+from skills import load_all_skills
 from core.agent import Agent
 from skills.filesystem_skill import FileSystemSkill
 from skills.os_execution_skill import OSExecutionSkill
@@ -63,6 +64,7 @@ registry = SkillRegistry()
 registry.register("filesystem", FileSystemSkill())
 registry.register("os_execution", OSExecutionSkill())
 registry.register("cbd_architect", CBDArchitectSkill())
+load_all_skills(registry)
 
 # Load persisted settings (if any), fall back to DeepSeek default
 _persisted = _load_persisted_settings()

@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: agent-app
+    container_name: jarvis-app
     restart: unless-stopped
     ports:
       - "${PORT:-3000}:80"
@@ -22,8 +22,8 @@ services:
     volumes:
       # Persistent data — mounted as subdirectories, do NOT mount /app itself
       # or it will shadow the backend source baked into the image.
-      - agent-data:/app/data
-      - agent-experienced:/app/experienced
+      - jarvis-data:/app/data
+      - jarvis-experienced:/app/experienced
       # Host filesystem access for the filesystem skill
       # SECURITY: Change HOST_MOUNT to a scoped path in production (e.g. ./workspace)
       - ${HOST_MOUNT:-/}:/host:rw
@@ -39,7 +39,7 @@ services:
   #
   # ollama:
   #   image: ollama/ollama:latest
-  #   container_name: agent-ollama
+  #   container_name: jarvis-ollama
   #   restart: unless-stopped
   #   volumes:
   #     - ollama-models:/root/.ollama
@@ -53,6 +53,6 @@ services:
   #   #           capabilities: [gpu]
 
 volumes:
-  agent-data:         # settings.json — provider config persists across restarts
-  agent-experienced:  # Experienced knowledge base — EXP-*.md + index.md
+  jarvis-data:         # settings.json — provider config persists across restarts
+  jarvis-experienced:  # Experienced knowledge base — EXP-*.md + index.md
   ollama-models:      # Ollama model weights (only used if ollama service enabled)
