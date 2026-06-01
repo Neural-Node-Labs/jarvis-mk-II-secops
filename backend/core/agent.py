@@ -61,7 +61,12 @@ COMPLETION_SIGNALS = [
 ]
 
 
-skills_section = _SKILLS_MANIFEST_SECTION if _SKILLS_MANIFEST_SECTION else """
+
+
+BUILT_IN_SKILL = """
+
+## System Skills
+
 ### 1. filesystem
 Full host filesystem access.
 Actions: read_file, write_file, list_dir, delete, move, mkdir, search_files, stat
@@ -85,7 +90,7 @@ Usage: SKILL:cbd_architect ACTION:analyze_request PARAMS:{"request": "Build a RE
 Usage: SKILL:cbd_architect ACTION:experienced_lookup PARAMS:{"task_context": {"symptom_observed": "error message here"}}
 """
 
-
+skills_section = _SKILLS_MANIFEST_SECTION if _SKILLS_MANIFEST_SECTION + BUILT_IN_SKILL else BUILT_IN_SKILL
 
 AGENT_SYSTEM_PROMPT = """You are Jarvis a powerful AI agent with access to the following skills:
 

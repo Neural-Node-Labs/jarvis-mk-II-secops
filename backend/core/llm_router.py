@@ -23,7 +23,7 @@ def _default_schema(provider: str) -> str:
 
 class LLMConfig(BaseModel):
     provider: str = "deepseek"      # deepseek | ollama | anthropic | openai
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-pro"
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     temperature: float = 0.7
@@ -41,7 +41,7 @@ class LLMConfig(BaseModel):
 PROVIDER_DEFAULTS = {
     "deepseek": {
         "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-pro",
         "key_env": "DEEPSEEK_API_KEY",
     },
     "ollama": {
