@@ -11,7 +11,7 @@ import subprocess
 import urllib.error
 import urllib.request
 
-from core.skill_registry import SkillRegistry
+from core.skill_registry import SkillRegistry, SkillResult
 from skills._base import Skill
 
 

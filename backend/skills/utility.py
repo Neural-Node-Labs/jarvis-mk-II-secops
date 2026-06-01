@@ -8,7 +8,7 @@ import json
 import os
 import urllib.request
 
-from core.skill_registry import SkillRegistry
+from core.skill_registry import SkillRegistry, SkillResult
 from skills._base import Skill
 
 DEEPSEEK_URL   = "https://api.deepseek.com/v1/chat/completions"

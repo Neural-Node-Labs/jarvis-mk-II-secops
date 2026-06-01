@@ -14,7 +14,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from core.skill_registry import SkillRegistry
+from core.skill_registry import SkillRegistry, SkillResult
 from skills._base import Skill
 
 

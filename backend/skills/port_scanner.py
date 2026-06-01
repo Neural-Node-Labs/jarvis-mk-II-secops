@@ -8,7 +8,7 @@ from __future__ import annotations
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from core.skill_registry import SkillRegistry
+from core.skill_registry import SkillRegistry, SkillResult
 from skills._base import Skill, _well_known_service
 
 

@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from core.skill_registry import SkillRegistry
+from core.skill_registry import SkillRegistry, SkillResult
 
 
 # ─────────────────────────────────────────────────────────────────────────────

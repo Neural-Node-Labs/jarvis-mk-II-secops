@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-from core.skill_registry import SkillRegistry
+from core.skill_registry import SkillRegistry, SkillResult
 from skills._base import Skill
 
 

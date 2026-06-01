@@ -10,7 +10,7 @@ import socket
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
-from core.skill_registry import SkillRegistry
+from core.skill_registry import SkillRegistry, SkillResult
 from skills._base import Skill, _well_known_service
 
 

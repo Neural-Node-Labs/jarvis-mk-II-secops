@@ -27,6 +27,8 @@ services:
       # Host filesystem access for the filesystem skill
       # SECURITY: Change HOST_MOUNT to a scoped path in production (e.g. ./workspace)
       - ${HOST_MOUNT:-/}:/host:rw
+      # Custom host output folder mount
+      - ${HOST_OUTPUT:-./output}:/app/output
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:80/health"]
       interval: 15s

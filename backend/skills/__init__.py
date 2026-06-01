@@ -10,7 +10,7 @@ Usage:
     # registry now has all 21 skills ready
 """
 
-from core.skill_registry import SkillRegistry
+from core.skill_registry import SkillRegistry, SkillResult
 
 _SKILL_MODULES = [
     # NETWORK

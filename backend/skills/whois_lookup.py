@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import socket
 
-from core.skill_registry import SkillRegistry
+from core.skill_registry import SkillRegistry, SkillResult
 from skills._base import Skill, _is_ip
 
 
