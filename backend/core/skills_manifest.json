@@ -23,5 +23,10 @@
     {"name": "cloud_posture", "description": "Assess cloud security posture", "actions": ["run"]},
     {"name": "container_scanner", "description": "Scan container images for vulnerabilities", "actions": ["run"]},
     {"name": "utility", "description": "General utility functions", "actions": ["run"]}
+  ],
+  "system_skills": [
+    {"name": "filesystem", "description": "Full host filesystem access", "actions": ["read_file", "write_file", "list_dir", "delete", "move", "mkdir", "search_files", "stat"]},
+    {"name": "os_execution", "description": "Full OS control — run commands, manage processes", "actions": ["run_command", "list_processes", "kill_process", "send_signal", "system_info", "env_vars"]},
+    {"name": "cbd_architect", "description": "CBD v2.2 methodology enforcer", "actions": ["analyze_request", "generate_blueprint", "implement_component", "validate_component", "validate_blueprint", "version_read", "experienced_lookup", "experienced_capture", "experienced_promote", "experienced_search", "experienced_rebuild_index", "get_template", "get_skills_registry"]}
   ]
 }

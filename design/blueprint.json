@@ -1,0 +1,82 @@
+{
+ "blueprint_version": "2.0.0",
+ "blueprint_name": "Jarvis-AI-Agent",
+ "created": "2025-06-01T00:00:00Z",
+ "methodology": "CBD-v2.2",
+ "system": {
+  "description": "AI agent platform with Console REPL, WebSocket API, and React Dashboard sharing a common Agent/SkillRegistry core",
+  "interfaces": [
+   {"name":"Console REPL","technology":"Python async (console.py)","purpose":"Interactive terminal with streaming tokens, tool calls, confirmations"},
+   {"name":"WebSocket API","technology":"FastAPI","purpose":"Real-time agent chat (/ws/chat) + evolution pipeline (/ws/evolution)"},
+   {"name":"React Dashboard","technology":"TypeScript + Vite","purpose":"GUI for self-evolution pipeline visualization"}
+  ]
+ },
+ "backend_components": [
+  {"id":"B1","name":"FastAPI Server","file":"main.py","function":"HTTP/WS entry, 12 routes, CORS, skill registration"},
+  {"id":"B2","name":"Agent","file":"core/agent.py","function":"LLM orchestrator; ReAct loop (max 10 iter); tool extraction; confirmation flow","version":"2.0.0"},
+  {"id":"B3","name":"LLMRouter","file":"core/llm_router.py","function":"Provider-agnostic LLM streaming (OpenAI/Anthropic/DeepSeek)"},
+  {"id":"B4","name":"SkillRegistry","file":"core/skill_registry.py","function":"Skill registration, discovery, dispatch; confirmation gate","skill_count":24},
+  {"id":"B5","name":"EvolutionSession","file":"skills/self_evolution_skill/session.py","function":"Mutable dataclass: 10 phases, logs, EXP, stats, gate"},
+  {"id":"B6","name":"PhaseRunners","file":"skills/self_evolution_skill/phase_runners.py","function":"10 async functions (phases 0-9)"},
+  {"id":"B7","name":"EvolutionOrchestrator","file":"skills/self_evolution_skill/orchestrator.py","function":"Async FSM; pause at Phase 4 via asyncio.Event; abort"},
+  {"id":"B8","name":"SelfEvolutionSkill","file":"skills/self_evolution_skill/evolution_skill.py","function":"SkillRegistry class: start/status/approve/revise/reset/get_logs"},
+  {"id":"B9","name":"Console REPL","file":"console.py","function":"Colored terminal; streaming; interactive confirmations; /reset, /react"}
+ ],
+ "frontend_components": [
+  {"id":"F1","name":"EvolutionDashboard","file":"EvolutionDashboard.tsx","function":"Root orchestrator"},
+  {"id":"F2","name":"DashboardHeader","file":"DashboardHeader.tsx","function":"Title + Run/Reset buttons"},
+  {"id":"F3","name":"StatsBar","file":"StatsBar.tsx","function":"4 KPI cards"},
+  {"id":"F4","name":"PhaseList","file":"PhaseList.tsx","function":"10 PhaseItem container"},
+  {"id":"F5","name":"PhaseItem","file":"PhaseItem.tsx","function":"Single phase row"},
+  {"id":"F6","name":"EvolutionLog","file":"EvolutionLog.tsx","function":"Scrollable log"},
+  {"id":"F7","name":"ApprovalGate","file":"ApprovalGate.tsx","function":"Phase 4 APPROVE/REVISE"},
+  {"id":"F8","name":"VerdictBanner","file":"VerdictBanner.tsx","function":"Pass/fail banner"},
+  {"id":"F9","name":"ExpRegistryTable","file":"ExpRegistryTable.tsx","function":"EXP entries table"},
+  {"id":"F10","name":"useEvolutionEngine","file":"useEvolutionEngine.ts","function":"API-connected hook v2.0.0: WS + polling"}
+ ],
+ "bin_scripts": [
+  {"id":"S1","name":"jarvis.sh","file":"bin/jarvis.sh","function":"Linux/macOS launcher: venv -> pip -> console"},
+  {"id":"S2","name":"jarvis.cmd","file":"bin/jarvis.cmd","function":"Windows launcher: venv -> pip -> console"},
+  {"id":"S3","name":"validate_evolution.py","file":"bin/validate_evolution.py","function":"System audit"}
+ ],
+ "evolution_pipeline": {
+  "phases": [
+   "0: Experience lookup","1: Workspace bootstrap","2: Source discovery",
+   "3: Code analysis","4: Blueprint generation + APPROVAL GATE (halt via asyncio.Event)",
+   "5: Implementation","6: Build validation","7: UI & API testing",
+   "8: Deploy & verify","9: Restart & health + EXP capture"
+  ],
+  "approval": "POST /api/evolution/approve resumes Phase 4"
+ },
+ "api_routes": {
+  "websocket": ["/ws/chat (chat/confirm/cancel_confirm) -> token/tool_call/tool_result/confirm_needed/react_status/done", "/ws/evolution (subscribe) -> evolution_state/evolution_complete"],
+  "rest": [
+   "GET /api/skills","GET|POST /api/config","POST /api/reset","GET /api/health",
+   "POST /api/evolution/start","GET /api/evolution/status",
+   "POST /api/evolution/approve","POST /api/evolution/revise",
+   "POST /api/evolution/reset","GET /api/evolution/logs"
+  ]
+ },
+ "skill_registry": {
+  "total": 24,
+  "skills": [
+   "filesystem(8 actions)","os_execution(6)","cbd_architect(13)","self_evolution(6)",
+   "port_scanner","dns_lookup","whois_lookup","ssl_cert_inspector",
+   "http_header_analyzer","network_recon","dns_security","cve_lookup",
+   "ip_reputation","hash_lookup","ioc_extractor","log_analyzer",
+   "vulnerability_scorer","web_app_scanner","api_security_audit",
+   "firewall_auditor","password_audit","cloud_posture","container_scanner","utility"
+  ]
+ },
+ "evolution_state_schema": {
+  "fields": ["running(bool)","currentPhase(number)","paused(bool)","approved(bool)","aborted(bool)","workspaceId(string)","filesCopied(string)","testsPassed(string)","expCount(string)","verdict(pass|fail|null)","phases(PhaseState[])","gateStatus(hidden|waiting|approved|revised)","logs(LogEntry[])","expEntries(ExpEntry[])"]
+ },
+ "risk_assessment": {
+  "risks": [
+   {"risk":"In-memory sessions lost on restart","severity":"Medium","mitigation":"Redis for production"},
+   {"risk":"WS polling adds 500ms latency","severity":"Low","mitigation":"Acceptable UX"},
+   {"risk":"Phase runners simulated (delays)","severity":"Low","mitigation":"Replaceable with real skill calls"}
+  ],
+  "verdict": "GO"
+ }
+}

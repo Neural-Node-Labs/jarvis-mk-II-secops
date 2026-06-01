@@ -1,0 +1,427 @@
+/**
+ * styles/Dashboard.module.css — v1.0.0
+ * CHANGELOG: Initial CSS module for Evolution Dashboard
+ * Maps original HTML inline styles + CSS custom properties to modular CSS
+ */
+
+/* ---- Root CSS Variables (theme) ---- */
+:root {
+  --color-background-primary: #ffffff;
+  --color-background-secondary: #f8fafc;
+  --color-background-tertiary: #e2e8f0;
+  --color-background-info: #dbeafe;
+  --color-background-success: #dcfce7;
+  --color-background-warning: #fef3c7;
+  --color-background-danger: #fee2e2;
+
+  --color-text-primary: #0f172a;
+  --color-text-secondary: #475569;
+  --color-text-tertiary: #94a3b8;
+  --color-text-info: #1d4ed8;
+  --color-text-success: #15803d;
+  --color-text-warning: #b45309;
+  --color-text-danger: #b91c1c;
+
+  --color-border-tertiary: #e2e8f0;
+  --color-border-success: #86efac;
+  --color-border-warning: #fcd34d;
+
+  --border-radius-md: 8px;
+  --border-radius-lg: 12px;
+
+  --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+
+/* ---- Animations ---- */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ---- Layout ---- */
+.dashboardContainer {
+  padding: 1rem 0 0;
+}
+
+.headerRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.headerMeta {
+  display: flex;
+  flex-direction: column;
+}
+
+.headerLabel {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.headerTitle {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.headerActions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ---- Buttons ---- */
+.btn {
+  font-size: 13px;
+  padding: 6px 14px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--color-border-tertiary);
+  border-radius: var(--border-radius-md);
+  background: var(--color-background-primary);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  transition: background 0.2s, opacity 0.2s;
+}
+
+.btn:hover {
+  background: var(--color-background-secondary);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btnApprove {
+  flex: 1;
+  font-size: 12px;
+  padding: 5px 10px;
+  background: var(--color-background-success);
+  border-color: var(--color-border-success);
+  color: var(--color-text-success);
+}
+
+.btnRevise {
+  flex: 1;
+  font-size: 12px;
+  padding: 5px 10px;
+  background: var(--color-background-primary);
+  border: 1px solid var(--color-border-tertiary);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border-radius: var(--border-radius-md);
+}
+
+.btnRevise:hover {
+  background: var(--color-background-secondary);
+}
+
+/* ---- Stats Bar ---- */
+.statsGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 1rem;
+}
+
+.statCard {
+  background: var(--color-background-secondary);
+  border-radius: var(--border-radius-md);
+  padding: 0.75rem 1rem;
+}
+
+.statLabel {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  margin-bottom: 2px;
+}
+
+.statValue {
+  font-size: 22px;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.statValueMono {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+/* ---- Two-Column Layout ---- */
+.mainGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+  gap: 12px;
+}
+
+/* ---- Phase List ---- */
+.phaseList {
+  background: var(--color-background-primary);
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: var(--border-radius-lg);
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.phaseRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-radius: 6px;
+  transition: background 0.3s;
+}
+
+.phaseRowRunning {
+  background: var(--color-background-info);
+}
+
+.phaseRowDone {
+  background: var(--color-background-success);
+}
+
+.phaseDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background 0.3s;
+}
+
+.phaseDotActive {
+  animation: pulse 0.9s ease-in-out infinite;
+}
+
+.phaseIcon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.phaseLabel {
+  font-size: 12px;
+  font-weight: 500;
+  flex: 1;
+}
+
+.phaseBadge {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+/* ---- Right Column ---- */
+.rightColumn {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ---- Panel (generic card) ---- */
+.panel {
+  background: var(--color-background-primary);
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: var(--border-radius-lg);
+  padding: 1rem;
+}
+
+.panelHeader {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.panelHeaderIcon {
+  font-size: 14px;
+}
+
+/* ---- Evolution Log ---- */
+.evoLog {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  height: 180px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 2px;
+}
+
+.logEntry {
+  animation: slideIn 0.25s ease forwards;
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+.logEmpty {
+  color: var(--color-text-tertiary);
+}
+
+/* ---- Approval Gate ---- */
+.gateBox {
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: var(--border-radius-md);
+  padding: 0.75rem;
+  font-size: 13px;
+  min-height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.gateBoxWaiting {
+  border-color: var(--color-border-warning);
+  color: var(--color-text-warning);
+  background: var(--color-background-warning);
+}
+
+.gateBoxApproved {
+  border-color: var(--color-border-success);
+  color: var(--color-text-success);
+  background: var(--color-background-success);
+}
+
+.gateBoxRevised {
+  border-color: var(--color-border-warning);
+  color: var(--color-text-warning);
+  background: var(--color-background-warning);
+}
+
+.gateButtons {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* ---- Verdict Banner ---- */
+.verdictBox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: var(--border-radius-lg);
+  padding: 0.875rem 1rem;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.verdictPass {
+  background: var(--color-background-success);
+  color: var(--color-text-success);
+}
+
+.verdictFail {
+  background: var(--color-background-danger);
+  color: var(--color-text-danger);
+}
+
+.verdictIcon {
+  font-size: 18px;
+}
+
+/* ---- EXP Registry Table ---- */
+.expSection {
+  margin-top: 1rem;
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: var(--border-radius-lg);
+  padding: 1rem;
+}
+
+.expSectionHeader {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.expTable {
+  width: 100%;
+  font-size: 12px;
+  border-collapse: collapse;
+}
+
+.expTable th {
+  text-align: left;
+  padding: 4px 8px;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+}
+
+.expTable td {
+  padding: 5px 8px;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+}
+
+.expId {
+  font-family: var(--font-mono);
+  color: var(--color-text-info);
+}
+
+.expCategory {
+  color: var(--color-text-secondary);
+}
+
+.expTitle {
+  color: var(--color-text-primary);
+}
+
+.expStatusBadge {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+
+.expStatusConfirmed {
+  background: var(--color-background-success);
+  color: var(--color-text-success);
+}
+
+.expStatusDraft {
+  background: var(--color-background-warning);
+  color: var(--color-text-warning);
+}
+
+.expEmpty {
+  text-align: center;
+  padding: 1.5rem;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+/* ---- Screen Reader Only ---- */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
