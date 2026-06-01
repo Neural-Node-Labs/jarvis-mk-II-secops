@@ -1,0 +1,23 @@
+Enhancement:
+- Add checked confirmation box to automatically confirm the action with default value of off
+- Add new box beside the submit to send continue action
+- Add react capability and a checked box to turn it on or off, to ensure if On the task will be completed with selfhealing capability/ self correction.
+
+
+
+
+
+
+ docker cp agent-backend:/tmp ./agent-app-docker/tmp
+
+
+docker cp ./agent-app-docker/frontend agent-backend:/app/frontend/
+
+
+docker exec -it agent-backend "ls /app/frontend/"
+docker exec -u root -it <container_name> chown -R <user>:<group> /path/to/folder
+
+
+docker exec -u root -it agent-backend chmod -R 777 /app/frontend/
+
+docker cp agent-backend:/app ./agent-app-docker/

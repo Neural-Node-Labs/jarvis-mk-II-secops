@@ -1,0 +1,58 @@
+services:
+
+  # ─── Single container: React (nginx) + FastAPI (uvicorn) ─────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agent-app
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:80"
+    environment:
+      # ── LLM API Keys ──
+      DEEPSEEK_API_KEY:   ${DEEPSEEK_API_KEY:-}
+      ANTHROPIC_API_KEY:  ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY:     ${OPENAI_API_KEY:-}
+      # ── Ollama (point to external host if needed) ──
+      OLLAMA_HOST:        ${OLLAMA_HOST:-http://ollama:11434}
+      # ── Runtime ──
+      LOG_LEVEL:          ${LOG_LEVEL:-info}
+      PYTHONUNBUFFERED:   "1"
+    volumes:
+      # Persistent data — mounted as subdirectories, do NOT mount /app itself
+      # or it will shadow the backend source baked into the image.
+      - agent-data:/app/data
+      - agent-experienced:/app/experienced
+      # Host filesystem access for the filesystem skill
+      # SECURITY: Change HOST_MOUNT to a scoped path in production (e.g. ./workspace)
+      - ${HOST_MOUNT:-/}:/host:rw
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+
+  # ─── Ollama (optional local Llama) ───────────────────────────────────────────
+  # Uncomment to run Llama models locally. Then set provider to "ollama" in Settings.
+  #
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: agent-ollama
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ollama-models:/root/.ollama
+  #   # ── NVIDIA GPU support ──
+  #   # deploy:
+  #   #   resources:
+  #   #     reservations:
+  #   #       devices:
+  #   #         - driver: nvidia
+  #   #           count: 1
+  #   #           capabilities: [gpu]
+
+volumes:
+  agent-data:         # settings.json — provider config persists across restarts
+  agent-experienced:  # Experienced knowledge base — EXP-*.md + index.md
+  ollama-models:      # Ollama model weights (only used if ollama service enabled)
