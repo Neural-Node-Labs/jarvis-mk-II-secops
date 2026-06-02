@@ -1,6 +1,11 @@
 """
 LLM Router - Supports DeepSeek (default), Ollama/Llama, Anthropic, OpenAI-compatible
 All providers normalized to a single streaming interface.
+
+version: 2.0.0
+changelog:
+  2.0.0 - MODEL_MAX_TOKENS map for dynamic max_token limits per model.
+          get_model_max_tokens() public helper used by the API.
 """
 import httpx
 import json
@@ -9,35 +14,65 @@ from typing import AsyncGenerator, Optional
 from pydantic import BaseModel
 
 
-# Schema format used when building request payloads and parsing responses.
-# Derived automatically from provider, but can be overridden explicitly.
-#   "openai"    — OpenAI-compatible: system as first message, choices[0].delta.content
-#   "anthropic" — Anthropic Messages API: top-level system field, content_block_delta
+# ── Wire schema constants ──────────────────────────────────────────────────────
 SCHEMA_OPENAI    = "openai"
 SCHEMA_ANTHROPIC = "anthropic"
 
 def _default_schema(provider: str) -> str:
-    """Return the correct wire schema for a provider."""
     return SCHEMA_ANTHROPIC if provider == "anthropic" else SCHEMA_OPENAI
 
 
-class LLMConfig(BaseModel):
-    provider: str = "deepseek"      # deepseek | ollama | anthropic | openai
-    model: str = "deepseek-v4-pro"
-    api_key: Optional[str] = None
-    base_url: Optional[str] = None
-    temperature: float = 0.7
-    max_tokens: int = 4096
-    # schema_format is set automatically from provider but can be forced:
-    #   SCHEMA_OPENAI    — OpenAI-compatible wire format
-    #   SCHEMA_ANTHROPIC — Anthropic Messages API wire format
-    schema_format: Optional[str] = None  # None = auto-derive from provider
+# ── Per-model max context / output token limits ────────────────────────────────
+# Values represent the maximum *output* tokens the model supports.
+# When a model is not in this map, DEFAULT_MAX_TOKENS is used as fallback.
+DEFAULT_MAX_TOKENS = 8192
 
-    def get_schema(self) -> str:
-        """Resolve the active wire schema."""
-        return self.schema_format or _default_schema(self.provider)
+MODEL_MAX_TOKENS: dict[str, int] = {
+    # ── DeepSeek ──────────────────────────────────────────────────────────────
+    "deepseek-chat":            8192,
+    "deepseek-coder":           8192,
+    "deepseek-v4-pro":          8192,
+    "deepseek-v4-flash":        8192,
+    "deepseek-reasoner":        8000,
+
+    # ── Anthropic ─────────────────────────────────────────────────────────────
+    "claude-haiku-4-5":             8192,
+    "claude-haiku-4-5-20251001":    8192,
+    "claude-sonnet-4-20250514":     16000,
+    "claude-sonnet-4-5":            16000,
+    "claude-opus-4-5":              32000,
+    "claude-opus-4-20250514":       32000,
+
+    # ── OpenAI ────────────────────────────────────────────────────────────────
+    "gpt-3.5-turbo":            4096,
+    "gpt-4":                    8192,
+    "gpt-4-turbo":              4096,
+    "gpt-4o":                   16384,
+    "gpt-4o-mini":              16384,
+    "o1":                       32768,
+    "o1-mini":                  65536,
+    "o3-mini":                  100000,
+
+    # ── Ollama / Llama ────────────────────────────────────────────────────────
+    "llama3":       4096,
+    "llama3.1":     8192,
+    "llama3.2":     8192,
+    "codellama":    4096,
+    "mistral":      8192,
+    "phi3":         4096,
+    "gemma2":       8192,
+}
 
 
+def get_model_max_tokens(model: str) -> int:
+    """
+    Return the maximum output tokens for the given model name.
+    Falls back to DEFAULT_MAX_TOKENS for unknown models.
+    """
+    return MODEL_MAX_TOKENS.get(model, DEFAULT_MAX_TOKENS)
+
+
+# ── Provider defaults ──────────────────────────────────────────────────────────
 PROVIDER_DEFAULTS = {
     "deepseek": {
         "base_url": "https://api.deepseek.com/v1",
@@ -47,7 +82,7 @@ PROVIDER_DEFAULTS = {
     "ollama": {
         "base_url": os.getenv("OLLAMA_HOST", "http://localhost:11434") + "/v1",
         "model": "llama3",
-        "key_env": None,                # Ollama needs no key
+        "key_env": None,
     },
     "anthropic": {
         "base_url": "https://api.anthropic.com/v1",
@@ -62,6 +97,27 @@ PROVIDER_DEFAULTS = {
 }
 
 
+class LLMConfig(BaseModel):
+    provider: str = "deepseek"
+    model: str = "deepseek-v4-pro"
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    temperature: float = 0.7
+    max_tokens: int = DEFAULT_MAX_TOKENS
+    schema_format: Optional[str] = None  # None = auto-derive from provider
+
+    def get_schema(self) -> str:
+        return self.schema_format or _default_schema(self.provider)
+
+    def effective_max_tokens(self) -> int:
+        """
+        Return the effective max_tokens, capped by the model's known limit.
+        If the user asked for more than the model supports, silently cap it.
+        """
+        cap = get_model_max_tokens(self.model)
+        return min(self.max_tokens, cap)
+
+
 class LLMRouter:
     def __init__(self, config: LLMConfig):
         self.config = config
@@ -70,15 +126,12 @@ class LLMRouter:
         self.base_url = config.base_url or defaults["base_url"]
         self.model = config.model or defaults["model"]
 
-        # Resolve API key — prefer explicit config, then env var, then placeholder
         key_env = defaults.get("key_env")
         resolved_key = config.api_key or (os.getenv(key_env) if key_env else None)
-        # Ollama needs no key; for all others warn if missing
         if not resolved_key:
             if config.provider == "ollama":
                 resolved_key = "ollama"
             else:
-                # Will surface as a clear LLM ERROR rather than a cryptic 401
                 resolved_key = f"MISSING_{(key_env or 'API_KEY')}"
         self.api_key = resolved_key
 
@@ -92,17 +145,17 @@ class LLMRouter:
         return headers
 
     def _build_payload(self, messages: list, system: str = None, stream: bool = True) -> dict:
+        max_tok = self.config.effective_max_tokens()
         if self.config.get_schema() == SCHEMA_ANTHROPIC:
             payload = {
                 "model": self.model,
-                "max_tokens": self.config.max_tokens,
+                "max_tokens": max_tok,
                 "stream": stream,
                 "messages": messages,
             }
             if system:
                 payload["system"] = system
         else:
-            # OpenAI-compatible (DeepSeek, Ollama, OpenAI all use same format)
             all_messages = []
             if system:
                 all_messages.append({"role": "system", "content": system})
@@ -111,7 +164,7 @@ class LLMRouter:
                 "model": self.model,
                 "messages": all_messages,
                 "temperature": self.config.temperature,
-                "max_tokens": self.config.max_tokens,
+                "max_tokens": max_tok,
                 "stream": stream,
             }
         return payload

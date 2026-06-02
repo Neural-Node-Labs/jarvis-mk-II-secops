@@ -37,6 +37,9 @@ _SKILL_MODULES = [
     "skills.container_scanner",
     "skills.utility",
     "skills.file_streamer",   # ← chunked large-file writer (anti-truncation)
+    "skills.memory_skills",    # ← skills for interacting with user memory (read/write/search)
+    "skills.multimodal_analyzer",
+    "skills.image_vision_skill",
 ]
 
 

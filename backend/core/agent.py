@@ -3,142 +3,89 @@ Agent Core - Orchestrates LLM + Skills.
 Handles tool-call parsing, confirmation flow, streaming responses,
 and native ReAct (Reason+Act) loop with self-healing.
 
-version: 2.0.0
+version: 3.0.0
 changelog:
   1.0.0 - Initial agent with single Reason→Act cycle
   2.0.0 - Native ReAct loop: multi-iteration Reason→Act→Observe inside one
            chat_stream call. Self-healing on tool failure. react_status events.
            auto_confirm flag. Max-iteration safety cap.
+  3.0.0 - System prompt extracted to prompt_builder.py.
+           MemoryManager integration (auto-save history, on-demand retrieval).
+           File attachment support (text, PDF, image) injected into user messages.
 """
 import os
 import json
+import base64
 import logging
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 from core.llm_router import LLMRouter, LLMConfig
 from core.skill_registry import SkillRegistry
+from core.prompt_builder import build_system_prompt, AGENT_SYSTEM_PROMPT
+from core.memory_manager import MemoryManager, detect_retrieval_request
 
 logger = logging.getLogger("agent.core")
 
-# ── Max ReAct iterations — safety cap to prevent runaway loops ────────────────
+# ── Max ReAct iterations — safety cap to prevent runaway loops ─────────────────
 REACT_MAX_ITERATIONS = 30
 
-# ── Skill Manifest Loader ─────────────────────────────────────────────
-MANIFEST_PATH = os.path.join(os.path.dirname(__file__), ".", "skills_manifest.json")
-
-
-def _load_skills_manifest() -> str:
-    """Load the static skills manifest and return a formatted prompt section."""
-    try:
-        with open(MANIFEST_PATH, "r") as f:
-            manifest = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        logger.warning("skills_manifest.json not found — falling back to minimal skill list")
-        return ""
-
-    lines = []
-    # SecOps skills
-    lines.append("### SecOps Skills (Security Operations)")
-    for s in manifest.get("secops_skills", []):
-        actions = ", ".join(s.get("actions", ["run"]))
-        lines.append(f"- **{s['name']}**: {s['description']} (actions: {actions})")
-
-    lines.append("")
-    # System skills
-    lines.append("### System Skills")
-    for s in manifest.get("system_skills", []):
-        actions = ", ".join(s.get("actions", []))
-        lines.append(f"- **{s['name']}**: {s['description']} (actions: {actions})")
-
-    return "\n".join(lines)
-
-_SKILLS_MANIFEST_SECTION = _load_skills_manifest()
-
-# ── Keywords that signal the LLM considers the task complete ─────────────────
+# ── Completion signals ─────────────────────────────────────────────────────────
 COMPLETION_SIGNALS = [
     "task complete", "task is complete", "task completed",
     "all done", "finished", "i have completed", "successfully completed",
     "the task is done", "work is complete", "done.",
 ]
 
-
-skills_section = _SKILLS_MANIFEST_SECTION if _SKILLS_MANIFEST_SECTION else """
-### 1. filesystem
-Full host filesystem access.
-Actions: read_file, write_file, list_dir, delete, move, mkdir, search_files, stat
-Usage: SKILL:filesystem ACTION:read_file PARAMS:{"path": "/etc/hosts"}
-
-### 2. os_execution
-Full OS control — run commands, manage processes.
-Actions: run_command, list_processes, kill_process, send_signal, system_info, env_vars
-Usage: SKILL:os_execution ACTION:run_command PARAMS:{"command": "ls -la", "cwd": "/tmp"}
-
-### 3. cbd_architect
-CBD v2.2 methodology enforcer — Phase -1 clarification, Phase 0 Experienced lookup,
-Phase I blueprint, Phase II atomic implementation, Phase III knowledge capture.
-Actions:
-  analyze_request, generate_blueprint, implement_component, validate_component,
-  validate_blueprint, version_read,
-  experienced_lookup, experienced_capture, experienced_promote,
-  experienced_search, experienced_rebuild_index,
-  get_template, get_skills_registry
-Usage: SKILL:cbd_architect ACTION:analyze_request PARAMS:{"request": "Build a REST API..."}
-Usage: SKILL:cbd_architect ACTION:experienced_lookup PARAMS:{"task_context": {"symptom_observed": "error message here"}}
-
-### 4. file_streamer (Default skill for handling large file writes that exceed LLM token limits)
-Handles large file payloads by allowing chunked, segmented appending to bypass LLM max_token generation constraints. Essential for writing files that exceed single-turn output limits.
-Actions:
-    start_file, append_chunk, finalize_file
-Usage: SKILL:file_streamer ACTION:start_file PARAMS:{"filepath": "./output/large_script.py", "overwrite": true}
-Usage: SKILL:file_streamer ACTION:append_chunk PARAMS:{"filepath": "./output/large_script.py", "content": "def main():\n    print('Part 1 of code...')"}
-Usage: SKILL:file_streamer ACTION:finalize_file PARAMS:{"filepath": "./output/large_script.py"}
-
-"""
+# ── Singleton memory manager ───────────────────────────────────────────────────
+_memory = MemoryManager()
 
 
+def _format_attachment(attachment: dict) -> str:
+    """
+    Convert an uploaded file dict into an inline block for the LLM message.
 
-AGENT_SYSTEM_PROMPT = """You are Jarvis a powerful AI agent with access to the following skills:
+    Supported attachment dict keys:
+      name     : original filename
+      mime     : MIME type  (e.g. "text/plain", "image/png", "application/pdf")
+      size     : byte size (int)
+      content  : raw bytes  OR
+      text     : decoded text string (for text/* types)
+      b64      : base64-encoded string (for binary types)
+    """
+    name = attachment.get("name", "file")
+    mime = attachment.get("mime", "application/octet-stream")
+    size = attachment.get("size", 0)
 
-## Available Skills & Actions:
-
-""" + skills_section + """
-
-
-
-
-## Tool Call Format:
-When you need to use a skill, output EXACTLY this format on its own line:
-TOOL_CALL: {"skill": "skill_name", "action": "action_name", "params": {...}}
-
-## Core Behavioral Rules:
-1. NEVER make assumptions about ambiguous requests. Ask for clarification first.
-2. For CBD requests, ALWAYS use the cbd_architect skill — never freehand architecture.
-3. Before any destructive filesystem or OS action, warn the user what will happen.
-4. If a skill returns requires_confirm=true, present the confirmation prompt to the user clearly.
-5. Think step by step. Show your reasoning before tool calls.
-6. After receiving tool results, summarize what happened and what's next.
-
-## ReAct Mode Rules (when operating in ReAct loop):
-- After each tool result, reason about the outcome before deciding next action.
-- On tool failure: diagnose the root cause, adjust your approach, and retry with a corrected call.
-- When the task is fully complete, end your response with: TASK_COMPLETE
-- Do NOT output TASK_COMPLETE unless ALL objectives have been achieved and verified.
-- Each iteration should make measurable progress toward the goal.
-
-## Safety:
-- Destructive actions (file writes, deletes, shell commands, process kills) REQUIRE user confirmation
-  unless auto_confirm mode is active.
-- Always show the exact command/path before executing.
-- Never chain destructive actions without confirmation between each (unless auto_confirm is on).
-"""
+    if attachment.get("text"):
+        body = attachment["text"]
+        # Truncate very large text files
+        if len(body) > 8000:
+            body = body[:8000] + f"\n… [truncated — {len(attachment['text'])} chars total]"
+        return (
+            f"[FILE: {name} | type: {mime} | size: {size} bytes]\n"
+            f"{body}\n"
+            f"[/FILE]"
+        )
+    elif attachment.get("b64"):
+        # For images/PDFs we include base64; the LLM may or may not use it
+        b64_snippet = attachment["b64"][:200] + "…" if len(attachment["b64"]) > 200 else attachment["b64"]
+        return (
+            f"[FILE: {name} | type: {mime} | size: {size} bytes | encoding: base64]\n"
+            f"{b64_snippet}\n"
+            f"[/FILE]\n"
+            f"(Full base64 content available — treat as {mime} file)"
+        )
+    else:
+        return f"[FILE: {name} | type: {mime} | size: {size} bytes | content: unavailable]"
 
 
 class Agent:
-    def __init__(self, config: LLMConfig, registry: SkillRegistry):
+    def __init__(self, config: LLMConfig, registry: SkillRegistry, user_id: str = "default"):
         self.llm = LLMRouter(config)
         self.registry = registry
         self.conversation: list = []
-        self.pending_confirms: dict = {}  # confirm_id -> (skill, action, params)
+        self.pending_confirms: dict = {}   # confirm_id → (skill, action, params)
         self._confirm_counter: int = 0
+        self.user_id: str = user_id
 
     def reset(self):
         self.conversation = []
@@ -152,21 +99,39 @@ class Agent:
         user_message: str,
         react: bool = False,
         auto_confirm: bool = False,
+        attachments: Optional[list] = None,
     ) -> AsyncGenerator[dict, None]:
         """
         Main agent entry point.
 
-        react=False  → single Reason→Act cycle (original behaviour).
+        react=False  → single Reason→Act cycle.
         react=True   → full ReAct loop: Reason→Act→Observe, repeated until
                        TASK_COMPLETE signal or REACT_MAX_ITERATIONS reached.
-                       Self-heals on tool failure by injecting error observations.
         auto_confirm → skip confirmation gate for destructive actions.
+        attachments  → list of file dicts (name, mime, size, text|b64).
         """
+        # ── Build the enriched user message ───────────────────────────────────
+        enriched_message = user_message
+
+        # Inject file attachments
+        if attachments:
+            att_blocks = [_format_attachment(a) for a in attachments]
+            enriched_message = "\n\n".join(att_blocks) + "\n\n" + user_message
+
+        # ── Check for memory retrieval request ─────────────────────────────────
+        n = detect_retrieval_request(user_message)
+        system_prompt = AGENT_SYSTEM_PROMPT
+        if n is not None:
+            history = _memory.retrieve_last_n(self.user_id, n)
+            system_prompt = build_system_prompt(memory_context=history)
+            logger.info("Memory retrieval injected for user %s (%d turns)", self.user_id, n)
+
+        # ── Dispatch ───────────────────────────────────────────────────────────
         if react:
-            async for event in self._react_loop(user_message, auto_confirm):
+            async for event in self._react_loop(enriched_message, auto_confirm, system_prompt):
                 yield event
         else:
-            async for event in self._single_cycle(user_message, auto_confirm):
+            async for event in self._single_cycle(enriched_message, auto_confirm, system_prompt):
                 yield event
 
     async def confirm_action(self, confirm_id: str) -> AsyncGenerator[dict, None]:
@@ -198,15 +163,19 @@ class Agent:
     # ── Single cycle (original behaviour) ────────────────────────────────────
 
     async def _single_cycle(
-        self, user_message: str, auto_confirm: bool = False
+        self,
+        user_message: str,
+        auto_confirm: bool = False,
+        system_prompt: str = None,
     ) -> AsyncGenerator[dict, None]:
         """One Reason→Act cycle: LLM → tool calls → summary."""
+        sp = system_prompt or AGENT_SYSTEM_PROMPT
         self.conversation.append({"role": "user", "content": user_message})
 
         full_response, tool_calls_found = "", []
         yield {"type": "token", "data": ""}
 
-        async for token in self.llm.chat_stream(self.conversation, system=AGENT_SYSTEM_PROMPT):
+        async for token in self.llm.chat_stream(self.conversation, system=sp):
             full_response += token
             yield {"type": "token", "data": token}
             for call in self._extract_tool_calls(full_response):
@@ -215,30 +184,33 @@ class Agent:
 
         self.conversation.append({"role": "assistant", "content": full_response})
 
+        # ── Persist to memory ──────────────────────────────────────────────────
+        _memory.save_conversation_block(self.user_id, user_message, full_response)
+
         if tool_calls_found:
             for call in tool_calls_found:
-                async for event in self._execute_call(call, auto_confirm):
+                async for event in self._execute_call(call, auto_confirm, sp):
                     yield event
-
-                    # After a confirm_needed the loop pauses — frontend drives next step
                     if event.get("type") == "confirm_needed":
                         yield {"type": "done", "data": {}}
                         return
 
-                # Feed result back and get summary
-                last_result = self.conversation[-1]  # already appended by _execute_call
                 summary = ""
-                async for token in self.llm.chat_stream(self.conversation, system=AGENT_SYSTEM_PROMPT):
+                async for token in self.llm.chat_stream(self.conversation, system=sp):
                     summary += token
                     yield {"type": "token", "data": token}
                 self.conversation.append({"role": "assistant", "content": summary or "✓"})
+                _memory.save_turn(self.user_id, "assistant", summary or "✓")
 
         yield {"type": "done", "data": {}}
 
     # ── ReAct loop ────────────────────────────────────────────────────────────
 
     async def _react_loop(
-        self, user_message: str, auto_confirm: bool = False
+        self,
+        user_message: str,
+        auto_confirm: bool = False,
+        system_prompt: str = None,
     ) -> AsyncGenerator[dict, None]:
         """
         Full ReAct loop.
@@ -248,11 +220,10 @@ class Agent:
           2. Act     — execute any tool calls found
           3. Observe — inject results back as observations
           4. Repeat  — until TASK_COMPLETE or no tool calls or max iterations
-
-        Self-healing: on tool failure, observation includes the error and an
-        explicit instruction to diagnose and correct before retrying.
         """
+        sp = system_prompt or AGENT_SYSTEM_PROMPT
         self.conversation.append({"role": "user", "content": user_message})
+        _memory.save_turn(self.user_id, "user", user_message)
 
         for iteration in range(1, REACT_MAX_ITERATIONS + 1):
             yield {"type": "react_status", "data": {
@@ -266,7 +237,7 @@ class Agent:
             full_response, tool_calls_found = "", []
             yield {"type": "token", "data": ""}
 
-            async for token in self.llm.chat_stream(self.conversation, system=AGENT_SYSTEM_PROMPT):
+            async for token in self.llm.chat_stream(self.conversation, system=sp):
                 full_response += token
                 yield {"type": "token", "data": token}
                 for call in self._extract_tool_calls(full_response):
@@ -274,6 +245,7 @@ class Agent:
                         tool_calls_found.append(call)
 
             self.conversation.append({"role": "assistant", "content": full_response})
+            _memory.save_turn(self.user_id, "assistant", full_response)
 
             # ── Check for task completion signal ──────────────────────────────
             if self._is_complete(full_response):
@@ -322,7 +294,6 @@ class Agent:
                 )
 
                 if result.requires_confirm and not auto_confirm:
-                    # Pause loop — hand control back to user
                     self._confirm_counter += 1
                     confirm_id = f"{skill_name}:{action}:{self._confirm_counter}"
                     self.pending_confirms[confirm_id] = (skill_name, action, params)
@@ -333,7 +304,7 @@ class Agent:
                         "action": action,
                     }}
                     hit_confirm = True
-                    break  # exit tool loop — resume after user confirms
+                    break
 
                 result_dict = result.to_dict()
                 yield {"type": "tool_result", "data": result_dict}
@@ -344,7 +315,6 @@ class Agent:
                         f"{json.dumps(result_dict.get('output'), indent=2)}"
                     )
                 else:
-                    # Self-healing: rich error observation
                     obs = (
                         f"[OBSERVATION — {skill_name}.{action} ✗ FAILED]\n"
                         f"Error: {result_dict.get('error')}\n"
@@ -355,18 +325,16 @@ class Agent:
                     yield {"type": "react_status", "data": {
                         "iteration": iteration,
                         "max": REACT_MAX_ITERATIONS,
-                        "phase": f"tool failure — self-healing on next iter",
+                        "phase": "tool failure — self-healing on next iter",
                         "healing": True,
                     }}
 
                 observations.append(obs)
 
             if hit_confirm:
-                # Yield done so the frontend can re-engage after confirmation
                 yield {"type": "done", "data": {"react_paused": True, "iterations": iteration}}
                 return
 
-            # Inject all observations as a single user turn
             if observations:
                 combined = "\n\n".join(observations)
                 self.conversation.append({"role": "user", "content": combined})
@@ -387,9 +355,10 @@ class Agent:
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     async def _execute_call(
-        self, call: dict, auto_confirm: bool
+        self, call: dict, auto_confirm: bool, system_prompt: str = None
     ) -> AsyncGenerator[dict, None]:
         """Execute one tool call, yielding tool_call / confirm_needed / tool_result."""
+        sp = system_prompt or AGENT_SYSTEM_PROMPT
         skill_name = call.get("skill")
         action = call.get("action")
         params = call.get("params", {})
@@ -420,7 +389,6 @@ class Agent:
             self.conversation.append({"role": "user", "content": tool_context})
 
     def _is_complete(self, text: str) -> bool:
-        """Return True if the LLM signalled task completion."""
         lower = text.lower()
         if "task_complete" in text or "TASK_COMPLETE" in text:
             return True
@@ -429,7 +397,7 @@ class Agent:
     def _extract_tool_calls(self, text: str) -> list:
         """
         Parse TOOL_CALL: {...} blocks from LLM output.
-        Uses brace-counting instead of regex — handles nested JSON correctly.
+        Brace-counting instead of regex — handles nested JSON correctly.
         """
         calls = []
         marker = "TOOL_CALL:"
@@ -459,5 +427,3 @@ class Agent:
                 i += 1
             start = idx + 1
         return calls
-
-

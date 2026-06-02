@@ -24,30 +24,42 @@ const PROVIDERS = {
                keyLabel: "OPENAI_API_KEY", needsKey: true, needsUrl: false },
 };
 
+// ─── Model max token limits (mirrors backend MODEL_MAX_TOKENS) ────────────────
+const MODEL_MAX_TOKENS = {
+  "deepseek-chat": 8192, "deepseek-coder": 8192, "deepseek-v4-pro": 8192, "deepseek-v4-flash": 8192,
+  "claude-haiku-4-5": 8192, "claude-haiku-4-5-20251001": 8192,
+  "claude-sonnet-4-20250514": 16000, "claude-sonnet-4-5": 16000,
+  "claude-opus-4-5": 32000, "claude-opus-4-20250514": 32000,
+  "gpt-3.5-turbo": 4096, "gpt-4": 8192, "gpt-4-turbo": 4096,
+  "gpt-4o": 16384, "gpt-4o-mini": 16384,
+  "llama3": 4096, "llama3.1": 8192, "llama3.2": 8192,
+  "codellama": 4096, "mistral": 8192, "phi3": 4096, "gemma2": 8192,
+};
+const DEFAULT_MAX = 8192;
+function modelMax(model) { return MODEL_MAX_TOKENS[model] || DEFAULT_MAX; }
+
 const SCHEMA_DOCS = {
   openai: {
-    label: "OpenAI-compatible",
-    badge: "#74AA9C",
+    label: "OpenAI-compatible", badge: "#74AA9C",
     description: "Used by DeepSeek, Ollama, OpenAI. System prompt as first message. Responses via choices[0].delta.content.",
     fields: [
-      { name: "messages",    type: "array",   note: "First item is {role:system} for system prompt" },
-      { name: "model",       type: "string",  note: "Model name string" },
-      { name: "temperature", type: "float",   note: "0.0 – 2.0" },
-      { name: "max_tokens",  type: "integer", note: "Max output tokens" },
-      { name: "stream",      type: "boolean", note: "SSE: data: {...} lines, data: [DONE] to end" },
+      { name: "messages", type: "array", note: "First item is {role:system} for system prompt" },
+      { name: "model", type: "string", note: "Model name string" },
+      { name: "temperature", type: "float", note: "0.0 – 2.0" },
+      { name: "max_tokens", type: "integer", note: "Max output tokens" },
+      { name: "stream", type: "boolean", note: "SSE: data: {...} lines, data: [DONE] to end" },
     ],
     response: "choices[0].delta.content (stream) / choices[0].message.content (non-stream)",
   },
   anthropic: {
-    label: "Anthropic Messages API",
-    badge: "#CC785C",
+    label: "Anthropic Messages API", badge: "#CC785C",
     description: "Used exclusively by Anthropic. System prompt as top-level field. Responses via content_block_delta events.",
     fields: [
-      { name: "messages",    type: "array",   note: "Must strictly alternate user/assistant. No system role." },
-      { name: "system",      type: "string",  note: "Top-level field, not inside messages array" },
-      { name: "model",       type: "string",  note: "Model name string" },
-      { name: "max_tokens",  type: "integer", note: "Required. Max output tokens" },
-      { name: "stream",      type: "boolean", note: "SSE: event:/data: pairs. type=content_block_delta carries text." },
+      { name: "messages", type: "array", note: "Must strictly alternate user/assistant. No system role." },
+      { name: "system", type: "string", note: "Top-level field, not inside messages array" },
+      { name: "model", type: "string", note: "Model name string" },
+      { name: "max_tokens", type: "integer", note: "Required. Max output tokens" },
+      { name: "stream", type: "boolean", note: "SSE: event:/data: pairs. type=content_block_delta carries text." },
     ],
     response: "delta.text from content_block_delta events (stream) / content[0].text (non-stream)",
   },
@@ -58,6 +70,15 @@ const SKILL_COLORS = {
   os_execution:  { bg: "#2a1a1a", border: "#7a3a3a", icon: "⚙️" },
   cbd_architect: { bg: "#1a1a2a", border: "#3a3a7a", icon: "🏗️" },
 };
+
+const MIME_ICONS = {
+  "text/plain": "📄", "text/markdown": "📝", "text/csv": "📊",
+  "application/json": "📋", "application/pdf": "📕",
+  "image/png": "🖼️", "image/jpeg": "🖼️", "image/gif": "🖼️", "image/webp": "🖼️",
+};
+function mimeIcon(mime) {
+  return MIME_ICONS[mime] || (mime?.startsWith("image/") ? "🖼️" : mime?.startsWith("text/") ? "📄" : "📎");
+}
 
 // ─── Shared style tokens ───────────────────────────────────────────────────────
 const S = {
@@ -85,26 +106,58 @@ const S = {
 
 // ─── Toggle Checkbox ───────────────────────────────────────────────────────────
 const Toggle = ({ checked, onChange, label, color = "#4FFFFF", title }) => (
-  <label title={title} style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer",
-    userSelect: "none", fontFamily: "monospace", fontSize: 10, color: checked ? color : "#4a6a4a",
-    padding: "3px 8px", borderRadius: 4,
+  <label title={title} style={{
+    display: "flex", alignItems: "center", gap: 5, cursor: "pointer",
+    userSelect: "none", fontFamily: "monospace", fontSize: 10,
+    color: checked ? color : "#4a6a4a", padding: "3px 8px", borderRadius: 4,
     background: checked ? `${color}11` : "transparent",
     border: `1px solid ${checked ? color + "44" : "#2a3a2a"}`,
-    transition: "all 0.15s", whiteSpace: "nowrap" }}>
+    transition: "all 0.15s", whiteSpace: "nowrap",
+  }}>
     <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)}
       style={{ accentColor: color, width: 11, height: 11 }} />
     {label}
   </label>
 );
 
+// ─── AttachmentBadge ───────────────────────────────────────────────────────────
+const AttachmentBadge = ({ att, onRemove }) => (
+  <div style={{
+    display: "flex", alignItems: "center", gap: 5,
+    padding: "3px 8px", borderRadius: 4,
+    background: "#0a1a0a", border: "1px solid #2a5a2a",
+    color: "#7acc7a", fontSize: 10, fontFamily: "monospace", maxWidth: 200,
+  }}>
+    <span>{mimeIcon(att.mime)}</span>
+    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}
+      title={att.name}>{att.name}</span>
+    <span style={{ color: "#4a7a4a", whiteSpace: "nowrap" }}>
+      {att.size > 1024 ? `${(att.size / 1024).toFixed(1)}KB` : `${att.size}B`}
+    </span>
+    {onRemove && (
+      <button onClick={onRemove} style={{
+        background: "none", border: "none", color: "#5a3a3a",
+        cursor: "pointer", padding: 0, fontSize: 12, lineHeight: 1,
+      }}>✕</button>
+    )}
+  </div>
+);
+
 // ─── MessageBubble ─────────────────────────────────────────────────────────────
 const MessageBubble = ({ msg }) => {
   if (msg.role === "user") return (
     <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
-      <div style={{ background: "linear-gradient(135deg,#1a3a1a,#0a2a0a)", border: "1px solid #3a7a3a",
+      <div style={{
+        background: "linear-gradient(135deg,#1a3a1a,#0a2a0a)", border: "1px solid #3a7a3a",
         borderRadius: "12px 12px 2px 12px", padding: "10px 14px", maxWidth: "70%",
-        color: "#90ff90", fontFamily: "monospace", fontSize: 13, lineHeight: 1.6, wordBreak: "break-word" }}>
+        color: "#90ff90", fontFamily: "monospace", fontSize: 13, lineHeight: 1.6, wordBreak: "break-word",
+      }}>
         <span style={{ color: "#4a8a4a", fontSize: 10, display: "block", marginBottom: 4 }}>YOU</span>
+        {msg.attachments?.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 6 }}>
+            {msg.attachments.map((a, i) => <AttachmentBadge key={i} att={a} />)}
+          </div>
+        )}
         {msg.content}
       </div>
     </div>
@@ -128,8 +181,11 @@ const MessageBubble = ({ msg }) => {
   if (msg.role === "tool_result") {
     const ok = msg.data?.success;
     return (
-      <div style={{ marginBottom: 8, padding: "8px 12px", background: ok ? "#0d1f0d" : "#1f0d0d",
-        border: `1px solid ${ok ? "#2a5a2a" : "#5a2a2a"}`, borderRadius: 6 }}>
+      <div style={{
+        marginBottom: 8, padding: "8px 12px",
+        background: ok ? "#0d1f0d" : "#1f0d0d",
+        border: `1px solid ${ok ? "#2a5a2a" : "#5a2a2a"}`, borderRadius: 6,
+      }}>
         <span style={{ color: ok ? "#4a9a4a" : "#9a4a4a", fontSize: 11, fontFamily: "monospace" }}>
           {ok ? "✓ RESULT" : "✗ ERROR"}
         </span>
@@ -140,10 +196,11 @@ const MessageBubble = ({ msg }) => {
     );
   }
 
-  // React mode status message
   if (msg.role === "react_status") return (
-    <div style={{ marginBottom: 6, padding: "5px 12px", background: "#0a1a2a",
-      border: "1px solid #2a4a7a", borderRadius: 4, display: "flex", alignItems: "center", gap: 8 }}>
+    <div style={{
+      marginBottom: 6, padding: "5px 12px", background: "#0a1a2a",
+      border: "1px solid #2a4a7a", borderRadius: 4, display: "flex", alignItems: "center", gap: 8,
+    }}>
       <span style={{ color: "#4a9aff", fontSize: 10, fontFamily: "monospace" }}>
         🔁 ReAct [{msg.iteration}] — {msg.phase}
       </span>
@@ -153,12 +210,19 @@ const MessageBubble = ({ msg }) => {
 
   if (msg.role === "assistant") return (
     <div style={{ display: "flex", gap: 10, marginBottom: 12, alignItems: "flex-start" }}>
-      <div style={{ width: 28, height: 28, borderRadius: "50%", flexShrink: 0,
-        background: "linear-gradient(135deg,#4FFFFF22,#4FFFFF44)", border: "1px solid #4FFFFF66",
-        display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, color: "#4FFFFF" }}>A</div>
-      <div style={{ background: "#0a0f0a", border: "1px solid #1a2a1a", borderRadius: "2px 12px 12px 12px",
-        padding: "10px 14px", maxWidth: "80%", color: "#d4e8d4", fontFamily: "monospace",
-        fontSize: 13, lineHeight: 1.7, wordBreak: "break-word", whiteSpace: "pre-wrap" }}>
+      <div style={{
+        width: 28, height: 28, borderRadius: "50%", flexShrink: 0,
+        background: "linear-gradient(135deg,#4FFFFF22,#4FFFFF44)",
+        border: "1px solid #4FFFFF66",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: 12, color: "#4FFFFF",
+      }}>A</div>
+      <div style={{
+        background: "#0a0f0a", border: "1px solid #1a2a1a",
+        borderRadius: "2px 12px 12px 12px", padding: "10px 14px", maxWidth: "80%",
+        color: "#d4e8d4", fontFamily: "monospace", fontSize: 13, lineHeight: 1.7,
+        wordBreak: "break-word", whiteSpace: "pre-wrap",
+      }}>
         {msg.content}
         {msg.streaming && <span style={{ animation: "blink 1s infinite", color: "#4FFFFF" }}>▋</span>}
       </div>
@@ -170,17 +234,26 @@ const MessageBubble = ({ msg }) => {
 
 // ─── ConfirmDialog ─────────────────────────────────────────────────────────────
 const ConfirmDialog = ({ confirm, onConfirm, onCancel }) => (
-  <div style={{ margin: "12px 0", padding: 16, background: "linear-gradient(135deg,#2a1a0a,#1a0a00)",
-    border: "2px solid #ff6a00", borderRadius: 8 }}>
-    <div style={{ color: "#ff9a44", fontFamily: "monospace", fontSize: 12, marginBottom: 8 }}>⚠️ CONFIRMATION REQUIRED</div>
-    <div style={{ color: "#ffcc88", fontFamily: "monospace", fontSize: 13, marginBottom: 12, lineHeight: 1.5 }}>{confirm.prompt}</div>
+  <div style={{
+    margin: "12px 0", padding: 16,
+    background: "linear-gradient(135deg,#2a1a0a,#1a0a00)",
+    border: "2px solid #ff6a00", borderRadius: 8,
+  }}>
+    <div style={{ color: "#ff9a44", fontFamily: "monospace", fontSize: 12, marginBottom: 8 }}>
+      ⚠️ CONFIRMATION REQUIRED
+    </div>
+    <div style={{ color: "#ffcc88", fontFamily: "monospace", fontSize: 13, marginBottom: 12, lineHeight: 1.5 }}>
+      {confirm.prompt}
+    </div>
     <div style={{ display: "flex", gap: 8 }}>
       <button onClick={() => onConfirm(confirm.confirm_id)} style={{
         padding: "6px 16px", background: "#7a0000", border: "1px solid #ff3333",
-        color: "#ffaaaa", borderRadius: 4, cursor: "pointer", fontFamily: "monospace", fontSize: 12 }}>✓ CONFIRM EXECUTE</button>
+        color: "#ffaaaa", borderRadius: 4, cursor: "pointer", fontFamily: "monospace", fontSize: 12,
+      }}>✓ CONFIRM EXECUTE</button>
       <button onClick={() => onCancel(confirm.confirm_id)} style={{
         padding: "6px 16px", background: "#1a1a1a", border: "1px solid #555",
-        color: "#aaa", borderRadius: 4, cursor: "pointer", fontFamily: "monospace", fontSize: 12 }}>✗ CANCEL</button>
+        color: "#aaa", borderRadius: 4, cursor: "pointer", fontFamily: "monospace", fontSize: 12,
+      }}>✗ CANCEL</button>
     </div>
   </div>
 );
@@ -198,11 +271,9 @@ const SchemaViewer = ({ schema }) => {
       <div style={{ color: "#5a8a5a", fontSize: 10, fontFamily: "monospace", marginBottom: 6 }}>REQUEST FIELDS</div>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: "monospace" }}>
         <thead>
-          <tr>
-            {["field","type","note"].map(h => (
-              <th key={h} style={{ textAlign: "left", color: "#3a6a3a", paddingBottom: 4, paddingRight: 12 }}>{h.toUpperCase()}</th>
-            ))}
-          </tr>
+          <tr>{["field","type","note"].map(h => (
+            <th key={h} style={{ textAlign: "left", color: "#3a6a3a", paddingBottom: 4, paddingRight: 12 }}>{h.toUpperCase()}</th>
+          ))}</tr>
         </thead>
         <tbody>
           {doc.fields.map(f => (
@@ -220,7 +291,204 @@ const SchemaViewer = ({ schema }) => {
   );
 };
 
-// ─── Settings Tab (full page) ─────────────────────────────────────────────────
+// ─── Inline Model Switcher (in chat header) ───────────────────────────────────
+const InlineModelSwitcher = ({ providerInfo, onChanged }) => {
+  const [open, setOpen] = useState(false);
+  const [provider, setProvider] = useState(providerInfo.provider || "deepseek");
+  const [model, setModel] = useState(providerInfo.model || "deepseek-chat");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const ref = useRef(null);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  useEffect(() => {
+    setProvider(providerInfo.provider || "deepseek");
+    setModel(providerInfo.model || "deepseek-chat");
+  }, [providerInfo]);
+
+  const prov = PROVIDERS[provider] || PROVIDERS.deepseek;
+  const maxTok = modelMax(model);
+
+  const handleSwitch = async () => {
+    setSaving(true);
+    try {
+      const res = await fetch(`${API_URL}/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, model, max_tokens: maxTok }),
+      });
+      const data = await res.json();
+      if (data.status === "ok") {
+        setSaved(true);
+        onChanged(data);
+        setTimeout(() => { setSaved(false); setOpen(false); }, 1200);
+      }
+    } catch {}
+    setSaving(false);
+  };
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button onClick={() => setOpen(v => !v)} style={{
+        padding: "2px 8px", borderRadius: 3, cursor: "pointer", fontSize: 10,
+        background: `${prov.color}11`, border: `1px solid ${prov.color}44`,
+        color: prov.color, fontFamily: "monospace", display: "flex", alignItems: "center", gap: 4,
+      }}>
+        {providerInfo.provider?.toUpperCase()} / {providerInfo.model}
+        <span style={{ fontSize: 8, opacity: 0.6 }}>▼</span>
+      </button>
+
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 50,
+          background: "#060c06", border: "1px solid #2a4a2a", borderRadius: 8,
+          padding: 14, minWidth: 300, boxShadow: "0 8px 32px #000a",
+        }}>
+          <div style={{ color: "#4FFFFF", fontSize: 11, fontFamily: "monospace", marginBottom: 10, letterSpacing: 1 }}>
+            QUICK MODEL SWITCH
+          </div>
+
+          {/* Provider selector */}
+          <div style={{ marginBottom: 10 }}>
+            <span style={S.label}>PROVIDER</span>
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+              {Object.entries(PROVIDERS).map(([key, p]) => (
+                <button key={key} onClick={() => { setProvider(key); setModel(p.models[0]); }} style={{
+                  padding: "3px 9px", borderRadius: 3, cursor: "pointer",
+                  background: provider === key ? `${p.color}22` : "#0d150d",
+                  border: `1px solid ${provider === key ? p.color : "#2a4a2a"}`,
+                  color: provider === key ? p.color : "#4a6a4a",
+                  fontFamily: "monospace", fontSize: 10,
+                }}>{p.label}</button>
+              ))}
+            </div>
+          </div>
+
+          {/* Model selector */}
+          <div style={{ marginBottom: 10 }}>
+            <span style={S.label}>MODEL</span>
+            <select value={model} onChange={e => setModel(e.target.value)} style={S.select}>
+              {prov.models.map(m => (
+                <option key={m} value={m}>{m} (max {(modelMax(m) / 1000).toFixed(0)}K tokens)</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Token info */}
+          <div style={{
+            padding: "6px 10px", borderRadius: 4, background: "#0a1a0a",
+            border: "1px solid #1a3a1a", marginBottom: 10,
+            fontSize: 10, fontFamily: "monospace", color: "#5a8a5a",
+          }}>
+            Max output tokens: <span style={{ color: "#4FFFFF" }}>{maxTok.toLocaleString()}</span>
+            {" "}· Wire schema: <span style={{ color: prov.color }}>{prov.schema}</span>
+          </div>
+
+          <button onClick={handleSwitch} disabled={saving} style={{
+            width: "100%", padding: "7px 0", borderRadius: 4, cursor: saving ? "not-allowed" : "pointer",
+            background: saved ? "#0a2a0a" : `${prov.color}22`,
+            border: `1px solid ${saved ? "#4a9a4a" : prov.color}`,
+            color: saved ? "#4a9a4a" : prov.color,
+            fontFamily: "monospace", fontSize: 11, fontWeight: "bold",
+          }}>
+            {saving ? "SWITCHING…" : saved ? "✓ SWITCHED" : "SWITCH MODEL"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── Memory Panel ─────────────────────────────────────────────────────────────
+const MemoryPanel = ({ onClose }) => {
+  const [history, setHistory] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [n, setN] = useState(20);
+  const [userId] = useState("default");
+  const [clearing, setClearing] = useState(false);
+  const [cleared, setCleared] = useState(false);
+
+  const load = async (count) => {
+    setLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/memory/${userId}?n=${count}`);
+      const data = await res.json();
+      setHistory(data.history || "_No history found._");
+    } catch {
+      setHistory("_Error loading history._");
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(n); }, []);
+
+  const handleClear = async () => {
+    setClearing(true);
+    try {
+      await fetch(`${API_URL}/memory/${userId}`, { method: "DELETE" });
+      setCleared(true);
+      setHistory("_History cleared._");
+      setTimeout(() => setCleared(false), 2000);
+    } catch {}
+    setClearing(false);
+  };
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "#040a04ee", zIndex: 60,
+      display: "flex", flexDirection: "column", fontFamily: "monospace",
+    }}>
+      <div style={{
+        padding: "14px 24px", borderBottom: "1px solid #1a2a1a", background: "#060c06",
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        position: "sticky", top: 0,
+      }}>
+        <div style={{ color: "#4FFFFF", fontSize: 14, fontWeight: "bold", letterSpacing: 2 }}>
+          🧠 MEMORY HISTORY
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={{ color: "#3a5a3a", fontSize: 10 }}>Show last</span>
+          <select value={n} onChange={e => { setN(+e.target.value); load(+e.target.value); }}
+            style={{ ...S.select, width: 80, padding: "3px 6px" }}>
+            {[10,20,50,100].map(v => <option key={v} value={v}>{v}</option>)}
+          </select>
+          <span style={{ color: "#3a5a3a", fontSize: 10 }}>turns</span>
+          <button onClick={handleClear} disabled={clearing} style={{
+            padding: "4px 12px", background: "#2a0a0a", border: "1px solid #5a2a2a",
+            color: cleared ? "#4a9a4a" : "#aa5a5a", borderRadius: 4,
+            cursor: clearing ? "not-allowed" : "pointer", fontSize: 10,
+          }}>
+            {cleared ? "✓ CLEARED" : clearing ? "CLEARING…" : "🗑 CLEAR"}
+          </button>
+          <button onClick={onClose} style={{
+            background: "none", border: "1px solid #2a4a2a", color: "#7aaa7a",
+            padding: "4px 14px", borderRadius: 4, cursor: "pointer", fontSize: 11,
+          }}>✕ CLOSE</button>
+        </div>
+      </div>
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "20px 32px", maxWidth: 860, margin: "0 auto", width: "100%" }}>
+        {loading ? (
+          <div style={{ color: "#2a5a2a", padding: 20, textAlign: "center" }}>Loading history…</div>
+        ) : (
+          <pre style={{
+            color: "#8acc8a", fontFamily: "monospace", fontSize: 12, lineHeight: 1.8,
+            whiteSpace: "pre-wrap", wordBreak: "break-word",
+          }}>{history}</pre>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ─── Settings Tab ─────────────────────────────────────────────────────────────
 const SettingsTab = ({ onClose, onSaved }) => {
   const [cfg, setCfg] = useState(null);
   const [provider, setProvider] = useState("deepseek");
@@ -229,7 +497,7 @@ const SettingsTab = ({ onClose, onSaved }) => {
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [temperature, setTemperature] = useState(0.7);
-  const [maxTokens, setMaxTokens] = useState(4096);
+  const [maxTokens, setMaxTokens] = useState(DEFAULT_MAX);
   const [schemaOverride, setSchemaOverride] = useState(false);
   const [schemaFormat, setSchemaFormat] = useState("openai");
   const [saving, setSaving] = useState(false);
@@ -239,34 +507,38 @@ const SettingsTab = ({ onClose, onSaved }) => {
   const [activeSchemaTab, setActiveSchemaTab] = useState("openai");
 
   useEffect(() => {
-    fetch(`${API_URL}/config`)
-      .then(r => r.json())
-      .then(data => {
-        setCfg(data);
-        setProvider(data.provider || "deepseek");
-        setModel(data.model || "deepseek-v4-pro");
-        setBaseUrl(data.base_url || "");
-        setTemperature(data.temperature ?? 0.7);
-        setMaxTokens(data.max_tokens ?? 8000);
-        setSchemaOverride(data.schema_override || false);
-        setSchemaFormat(data.schema_format || "openai");
-        setActiveSchemaTab(data.schema_format || "openai");
-      })
-      .catch(() => setError("Could not load current config from backend."));
+    fetch(`${API_URL}/config`).then(r => r.json()).then(data => {
+      setCfg(data);
+      setProvider(data.provider || "deepseek");
+      setModel(data.model || "deepseek-v4-pro");
+      setBaseUrl(data.base_url || "");
+      setTemperature(data.temperature ?? 0.7);
+      setMaxTokens(data.max_tokens ?? DEFAULT_MAX);
+      setSchemaOverride(data.schema_override || false);
+      setSchemaFormat(data.schema_format || "openai");
+      setActiveSchemaTab(data.schema_format || "openai");
+    }).catch(() => setError("Could not load current config from backend."));
   }, []);
 
   const prov = PROVIDERS[provider] || PROVIDERS.deepseek;
-  const activeSchema = schemaOverride ? schemaFormat : (prov.schema);
+  const activeSchema = schemaOverride ? schemaFormat : prov.schema;
   const isCustomModel = model === "__custom__";
+  const currentModelMax = modelMax(isCustomModel ? customModel : model);
 
   const handleProviderChange = (p) => {
     const pd = PROVIDERS[p];
     setProvider(p);
     setModel(pd.models[0]);
     setCustomModel("");
+    setMaxTokens(modelMax(pd.models[0]));
     if (!schemaOverride) setActiveSchemaTab(pd.schema);
     setApiKey("");
     setBaseUrl(pd.needsUrl ? (p === "ollama" ? "http://localhost:11434" : "") : "");
+  };
+
+  const handleModelChange = (m) => {
+    setModel(m);
+    if (m !== "__custom__") setMaxTokens(modelMax(m));
   };
 
   const handleSave = async () => {
@@ -275,8 +547,7 @@ const SettingsTab = ({ onClose, onSaved }) => {
     if (!finalModel) { setError("Model name is required."); setSaving(false); return; }
     try {
       const payload = {
-        provider,
-        model: finalModel,
+        provider, model: finalModel,
         api_key: apiKey || undefined,
         base_url: baseUrl || undefined,
         temperature: parseFloat(temperature),
@@ -291,7 +562,7 @@ const SettingsTab = ({ onClose, onSaved }) => {
       const data = await res.json();
       if (data.status === "ok") {
         setSaved(true);
-        setActiveSchemaTab(data.schema_format);
+        setActiveSchemaTab(data.schema_format || prov.schema);
         onSaved(data);
         setTimeout(() => setSaved(false), 3000);
       } else {
@@ -304,15 +575,16 @@ const SettingsTab = ({ onClose, onSaved }) => {
   };
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "#040a04", zIndex: 50, overflowY: "auto",
-      fontFamily: "monospace" }}>
-      <div style={{ padding: "14px 24px", borderBottom: "1px solid #1a2a1a", background: "#060c06",
-        display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 10 }}>
+    <div style={{ position: "fixed", inset: 0, background: "#040a04", zIndex: 50, overflowY: "auto", fontFamily: "monospace" }}>
+      <div style={{
+        padding: "14px 24px", borderBottom: "1px solid #1a2a1a", background: "#060c06",
+        display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 10,
+      }}>
         <div style={{ color: "#4FFFFF", fontSize: 14, fontWeight: "bold", letterSpacing: 2 }}>⚙ SETTINGS</div>
-        <button onClick={onClose} style={{ background: "none", border: "1px solid #2a4a2a",
-          color: "#7aaa7a", padding: "4px 14px", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>
-          ✕ CLOSE
-        </button>
+        <button onClick={onClose} style={{
+          background: "none", border: "1px solid #2a4a2a",
+          color: "#7aaa7a", padding: "4px 14px", borderRadius: 4, cursor: "pointer", fontSize: 11,
+        }}>✕ CLOSE</button>
       </div>
 
       <div style={{ maxWidth: 760, margin: "0 auto", padding: "24px 24px 48px" }}>
@@ -339,16 +611,21 @@ const SettingsTab = ({ onClose, onSaved }) => {
         <div style={S.row}>
           <span style={S.label}>MODEL</span>
           <select value={isCustomModel ? "__custom__" : model}
-            onChange={e => { setModel(e.target.value); if (e.target.value !== "__custom__") setCustomModel(""); }}
+            onChange={e => handleModelChange(e.target.value)}
             style={S.select}>
-            {prov.models.map(m => <option key={m} value={m}>{m}</option>)}
+            {prov.models.map(m => (
+              <option key={m} value={m}>{m} — max {(modelMax(m) / 1000).toFixed(0)}K tokens</option>
+            ))}
             <option value="__custom__">— custom model name —</option>
           </select>
           {isCustomModel && (
             <input value={customModel} onChange={e => setCustomModel(e.target.value)}
-              placeholder="Enter exact model name..."
+              placeholder="Enter exact model name…"
               style={{ ...S.input, marginTop: 6 }} />
           )}
+          <div style={{ color: "#3a5a3a", fontSize: 10, marginTop: 4 }}>
+            Model max output tokens: <span style={{ color: "#4FFFFF" }}>{currentModelMax.toLocaleString()}</span>
+          </div>
         </div>
 
         {prov.needsKey && (
@@ -357,16 +634,17 @@ const SettingsTab = ({ onClose, onSaved }) => {
             <div style={{ display: "flex", gap: 6 }}>
               <input value={apiKey} onChange={e => setApiKey(e.target.value)}
                 type={showKey ? "text" : "password"}
-                placeholder={cfg?.key_configured ? "Key is set — enter new key to replace" : `Paste ${prov.keyLabel} here (or set env var)`}
+                placeholder={cfg?.key_configured ? "Key is set — enter new key to replace" : `Paste ${prov.keyLabel} here`}
                 style={{ ...S.input, flex: 1 }} />
               <button onClick={() => setShowKey(v => !v)} style={{
                 background: "#0d150d", border: "1px solid #2a4a2a", color: "#7a9a7a",
-                padding: "0 10px", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>
+                padding: "0 10px", borderRadius: 4, cursor: "pointer", fontSize: 11,
+              }}>
                 {showKey ? "HIDE" : "SHOW"}
               </button>
             </div>
             <div style={{ color: "#3a5a3a", fontSize: 10, marginTop: 4 }}>
-              Not saved to disk. Set <code style={{ color: "#7a9a7a" }}>{prov.keyLabel}</code> env var to avoid re-entering on restart.
+              Not saved to disk. Set <code style={{ color: "#7a9a7a" }}>{prov.keyLabel}</code> env var to avoid re-entering.
             </div>
           </div>
         )}
@@ -377,16 +655,13 @@ const SettingsTab = ({ onClose, onSaved }) => {
             <input value={baseUrl} onChange={e => setBaseUrl(e.target.value)}
               placeholder={provider === "ollama" ? "http://localhost:11434" : "https://api.example.com/v1"}
               style={S.input} />
-            <div style={{ color: "#3a5a3a", fontSize: 10, marginTop: 4 }}>
-              {provider === "ollama" ? "Ollama runs locally. In Docker use http://ollama:11434" : "Leave blank to use provider default endpoint."}
-            </div>
           </div>
         )}
 
         <div style={S.sectionTitle}>GENERATION PARAMETERS</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <div style={S.row}>
-            <span style={S.label}>TEMPERATURE  <span style={{ color: "#4a7a4a" }}>{temperature}</span></span>
+            <span style={S.label}>TEMPERATURE <span style={{ color: "#4a7a4a" }}>{temperature}</span></span>
             <input type="range" min="0" max="2" step="0.05" value={temperature}
               onChange={e => setTemperature(parseFloat(e.target.value))}
               style={{ width: "100%", accentColor: prov.color }} />
@@ -395,9 +670,16 @@ const SettingsTab = ({ onClose, onSaved }) => {
             </div>
           </div>
           <div style={S.row}>
-            <span style={S.label}>MAX TOKENS</span>
-            <input type="number" value={maxTokens} onChange={e => setMaxTokens(parseInt(e.target.value) || 1024)}
-              min="256" max="32768" step="256" style={S.input} />
+            <span style={S.label}>
+              MAX TOKENS
+              <span style={{ color: "#3a6a3a", marginLeft: 6 }}>(model cap: {currentModelMax.toLocaleString()})</span>
+            </span>
+            <input type="number" value={maxTokens}
+              onChange={e => setMaxTokens(Math.min(parseInt(e.target.value) || 256, currentModelMax))}
+              min="256" max={currentModelMax} step="256" style={S.input} />
+            <div style={{ color: "#3a5a3a", fontSize: 10, marginTop: 4 }}>
+              Auto-set to model maximum when switching models. Capped server-side.
+            </div>
           </div>
         </div>
 
@@ -411,8 +693,7 @@ const SettingsTab = ({ onClose, onSaved }) => {
 
         <div style={{ background: "#080e08", border: "1px solid #1a3a1a", borderRadius: 6, padding: 12, marginBottom: 12 }}>
           <div style={{ fontSize: 11, color: "#6a9a6a", lineHeight: 1.6 }}>
-            The wire schema controls how requests are built and responses parsed.
-            Auto-detection picks the correct schema from the provider.
+            The wire schema controls how requests are built and responses parsed. Auto-detection picks the correct schema from the provider.
           </div>
           <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 10 }}>
             <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", color: "#7a9a7a", fontSize: 11 }}>
@@ -465,7 +746,7 @@ const SettingsTab = ({ onClose, onSaved }) => {
           }}>
             {saving ? "SAVING…" : "APPLY & SAVE"}
           </button>
-          {saved && <span style={{ color: "#4a9a4a", fontSize: 11 }}>✓ Saved. API key must be re-entered on restart.</span>}
+          {saved && <span style={{ color: "#4a9a4a", fontSize: 11 }}>✓ Saved.</span>}
           {error && <span style={{ color: "#9a4a4a", fontSize: 11 }}>✗ {error}</span>}
         </div>
 
@@ -475,10 +756,9 @@ const SettingsTab = ({ onClose, onSaved }) => {
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: 10, fontFamily: "monospace" }}>
               {[
                 ["provider", cfg.provider], ["model", cfg.model],
-                ["schema_format", cfg.schema_format], ["schema_override", cfg.schema_override ? "yes" : "auto"],
-                ["temperature", cfg.temperature], ["max_tokens", cfg.max_tokens],
+                ["schema_format", cfg.schema_format], ["max_tokens", cfg.max_tokens],
+                ["model_max_tokens", cfg.model_max_tokens ?? "—"], ["temperature", cfg.temperature],
                 ["api key", cfg.key_configured ? "● configured" : "✗ not set"],
-                ["base_url", cfg.base_url || "(default)"],
               ].map(([k,v]) => (
                 <div key={k}>
                   <span style={{ color: "#3a5a3a" }}>{k}: </span>
@@ -501,14 +781,20 @@ export default function App() {
   const [streaming, setStreaming] = useState(false);
   const [pendingConfirms, setPendingConfirms] = useState([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
   const [providerInfo, setProviderInfo] = useState({ provider: "deepseek", model: "deepseek-chat", schema_format: "openai" });
   const [skills, setSkills] = useState([]);
 
-  // ── New feature flags ──
-  const [autoConfirm, setAutoConfirm] = useState(false);   // auto-confirm destructive actions
-  const [reactMode, setReactMode] = useState(false);        // ReAct self-healing loop
-  const reactIterRef = useRef(0);                           // iteration counter for ReAct
-  const reactActiveRef = useRef(false);                     // prevent overlapping loops
+  // ── Upload state ──
+  const [attachments, setAttachments] = useState([]);  // staged files ready to send
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef(null);
+
+  // ── Mode flags ──
+  const [autoConfirm, setAutoConfirm] = useState(false);
+  const [reactMode, setReactMode] = useState(false);
+  const reactIterRef = useRef(0);
+  const reactActiveRef = useRef(false);
 
   const wsRef = useRef(null);
   const bottomRef = useRef(null);
@@ -545,25 +831,48 @@ export default function App() {
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
-  // ── Send a raw WS message, returns a Promise that resolves on "done" ──────────
-  const sendWS = useCallback((payload) => {
-    return new Promise((resolve) => {
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-        resolve({ error: "not_connected" });
-        return;
+  // ── File upload handler ────────────────────────────────────────────────────
+  const handleFileSelect = useCallback(async (files) => {
+    if (!files?.length) return;
+    setUploading(true);
+    const results = [];
+    for (const file of Array.from(files)) {
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const res = await fetch(`${API_URL}/upload`, { method: "POST", body: fd });
+        if (res.ok) {
+          const data = await res.json();
+          results.push(data);
+        } else {
+          const err = await res.json().catch(() => ({}));
+          setMessages(prev => [...prev, {
+            role: "assistant",
+            content: `❌ Upload failed for "${file.name}": ${err.detail || res.statusText}`,
+          }]);
+        }
+      } catch (e) {
+        setMessages(prev => [...prev, {
+          role: "assistant",
+          content: `❌ Upload error for "${file.name}": ${e.message}`,
+        }]);
       }
-      wsRef.current.send(JSON.stringify(payload));
-      // Resolve when the agent signals completion
-      const unsub = () => { handleEventRef._doneCallbacks = (handleEventRef._doneCallbacks || []).filter(cb => cb !== unsub_inner); };
-      const unsub_inner = (evt) => { if (evt.type === "done") { unsub(); resolve(evt); } };
-      handleEventRef._doneCallbacks = [...(handleEventRef._doneCallbacks || []), unsub_inner];
-    });
+    }
+    setAttachments(prev => [...prev, ...results]);
+    setUploading(false);
   }, []);
 
+  const handleDrop = useCallback((e) => {
+    e.preventDefault();
+    handleFileSelect(e.dataTransfer.files);
+  }, [handleFileSelect]);
+
+  const handleDragOver = useCallback((e) => { e.preventDefault(); }, []);
+
+  // ── WS event handler ──────────────────────────────────────────────────────
   const handleEvent = useCallback((event) => {
     const { type, data } = event;
 
-    // Fire any done-callbacks registered by sendWS
     if (type === "done" && handleEventRef._doneCallbacks?.length) {
       handleEventRef._doneCallbacks.forEach(cb => cb(event));
     }
@@ -584,11 +893,9 @@ export default function App() {
     } else if (type === "tool_result") {
       setMessages(prev => [...prev, { role: "tool_result", data }]);
     } else if (type === "confirm_needed") {
-      // Auto-confirm if flag is on — fire and forget, no dialog shown
       if (autoConfirmRef.current) {
         setMessages(prev => [...prev, {
-          role: "tool_call", skill: data.skill, action: data.action, params: {},
-          confirmed: true,
+          role: "tool_call", skill: data.skill, action: data.action, params: {}, confirmed: true,
         }]);
         wsRef.current?.send(JSON.stringify({ type: "confirm", confirm_id: data.confirm_id }));
       } else {
@@ -596,42 +903,57 @@ export default function App() {
       }
     } else if (type === "confirm_cancelled") {
       setPendingConfirms(prev => prev.filter(c => c.confirm_id !== data));
+    } else if (type === "react_status") {
+      reactIterRef.current = data.iteration || reactIterRef.current;
     } else if (type === "error") {
       setMessages(prev => [...prev, { role: "assistant", content: `❌ Error: ${data}` }]);
       setStreaming(false);
     }
   }, []);
 
-  // Keep autoConfirm accessible in the ws callback without re-registering
   const autoConfirmRef = useRef(autoConfirm);
   useEffect(() => { autoConfirmRef.current = autoConfirm; }, [autoConfirm]);
-
   handleEventRef.current = handleEvent;
 
-  // ── Core send ─────────────────────────────────────────────────────────────────
+  // ── Core send ──────────────────────────────────────────────────────────────
   const sendMessage = useCallback((overrideMsg) => {
     const msg = (overrideMsg ?? input).trim();
-    if (!msg || streaming) return;
+    if (!msg && !attachments.length) return;
+    if (streaming) return;
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setMessages(prev => [...prev, {
         role: "assistant",
         content: "⚠️ Not connected to backend. Check that the backend is running, then try again.",
-        streaming: false,
       }]);
       return;
     }
-    if (!overrideMsg) setInput("");
-    setMessages(prev => [...prev, { role: "user", content: msg }]);
-    wsRef.current.send(JSON.stringify({ type: "chat", message: msg }));
-  }, [input, streaming]);
 
-  // ── Continue button — sends "continue" nudge to keep agent going ──────────────
+    const displayMsg = msg || (attachments.length ? `[Sent ${attachments.length} file(s)]` : "");
+    if (!overrideMsg) setInput("");
+
+    // Snapshot and clear staged attachments
+    const toSend = [...attachments];
+    setAttachments([]);
+
+    setMessages(prev => [...prev, {
+      role: "user",
+      content: displayMsg,
+      attachments: toSend.length ? toSend : undefined,
+    }]);
+
+    wsRef.current.send(JSON.stringify({
+      type: "chat",
+      message: msg,
+      attachments: toSend.length ? toSend : undefined,
+    }));
+  }, [input, streaming, attachments]);
+
   const sendContinue = useCallback(() => {
     if (streaming) return;
     sendMessage("continue");
   }, [sendMessage, streaming]);
 
-  // ── ReAct loop — runs Reason→Act cycles until task complete or max iterations ──
+  // ── ReAct loop ─────────────────────────────────────────────────────────────
   const MAX_REACT_ITER = 10;
   const startReactLoop = useCallback(async (initialMsg) => {
     if (reactActiveRef.current) return;
@@ -639,14 +961,17 @@ export default function App() {
     reactIterRef.current = 0;
 
     const msg = (initialMsg ?? input).trim();
-    if (!msg) { reactActiveRef.current = false; return; }
-    if (!overrideMsg_guard(msg)) { reactActiveRef.current = false; return; }
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      reactActiveRef.current = false; return;
-    }
+    if (!msg || streaming) { reactActiveRef.current = false; return; }
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) { reactActiveRef.current = false; return; }
 
     setInput("");
-    setMessages(prev => [...prev, { role: "user", content: msg }]);
+    const toSend = [...attachments];
+    setAttachments([]);
+
+    setMessages(prev => [...prev, {
+      role: "user", content: msg,
+      attachments: toSend.length ? toSend : undefined,
+    }]);
 
     let lastError = null;
     let continueLoop = true;
@@ -657,75 +982,57 @@ export default function App() {
       const isHealing = lastError !== null;
 
       setMessages(prev => [...prev, {
-        role: "react_status",
-        iteration: iter,
+        role: "react_status", iteration: iter,
         phase: isHealing ? "self-healing → retrying" : "reasoning",
         healing: isHealing,
       }]);
 
-      // Build prompt — on error, inject self-healing instruction
       const prompt = isHealing
-        ? `The previous attempt encountered an error: "${lastError}". Analyze what went wrong, correct your approach, and try again to complete the original task.`
+        ? `The previous attempt encountered an error: "${lastError}". Analyze what went wrong, correct your approach, and retry.`
         : (iter === 1 ? msg : "continue");
 
-      // Wait for agent to finish this cycle
       await new Promise((resolve) => {
         let resolved = false;
         const finish = () => { if (!resolved) { resolved = true; resolve(); } };
-
         setStreaming(true);
-        wsRef.current.send(JSON.stringify({ type: "chat", message: prompt }));
 
-        // Listen for done or error
+        wsRef.current.send(JSON.stringify({
+          type: "chat",
+          message: prompt,
+          attachments: iter === 1 && toSend.length ? toSend : undefined,
+        }));
+
         const origHandler = handleEventRef.current;
         handleEventRef.current = (event) => {
           origHandler(event);
-          if (event.type === "done") {
-            setStreaming(false);
-            finish();
-          } else if (event.type === "error") {
-            lastError = event.data;
-            setStreaming(false);
-            finish();
-          } else if (event.type === "tool_result") {
-            // Track errors from tool results for self-healing
+          if (event.type === "done") { setStreaming(false); finish(); }
+          else if (event.type === "error") { lastError = event.data; setStreaming(false); finish(); }
+          else if (event.type === "tool_result") {
             if (!event.data?.success) lastError = event.data?.error || "Tool execution failed";
             else lastError = null;
           }
         };
-
-        // Safety timeout per iteration (120s)
         setTimeout(finish, 120000);
       });
 
-      // Decide whether to continue: stop if no error and agent signals completion
-      // (heuristic: if last assistant message contains completion keywords)
       const lastMsg = messages[messages.length - 1];
       const lastContent = lastMsg?.content?.toLowerCase() || "";
       const taskComplete = !lastError && (
-        lastContent.includes("task complete") ||
-        lastContent.includes("done") ||
-        lastContent.includes("finished") ||
-        lastContent.includes("completed") ||
+        lastContent.includes("task complete") || lastContent.includes("done") ||
+        lastContent.includes("finished") || lastContent.includes("completed") ||
         iter >= MAX_REACT_ITER
       );
-
       if (taskComplete) continueLoop = false;
     }
 
     setMessages(prev => [...prev, {
-      role: "react_status",
-      iteration: reactIterRef.current,
+      role: "react_status", iteration: reactIterRef.current,
       phase: reactIterRef.current >= MAX_REACT_ITER ? `max iterations (${MAX_REACT_ITER}) reached` : "task complete ✓",
       healing: false,
     }]);
-
     reactActiveRef.current = false;
     setStreaming(false);
-  }, [input, messages]);
-
-  // Guard: don't start react loop if already streaming or input empty
-  function overrideMsg_guard(msg) { return !!(msg && !streaming); }
+  }, [input, streaming, attachments, messages]);
 
   const handleConfirm = (id) => {
     setPendingConfirms(prev => prev.filter(c => c.confirm_id !== id));
@@ -739,17 +1046,20 @@ export default function App() {
   const handleReset = async () => {
     reactActiveRef.current = false;
     await fetch(`${API_URL}/reset`, { method: "POST" }).catch(() => {});
-    setMessages([]); setPendingConfirms([]);
+    setMessages([]); setPendingConfirms([]); setAttachments([]);
   };
 
   const pColor = PROVIDERS[providerInfo.provider]?.color || "#4FFFFF";
   const schemaColor = SCHEMA_DOCS[providerInfo.schema_format]?.badge || "#888";
-  const canSend = !streaming && !!input.trim();
+  const canSend = !streaming && (!!input.trim() || attachments.length > 0);
   const canContinue = !streaming && connected;
 
   return (
-    <div style={{ minHeight: "100vh", background: "#040a04", display: "flex",
-      flexDirection: "column", fontFamily: "monospace" }}>
+    <div
+      style={{ minHeight: "100vh", background: "#040a04", display: "flex", flexDirection: "column", fontFamily: "monospace" }}
+      onDrop={handleDrop}
+      onDragOver={handleDragOver}
+    >
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
         * { box-sizing: border-box; }
@@ -764,28 +1074,39 @@ export default function App() {
       `}</style>
 
       {/* ── Header ── */}
-      <div style={{ padding: "10px 20px", borderBottom: "1px solid #1a2a1a", background: "#060c06",
+      <div style={{
+        padding: "10px 20px", borderBottom: "1px solid #1a2a1a", background: "#060c06",
         display: "flex", alignItems: "center", justifyContent: "space-between",
-        position: "sticky", top: 0, zIndex: 10 }}>
-
+        position: "sticky", top: 0, zIndex: 10,
+      }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <span style={{ color: "#4FFFFF", fontSize: 15, fontWeight: "bold", letterSpacing: 2 }}>◈ JARVIS</span>
-          <span style={{ padding: "2px 7px", borderRadius: 3, fontSize: 10,
+          <span style={{
+            padding: "2px 7px", borderRadius: 3, fontSize: 10,
             background: connected ? "#0a1f0a" : "#1f0a0a",
             border: `1px solid ${connected ? "#2a5a2a" : "#5a2a2a"}`,
             color: connected ? "#4a9a4a" : "#9a4a4a",
-            animation: connected ? "pulse 2s infinite" : "none" }}>
+            animation: connected ? "pulse 2s infinite" : "none",
+          }}>
             {connected ? "● LIVE" : "○ OFFLINE"}
           </span>
-          <span style={{ padding: "2px 7px", borderRadius: 3, fontSize: 10,
-            background: `${pColor}11`, border: `1px solid ${pColor}44`, color: pColor }}>
-            {providerInfo.provider?.toUpperCase()} / {providerInfo.model}
-          </span>
+
+          {/* Inline model switcher */}
+          <InlineModelSwitcher
+            providerInfo={providerInfo}
+            onChanged={(data) => {
+              setProviderInfo(prev => ({ ...prev, ...data }));
+              fetch(`${API_URL}/config`).then(r => r.json()).then(setProviderInfo).catch(() => {});
+            }}
+          />
+
           <span title={`Wire schema: ${SCHEMA_DOCS[providerInfo.schema_format]?.label}`}
-            style={{ padding: "2px 7px", borderRadius: 3, fontSize: 9,
-              background: `${schemaColor}11`, border: `1px solid ${schemaColor}44`, color: schemaColor, cursor: "default" }}>
+            style={{
+              padding: "2px 7px", borderRadius: 3, fontSize: 9,
+              background: `${schemaColor}11`, border: `1px solid ${schemaColor}44`,
+              color: schemaColor, cursor: "default",
+            }}>
             {providerInfo.schema_format || "openai"}
-            {providerInfo.schema_override && " ⚡"}
           </span>
         </div>
 
@@ -793,18 +1114,26 @@ export default function App() {
           {skills.map(s => {
             const sc = SKILL_COLORS[s.name] || { border: "#555", icon: "🔧" };
             return (
-              <span key={s.name} title={s.description} style={{ padding: "2px 7px", borderRadius: 3,
-                border: `1px solid ${sc.border}`, color: sc.border, fontSize: 9, cursor: "default" }}>
+              <span key={s.name} title={s.description} style={{
+                padding: "2px 7px", borderRadius: 3,
+                border: `1px solid ${sc.border}`, color: sc.border, fontSize: 9, cursor: "default",
+              }}>
                 {sc.icon} {s.name}
               </span>
             );
           })}
-          <button onClick={() => setSettingsOpen(true)} style={{ padding: "4px 12px",
-            background: "#0f1f0f", border: "1px solid #2a4a2a",
-            color: "#7aaa7a", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>⚙ SETTINGS</button>
-          <button onClick={handleReset} style={{ padding: "4px 12px",
-            background: "#1f0f0f", border: "1px solid #4a2a2a",
-            color: "#aa7a7a", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>↺ RESET</button>
+          <button onClick={() => setMemoryOpen(true)} style={{
+            padding: "4px 12px", background: "#0f1a1f", border: "1px solid #2a4a5a",
+            color: "#5a9aaa", borderRadius: 4, cursor: "pointer", fontSize: 11,
+          }}>🧠 MEMORY</button>
+          <button onClick={() => setSettingsOpen(true)} style={{
+            padding: "4px 12px", background: "#0f1f0f", border: "1px solid #2a4a2a",
+            color: "#7aaa7a", borderRadius: 4, cursor: "pointer", fontSize: 11,
+          }}>⚙ SETTINGS</button>
+          <button onClick={handleReset} style={{
+            padding: "4px 12px", background: "#1f0f0f", border: "1px solid #4a2a2a",
+            color: "#aa7a7a", borderRadius: 4, cursor: "pointer", fontSize: 11,
+          }}>↺ RESET</button>
         </div>
       </div>
 
@@ -816,14 +1145,20 @@ export default function App() {
             <div style={{ color: "#4FFFFF44", fontSize: 14, marginBottom: 8 }}>AGENT READY</div>
             <div style={{ color: "#2a5a2a", fontSize: 12, lineHeight: 2 }}>
               Provider: {providerInfo.provider} / {providerInfo.model} · Schema: {providerInfo.schema_format}<br/>
-              <span style={{ color: "#3a7a3a" }}>Configure provider, API key, and schema in ⚙ SETTINGS</span>
+              <span style={{ color: "#3a7a3a" }}>Click the model badge in the header to switch models · Use 📎 to attach files</span>
             </div>
             <div style={{ marginTop: 16, display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
-              {["List files in my home directory","Show running processes",
-                "Build a REST API using CBD methodology","What's my system info?"].map(s => (
+              {[
+                "List files in my home directory",
+                "Show running processes",
+                "Build a REST API using CBD methodology",
+                "What's my system info?",
+                "Retrieve last 10 conversations",
+              ].map(s => (
                 <button key={s} onClick={() => setInput(s)} style={{
                   padding: "6px 14px", background: "#0a1a0a", border: "1px solid #1a3a1a",
-                  color: "#5a9a5a", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>{s}</button>
+                  color: "#5a9a5a", borderRadius: 4, cursor: "pointer", fontSize: 11,
+                }}>{s}</button>
               ))}
             </div>
           </div>
@@ -837,52 +1172,94 @@ export default function App() {
 
         {streaming && (
           <div style={{ color: "#2a5a2a", fontSize: 11, padding: "4px 38px", animation: "pulse 1s infinite" }}>
-            {reactMode && reactActiveRef.current ? `🔁 ReAct iter ${reactIterRef.current} — thinking...` : "◈ thinking..."}
+            {reactMode && reactActiveRef.current
+              ? `🔁 ReAct iter ${reactIterRef.current} — thinking...`
+              : "◈ thinking..."}
           </div>
         )}
         <div ref={bottomRef} />
       </div>
 
-      {/* ── Input bar ── */}
-      <div style={{ borderTop: "1px solid #1a2a1a", background: "#060c06",
-        maxWidth: 900, width: "100%", margin: "0 auto", position: "sticky", bottom: 0 }}>
+      {/* ── Input area ── */}
+      <div style={{
+        borderTop: "1px solid #1a2a1a", background: "#060c06",
+        maxWidth: 900, width: "100%", margin: "0 auto", position: "sticky", bottom: 0,
+      }}>
+        {/* Staged attachments row */}
+        {attachments.length > 0 && (
+          <div style={{ padding: "8px 16px 0", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ color: "#3a5a3a", fontSize: 10, fontFamily: "monospace" }}>📎 ATTACHED:</span>
+            {attachments.map((att, i) => (
+              <AttachmentBadge key={i} att={att} onRemove={() => setAttachments(prev => prev.filter((_, j) => j !== i))} />
+            ))}
+          </div>
+        )}
 
-        {/* ── Mode toggles row ── */}
+        {/* Mode toggles */}
         <div style={{ padding: "8px 16px 0", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <Toggle
-            checked={autoConfirm}
-            onChange={setAutoConfirm}
-            color="#ffaa44"
+          <Toggle checked={autoConfirm} onChange={setAutoConfirm} color="#ffaa44"
             label="⚡ Auto-confirm"
-            title="Automatically approve all destructive actions without prompting. Use with caution."
-          />
-          <Toggle
-            checked={reactMode}
-            onChange={setReactMode}
-            color="#4a9aff"
+            title="Automatically approve all destructive actions without prompting. Use with caution." />
+          <Toggle checked={reactMode} onChange={setReactMode} color="#4a9aff"
             label="🔁 ReAct"
-            title="Enable self-healing ReAct loop: agent will reason, act, observe results, and self-correct errors automatically until the task is complete."
-          />
+            title="Enable self-healing ReAct loop." />
           {reactMode && (
             <span style={{ color: "#4a9aff66", fontSize: 9, fontFamily: "monospace" }}>
-              max {MAX_REACT_ITER} iterations · auto self-corrects on error
+              max {MAX_REACT_ITER} iterations · auto self-corrects
             </span>
           )}
           {autoConfirm && (
             <span style={{ color: "#ffaa4466", fontSize: 9, fontFamily: "monospace" }}>
-              ⚠ destructive actions will execute without confirmation
+              ⚠ destructive actions execute without confirmation
+            </span>
+          )}
+          {uploading && (
+            <span style={{ color: "#4FFFFF66", fontSize: 9, fontFamily: "monospace", animation: "pulse 1s infinite" }}>
+              ⬆ uploading…
             </span>
           )}
         </div>
 
-        {/* ── Textarea + buttons row ── */}
+        {/* Textarea + buttons */}
         <div style={{ padding: "8px 16px 12px" }}>
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-            <div style={{ flex: 1, border: `1px solid ${reactMode ? "#2a4a7a" : "#2a4a2a"}`, borderRadius: 8,
+            {/* Attach button */}
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+              title="Attach file (text, PDF, image)"
+              style={{
+                padding: "10px 12px", borderRadius: 8, fontSize: 14,
+                background: attachments.length ? "#0a1a0a" : "#0a0a0a",
+                border: `1px solid ${attachments.length ? "#2a5a2a" : "#2a2a2a"}`,
+                color: attachments.length ? "#4a9a4a" : "#4a4a4a",
+                cursor: uploading ? "not-allowed" : "pointer",
+                position: "relative",
+              }}>
+              📎
+              {attachments.length > 0 && (
+                <span style={{
+                  position: "absolute", top: -4, right: -4,
+                  background: "#4a9a4a", color: "#040a04",
+                  borderRadius: "50%", width: 14, height: 14,
+                  fontSize: 9, display: "flex", alignItems: "center", justifyContent: "center",
+                  fontFamily: "monospace", fontWeight: "bold",
+                }}>{attachments.length}</span>
+              )}
+            </button>
+            <input ref={fileInputRef} type="file" multiple
+              accept=".txt,.md,.py,.js,.ts,.json,.csv,.yaml,.yml,.html,.xml,.pdf,image/*"
+              style={{ display: "none" }}
+              onChange={e => { handleFileSelect(e.target.files); e.target.value = ""; }} />
+
+            {/* Textarea */}
+            <div style={{
+              flex: 1, border: `1px solid ${reactMode ? "#2a4a7a" : "#2a4a2a"}`, borderRadius: 8,
               background: "#0a0f0a", overflow: "hidden",
               boxShadow: streaming ? (reactMode ? "0 0 8px #4a9aff22" : "0 0 8px #4FFFFF22") : "none",
               transition: "box-shadow 0.3s, border-color 0.3s",
-              animation: reactMode && reactActiveRef.current ? "react-pulse 2s infinite" : "none" }}>
+              animation: reactMode && reactActiveRef.current ? "react-pulse 2s infinite" : "none",
+            }}>
               <textarea value={input} onChange={e => setInput(e.target.value)}
                 onKeyDown={e => {
                   if (e.key === "Enter" && !e.shiftKey) {
@@ -890,29 +1267,38 @@ export default function App() {
                     reactMode ? startReactLoop() : sendMessage();
                   }
                 }}
+                onPaste={e => {
+                  // Paste file support
+                  const items = Array.from(e.clipboardData?.items || []);
+                  const fileItems = items.filter(it => it.kind === "file");
+                  if (fileItems.length) {
+                    e.preventDefault();
+                    handleFileSelect(fileItems.map(it => it.getAsFile()).filter(Boolean));
+                  }
+                }}
                 placeholder={reactMode
-                  ? "Describe task for ReAct agent... (will self-heal on errors)"
-                  : "Ask the agent anything... (Shift+Enter for newline)"}
-                rows={1} style={{ width: "100%", padding: "10px 14px", background: "transparent",
+                  ? "Describe task for ReAct agent… (self-heals on errors)"
+                  : attachments.length
+                    ? "Add a message about the attached file(s)… (optional)"
+                    : "Ask the agent anything… (Shift+Enter for newline · drag & drop files)"}
+                rows={1} style={{
+                  width: "100%", padding: "10px 14px", background: "transparent",
                   border: "none", color: "#90ff90", fontFamily: "inherit", fontSize: 13,
-                  resize: "none", lineHeight: 1.5, minHeight: 42 }} />
+                  resize: "none", lineHeight: 1.5, minHeight: 42,
+                }} />
             </div>
 
             {/* Continue button */}
-            <button
-              onClick={sendContinue}
-              disabled={!canContinue}
-              title="Send 'continue' to nudge the agent to keep going"
+            <button onClick={sendContinue} disabled={!canContinue}
+              title="Send 'continue' to nudge the agent"
               style={{
-                padding: "10px 12px", borderRadius: 8, fontSize: 12, transition: "all 0.2s",
+                padding: "10px 12px", borderRadius: 8, fontSize: 12,
                 background: canContinue ? "#0a1a2a" : "#0a0a0a",
                 border: `1px solid ${canContinue ? "#2a5a9a" : "#2a2a2a"}`,
                 color: canContinue ? "#6a9aff" : "#3a3a3a",
                 cursor: canContinue ? "pointer" : "not-allowed",
                 whiteSpace: "nowrap", fontFamily: "monospace",
-              }}>
-              ▷▷
-            </button>
+              }}>▷▷</button>
 
             {/* Send button */}
             <button
@@ -920,7 +1306,7 @@ export default function App() {
               disabled={!canSend}
               title={reactMode ? "Start ReAct loop" : "Send message"}
               style={{
-                padding: "10px 18px", borderRadius: 8, fontSize: 16, transition: "all 0.2s",
+                padding: "10px 18px", borderRadius: 8, fontSize: 16,
                 background: canSend
                   ? (reactMode ? "linear-gradient(135deg,#0a2a4a,#0a1a3a)" : "linear-gradient(135deg,#1a3a1a,#0a2a0a)")
                   : "#0a0a0a",
@@ -932,15 +1318,15 @@ export default function App() {
             </button>
           </div>
 
-          <div style={{ color: "#1a3a1a", fontSize: 10, marginTop: 5, display: "flex", gap: 16 }}>
-            <span>Enter to send · Shift+Enter newline</span>
+          <div style={{ color: "#1a3a1a", fontSize: 10, marginTop: 5, display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <span>Enter to send · Shift+Enter newline · 📎 or drag & drop to attach</span>
             {autoConfirm && <span style={{ color: "#5a4a1a" }}>⚡ auto-confirm ON</span>}
-            {reactMode && <span style={{ color: "#1a3a5a" }}>🔁 ReAct ON — self-healing enabled</span>}
+            {reactMode && <span style={{ color: "#1a3a5a" }}>🔁 ReAct ON</span>}
           </div>
         </div>
       </div>
 
-      {/* ── Settings overlay ── */}
+      {/* ── Overlays ── */}
       {settingsOpen && (
         <SettingsTab
           onClose={() => setSettingsOpen(false)}
@@ -950,6 +1336,7 @@ export default function App() {
           }}
         />
       )}
+      {memoryOpen && <MemoryPanel onClose={() => setMemoryOpen(false)} />}
     </div>
   );
 }
