@@ -1,19 +1,20 @@
 """
-Skills package — auto-registers all 21 SecOps skills into a SkillRegistry.
+Skills package — auto-loads all registered skill modules.
 
-Usage:
-    from skill_registry import SkillRegistry
-    from skills import load_all_skills
-
-    registry = SkillRegistry()
-    load_all_skills(registry)
-    # registry now has all 21 skills ready
+To add a new skill:
+  1. Create skills/<your_skill>.py with a `register(registry)` hook.
+  2. Append the dotted module path to _SKILL_MODULES below.
 """
 
-from core.skill_registry import SkillRegistry, SkillResult
+import importlib
+import logging
 
+logger = logging.getLogger("skills")
+
+# ---------------------------------------------------------------------------
+# Canonical list of skill modules.  Order is preserved but not significant.
+# ---------------------------------------------------------------------------
 _SKILL_MODULES = [
-    # NETWORK
     "skills.port_scanner",
     "skills.dns_lookup",
     "skills.whois_lookup",
@@ -21,31 +22,40 @@ _SKILL_MODULES = [
     "skills.http_header_analyzer",
     "skills.network_recon",
     "skills.dns_security",
-    # THREAT
     "skills.cve_lookup",
     "skills.ip_reputation",
     "skills.hash_lookup",
     "skills.ioc_extractor",
-    # ANALYSIS
     "skills.log_analyzer",
     "skills.vulnerability_scorer",
     "skills.vulnerability_assessment",
     "skills.web_app_scanner",
     "skills.api_security_audit",
     "skills.firewall_auditor",
-    # CLOUD / CONTAINER
+    "skills.password_audit",
     "skills.cloud_posture",
     "skills.container_scanner",
-    # AUTH
-    "skills.password_audit",
-    # UTILITY
     "skills.utility",
+    "skills.file_streamer",   # ← chunked large-file writer (anti-truncation)
 ]
 
 
-def load_all_skills(registry: SkillRegistry) -> None:
-    """Import every skill module and call its register(registry) function."""
-    import importlib
-    for mod_name in _SKILL_MODULES:
-        mod = importlib.import_module(mod_name)
-        mod.register(registry)
+def load_all_skills(registry) -> None:
+    """
+    Dynamically import every module in _SKILL_MODULES and call its
+    ``register(registry)`` hook.  Import errors are logged but do not
+    abort the remaining modules.
+    """
+    for module_path in _SKILL_MODULES:
+        try:
+            module = importlib.import_module(module_path)
+            if hasattr(module, "register"):
+                module.register(registry)
+                logger.info("Loaded skill module: %s", module_path)
+            else:
+                logger.warning(
+                    "Skill module '%s' has no register() hook — skipped.",
+                    module_path,
+                )
+        except ImportError as exc:
+            logger.error("Failed to import skill module '%s': %s", module_path, exc)

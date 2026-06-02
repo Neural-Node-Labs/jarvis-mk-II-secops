@@ -244,10 +244,10 @@ const SettingsTab = ({ onClose, onSaved }) => {
       .then(data => {
         setCfg(data);
         setProvider(data.provider || "deepseek");
-        setModel(data.model || "deepseek-chat");
+        setModel(data.model || "deepseek-v4-pro");
         setBaseUrl(data.base_url || "");
         setTemperature(data.temperature ?? 0.7);
-        setMaxTokens(data.max_tokens ?? 4096);
+        setMaxTokens(data.max_tokens ?? 8000);
         setSchemaOverride(data.schema_override || false);
         setSchemaFormat(data.schema_format || "openai");
         setActiveSchemaTab(data.schema_format || "openai");

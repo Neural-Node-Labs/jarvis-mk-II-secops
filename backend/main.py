@@ -62,13 +62,15 @@ _default_provider = _persisted.get("provider", "deepseek")
 _defaults = PROVIDER_DEFAULTS.get(_default_provider, PROVIDER_DEFAULTS["deepseek"])
 _key_env = _defaults.get("key_env") or ""
 
+MAX_TOKENS = 8000
+
 current_config = LLMConfig(
     provider=_default_provider,
     model=_persisted.get("model") or _defaults.get("model", "deepseek-chat"),
     api_key=os.getenv(_key_env, ""),
     base_url=_persisted.get("base_url") or _defaults.get("base_url", ""),
     temperature=_persisted.get("temperature", 0.7),
-    max_tokens=_persisted.get("max_tokens", 4096),
+    max_tokens=_persisted.get("max_tokens", MAX_TOKENS),
     schema_format=_persisted.get("schema_format"),
 )
 
@@ -84,6 +86,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AI Agent API", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
+
 # --- Models ---
 class ConfigUpdate(BaseModel):
     provider: str
@@ -91,7 +94,7 @@ class ConfigUpdate(BaseModel):
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     temperature: Optional[float] = 0.7
-    max_tokens: Optional[int] = 4096
+    max_tokens: Optional[int] = MAX_TOKENS
     schema_format: Optional[str] = None
 
 class ConfirmRequest(BaseModel):
@@ -159,6 +162,7 @@ async def ws_evolution(ws: WebSocket):
     except WebSocketDisconnect:
         logger.info("Evolution WS disconnected")
 
+
 # --- REST ---
 @app.get("/api/skills")
 async def list_skills():
@@ -173,13 +177,15 @@ async def update_config(config: ConfigUpdate):
         provider=config.provider, model=config.model or defaults.get("model", ""),
         api_key=config.api_key or os.getenv(key_env, ""),
         base_url=config.base_url or defaults.get("base_url", ""),
-        temperature=config.temperature or 0.7, max_tokens=config.max_tokens or 4096,
+        temperature=config.temperature or 0.7, max_tokens=config.max_tokens or MAX_TOKENS,
         schema_format=config.schema_format,
     )
     current_config = new_config
     agent = Agent(current_config, registry)
     _save_settings(config)
     return {"status": "ok", "provider": config.provider, "model": new_config.model}
+
+
 
 @app.get("/api/config")
 async def get_config():

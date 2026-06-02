@@ -20,7 +20,7 @@ from core.skill_registry import SkillRegistry
 logger = logging.getLogger("agent.core")
 
 # ── Max ReAct iterations — safety cap to prevent runaway loops ────────────────
-REACT_MAX_ITERATIONS = 10
+REACT_MAX_ITERATIONS = 30
 
 # ── Skill Manifest Loader ─────────────────────────────────────────────
 MANIFEST_PATH = os.path.join(os.path.dirname(__file__), ".", "skills_manifest.json")
@@ -83,6 +83,15 @@ Actions:
   get_template, get_skills_registry
 Usage: SKILL:cbd_architect ACTION:analyze_request PARAMS:{"request": "Build a REST API..."}
 Usage: SKILL:cbd_architect ACTION:experienced_lookup PARAMS:{"task_context": {"symptom_observed": "error message here"}}
+
+### 4. file_streamer (Default skill for handling large file writes that exceed LLM token limits)
+Handles large file payloads by allowing chunked, segmented appending to bypass LLM max_token generation constraints. Essential for writing files that exceed single-turn output limits.
+Actions:
+    start_file, append_chunk, finalize_file
+Usage: SKILL:file_streamer ACTION:start_file PARAMS:{"filepath": "./output/large_script.py", "overwrite": true}
+Usage: SKILL:file_streamer ACTION:append_chunk PARAMS:{"filepath": "./output/large_script.py", "content": "def main():\n    print('Part 1 of code...')"}
+Usage: SKILL:file_streamer ACTION:finalize_file PARAMS:{"filepath": "./output/large_script.py"}
+
 """
 
 

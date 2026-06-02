@@ -2,31 +2,90 @@
   "version": "1.0.0",
   "last_updated": "2025-01-01",
   "secops_skills": [
-    {"name": "port_scanner", "description": "Scan TCP ports on a target host", "actions": ["run"]},
-    {"name": "dns_lookup", "description": "DNS record resolution (A, AAAA, MX, TXT, etc.)", "actions": ["run"]},
-    {"name": "whois_lookup", "description": "WHOIS domain/IP ownership lookup", "actions": ["run"]},
-    {"name": "ssl_cert_inspector", "description": "Inspect SSL/TLS certificates", "actions": ["run"]},
-    {"name": "http_header_analyzer", "description": "Analyze HTTP response headers for security", "actions": ["run"]},
-    {"name": "network_recon", "description": "Full network reconnaissance", "actions": ["run"]},
-    {"name": "dns_security", "description": "DNS security checks (zone transfer, DNSSEC, etc.)", "actions": ["run"]},
-    {"name": "cve_lookup", "description": "Look up CVE details from NVD/NIST API", "actions": ["run"]},
-    {"name": "ip_reputation", "description": "Check IP reputation against threat feeds", "actions": ["run"]},
-    {"name": "hash_lookup", "description": "File hash lookups (MD5, SHA1, SHA256)", "actions": ["run"]},
-    {"name": "ioc_extractor", "description": "Extract Indicators of Compromise from text", "actions": ["run"]},
-    {"name": "log_analyzer", "description": "Parse and analyze log files", "actions": ["run"]},
-    {"name": "vulnerability_scorer", "description": "Score vulnerabilities by severity", "actions": ["run"]},
-    {"name": "vulnerability_assessment", "description": "Full vulnerability assessment", "actions": ["run"]},
-    {"name": "web_app_scanner", "description": "Scan web applications for vulnerabilities", "actions": ["run"]},
-    {"name": "api_security_audit", "description": "Audit API security posture", "actions": ["run"]},
-    {"name": "firewall_auditor", "description": "Analyze firewall rules and configurations", "actions": ["run"]},
-    {"name": "password_audit", "description": "Password strength and policy auditing", "actions": ["run"]},
-    {"name": "cloud_posture", "description": "Assess cloud security posture", "actions": ["run"]},
-    {"name": "container_scanner", "description": "Scan container images for vulnerabilities", "actions": ["run"]},
-    {"name": "utility", "description": "General utility functions", "actions": ["run"]}
-  ],
-  "system_skills": [
-    {"name": "filesystem", "description": "Full host filesystem access", "actions": ["read_file", "write_file", "list_dir", "delete", "move", "mkdir", "search_files", "stat"]},
-    {"name": "os_execution", "description": "Full OS control — run commands, manage processes", "actions": ["run_command", "list_processes", "kill_process", "send_signal", "system_info", "env_vars"]},
-    {"name": "cbd_architect", "description": "CBD v2.2 methodology enforcer", "actions": ["analyze_request", "generate_blueprint", "implement_component", "validate_component", "validate_blueprint", "version_read", "experienced_lookup", "experienced_capture", "experienced_promote", "experienced_search", "experienced_rebuild_index", "get_template", "get_skills_registry"]}
+    {"name": "port_scanner",           "description": "Scan TCP ports on a target host",                            "actions": ["run"]},
+    {"name": "dns_lookup",             "description": "DNS record resolution (A, AAAA, MX, TXT, etc.)",             "actions": ["run"]},
+    {"name": "whois_lookup",           "description": "WHOIS domain/IP ownership lookup",                           "actions": ["run"]},
+    {"name": "ssl_cert_inspector",     "description": "Inspect SSL/TLS certificates",                               "actions": ["run"]},
+    {"name": "http_header_analyzer",   "description": "Analyze HTTP response headers for security",                 "actions": ["run"]},
+    {"name": "network_recon",          "description": "Full network reconnaissance",                                "actions": ["run"]},
+    {"name": "dns_security",           "description": "DNS security checks (zone transfer, DNSSEC, etc.)",          "actions": ["run"]},
+    {"name": "cve_lookup",             "description": "Look up CVE details from NVD/NIST API",                      "actions": ["run"]},
+    {"name": "ip_reputation",          "description": "Check IP reputation against threat feeds",                   "actions": ["run"]},
+    {"name": "hash_lookup",            "description": "File hash lookups (MD5, SHA1, SHA256)",                      "actions": ["run"]},
+    {"name": "ioc_extractor",          "description": "Extract Indicators of Compromise from text",                 "actions": ["run"]},
+    {"name": "log_analyzer",           "description": "Parse and analyze log files",                                "actions": ["run"]},
+    {"name": "vulnerability_scorer",   "description": "Score vulnerabilities by severity",                          "actions": ["run"]},
+    {"name": "vulnerability_assessment","description": "Full vulnerability assessment",                             "actions": ["run"]},
+    {"name": "web_app_scanner",        "description": "Scan web applications for vulnerabilities",                  "actions": ["run"]},
+    {"name": "api_security_audit",     "description": "Audit API security posture",                                 "actions": ["run"]},
+    {"name": "firewall_auditor",       "description": "Analyze firewall rules and configurations",                  "actions": ["run"]},
+    {"name": "password_audit",         "description": "Password strength and policy auditing",                      "actions": ["run"]},
+    {"name": "cloud_posture",          "description": "Assess cloud security posture",                              "actions": ["run"]},
+    {"name": "container_scanner",      "description": "Scan container images for vulnerabilities",                  "actions": ["run"]},
+    {"name": "utility",                "description": "General utility functions",                                  "actions": ["run"]},
+    {
+      "name": "file_streamer",
+      "description": "Handles large file payloads by allowing chunked, segmented appending to bypass LLM max_token generation constraints. Essential for writing files that exceed single-turn output limits.",
+      "actions": ["start_file", "append_chunk", "finalize_file"],
+      "action_schemas": {
+        "start_file": {
+          "description": "Create (or overwrite) the target file and open a stream session.",
+          "params": {
+            "filepath": {
+              "type": "string",
+              "required": true,
+              "description": "Destination file path (relative or absolute). Parent directories are created automatically."
+            },
+            "overwrite": {
+              "type": "boolean",
+              "required": false,
+              "default": false,
+              "description": "If false (default), returns an error when the file already exists. Set true to truncate and replace."
+            }
+          },
+          "returns": {
+            "filepath":      {"type": "string"},
+            "status":        {"type": "string", "enum": ["stream_opened"]},
+            "bytes_written": {"type": "integer"}
+          }
+        },
+        "append_chunk": {
+          "description": "Append a text chunk to a previously opened stream. Call repeatedly until all content is written.",
+          "params": {
+            "filepath": {
+              "type": "string",
+              "required": true,
+              "description": "Must match the filepath used in the corresponding start_file call."
+            },
+            "content": {
+              "type": "string",
+              "required": true,
+              "description": "Raw text content to append. No size restriction — split across as many turns as needed."
+            }
+          },
+          "returns": {
+            "filepath":    {"type": "string"},
+            "status":      {"type": "string", "enum": ["chunk_appended"]},
+            "chunk_bytes": {"type": "integer"},
+            "total_bytes": {"type": "integer"}
+          }
+        },
+        "finalize_file": {
+          "description": "Close the stream session. Must be called once after all append_chunk calls.",
+          "params": {
+            "filepath": {
+              "type": "string",
+              "required": true,
+              "description": "Must match the filepath used in start_file."
+            }
+          },
+          "returns": {
+            "filepath":    {"type": "string"},
+            "status":      {"type": "string", "enum": ["stream_finalized"]},
+            "total_bytes": {"type": "integer"}
+          }
+        }
+      }
+    }
   ]
 }
