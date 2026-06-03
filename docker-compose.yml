@@ -4,7 +4,7 @@ services:
   app:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile_v1
     container_name: jarvis-app
     restart: unless-stopped
     ports:
@@ -20,15 +20,28 @@ services:
       LOG_LEVEL:          ${LOG_LEVEL:-info}
       PYTHONUNBUFFERED:   "1"
     volumes:
-      # Persistent data — mounted as subdirectories, do NOT mount /app itself
-      # or it will shadow the backend source baked into the image.
-      - jarvis-data:/app/data
-      - jarvis-experienced:/app/experienced
+      # ── EXPOSED TO HOST ──
+      # Settings and provider configs — maps to a './data' folder on your host
+      - type: bind
+        source: ./jarvis/data
+        target: /app/data
+
+      # Experienced knowledge base — maps to a './experienced' folder on your host
+      - type: bind
+        source: ./jarvis/experienced
+        target: /app/experienced
+
       # Host filesystem access for the filesystem skill
-      # SECURITY: Change HOST_MOUNT to a scoped path in production (e.g. ./workspace)
-      - ${HOST_MOUNT:-/}:/host:rw
+#      - type: bind
+#        source: ${HOST_MOUNT:-/}
+#        target: /host
+#        read_write: true
+
       # Custom host output folder mount
-      - ${HOST_OUTPUT:-./output}:/app/output
+      - type: bind
+        source: ${HOST_OUTPUT:-./jarvis/output}
+        target: /app/output
+
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:80/health"]
       interval: 15s
@@ -37,24 +50,15 @@ services:
       start_period: 25s
 
   # ─── Ollama (optional local Llama) ───────────────────────────────────────────
-  # Uncomment to run Llama models locally. Then set provider to "ollama" in Settings.
-  #
-  # ollama:
-  #   image: ollama/ollama:latest
-  #   container_name: jarvis-ollama
-  #   restart: unless-stopped
-  #   volumes:
-  #     - ollama-models:/root/.ollama
-  #   # ── NVIDIA GPU support ──
-  #   # deploy:
-  #   #   resources:
-  #   #     reservations:
-  #   #       devices:
-  #   #         - driver: nvidia
-  #   #           count: 1
-  #   #           capabilities: [gpu]
+#  ollama:
+#    image: ollama/ollama:latest
+#    container_name: jarvis-ollama
+#    restart: unless-stopped
+#    volumes:
+#      # ── EXPOSED TO HOST ──
+#      # Ollama models — maps to a './ollama_models' folder on your host
+#      - type: bind
+#        source: ./ollama_models
+#        target: /root/.ollama
 
-volumes:
-  jarvis-data:         # settings.json — provider config persists across restarts
-  jarvis-experienced:  # Experienced knowledge base — EXP-*.md + index.md
-  ollama-models:      # Ollama model weights (only used if ollama service enabled)
+# All named volumes have been removed because everything is now managed directly on your host machine.

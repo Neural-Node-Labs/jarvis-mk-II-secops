@@ -10,6 +10,15 @@ CBD Contract:
 
 Process-safety: stateless — uses only disk-level checks (os.path.exists),
 no in-memory sets or instance-level tracking. Safe across OS worker processes.
+
+Fixes applied (v1.1.0):
+  [FIX-1] Atomic file creation via open(path, "x") eliminates the
+          check-then-act race condition under concurrent FastAPI workers.
+  [FIX-2] Sentinel orphan prevention: target file is cleaned up if sentinel
+          creation fails mid-way through _start_file.
+  [FIX-3] finalize_file now hard-errors when the target file is missing
+          instead of silently reporting 0 bytes.
+  [FIX-4] append_chunk rejects non-str content and warns on empty strings.
 """
 
 import os
@@ -24,14 +33,14 @@ logger = logging.getLogger("skill.file_streamer")
 _SENTINEL_SUFFIX = ".fstream_open"   # Marker file that signals an active stream
 
 
-def _sentinel_path(filepath: str) -> str:
-    """Return the path of the sentinel marker for *filepath*."""
-    return filepath + _SENTINEL_SUFFIX
+def _sentinel_path(path: str) -> str:
+    """Return the path of the sentinel marker for *path*."""
+    return path + _SENTINEL_SUFFIX
 
 
-def _ensure_parent_dir(filepath: str) -> None:
+def _ensure_parent_dir(path: str) -> None:
     """Create parent directories if they do not exist."""
-    parent = os.path.dirname(filepath)
+    parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
 
@@ -81,54 +90,77 @@ class FileStreamerSkill:
     async def _start_file(self, params: dict) -> SkillResult:
         """
         IN params:
-          filepath  (str, required)  — destination path, relative or absolute
+          path      (str,  required) — destination path, relative or absolute
           overwrite (bool, optional) — default False; if False and file exists,
                                        returns an error rather than clobbering
         OUT output:
-          {"filepath": str, "status": "stream_opened", "bytes_written": 0}
+          {"path": str, "status": "stream_opened", "bytes_written": 0}
+
+        FIX-1: Uses open(path, "x") for exclusive creation when overwrite=False
+               so the existence check and file creation are a single atomic OS
+               operation, eliminating the TOCTOU race condition.
+        FIX-2: If sentinel creation fails after the target file is created,
+               the target file is removed to prevent a permanently broken state.
         """
-        filepath = params.get("filepath")
-        if not filepath:
-            return SkillResult(False, None, error="'filepath' is required for start_file.")
+        path = params.get("path")
+        if not path:
+            return SkillResult(False, None, error="'path' is required for start_file.")
 
         overwrite: bool = bool(params.get("overwrite", False))
 
-        # Guard: refuse to overwrite unless explicitly allowed
-        if os.path.exists(filepath) and not overwrite:
-            return SkillResult(
-                False, None,
-                error=(
-                    f"File '{filepath}' already exists. "
-                    "Set overwrite=true to replace it."
-                )
-            )
-
         # Guard: another stream already open for this path
-        sentinel = _sentinel_path(filepath)
+        sentinel = _sentinel_path(path)
         if os.path.exists(sentinel):
             return SkillResult(
                 False, None,
                 error=(
-                    f"A stream is already open for '{filepath}'. "
+                    f"A stream is already open for '{path}'. "
                     "Call finalize_file to close it before starting a new one."
                 )
             )
 
         try:
-            _ensure_parent_dir(filepath)
-            # Truncate / create the target file
-            with open(filepath, "w", encoding="utf-8") as fh:
-                fh.write("")  # empty — content comes via append_chunk
+            _ensure_parent_dir(path)
 
-            # Create sentinel marker
-            with open(sentinel, "w", encoding="utf-8") as fh:
-                fh.write(filepath)
+            # FIX-1: atomic exclusive-create when overwrite=False.
+            # open("x") raises FileExistsError if the file is already present,
+            # so no separate os.path.exists() check is needed — eliminating the
+            # check-then-act race that existed in the original code.
+            file_mode = "w" if overwrite else "x"
+            try:
+                with open(path, file_mode, encoding="utf-8") as fh:
+                    fh.write("")  # empty — content comes via append_chunk
+            except FileExistsError:
+                return SkillResult(
+                    False, None,
+                    error=(
+                        f"File '{path}' already exists. "
+                        "Set overwrite=true to replace it."
+                    )
+                )
 
-            logger.info("Stream opened: %s", filepath)
+            # FIX-2: create sentinel in a separate try so we can roll back the
+            # target file if the sentinel write fails (e.g. disk full), which
+            # would otherwise leave a truncated file with no way to finalize it.
+            try:
+                with open(sentinel, "w", encoding="utf-8") as fh:
+                    fh.write(path)
+            except OSError as exc:
+                # Roll back: remove the just-created target file
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                return SkillResult(
+                    False, None,
+                    error=f"start_file failed creating sentinel (rolled back target): {exc}"
+                )
+
+            logger.info("Stream opened: %s", path)
             return SkillResult(
                 True,
                 output={
-                    "filepath": filepath,
+                    "path": path,
                     "status": "stream_opened",
                     "bytes_written": 0,
                 }
@@ -142,47 +174,67 @@ class FileStreamerSkill:
     async def _append_chunk(self, params: dict) -> SkillResult:
         """
         IN params:
-          filepath (str, required) — must match a previously started stream
-          content  (str, required) — text chunk to append (no size limit)
+          path    (str, required) — must match a previously started stream
+          content (str, required) — text chunk to append (no size limit)
         OUT output:
-          {"filepath": str, "status": "chunk_appended", "chunk_bytes": int,
+          {"path": str, "status": "chunk_appended", "chunk_bytes": int,
            "total_bytes": int}
+
+        FIX-4: Explicitly rejects non-string content and warns when an empty
+               string is passed, so callers are not silently misled.
         """
-        filepath = params.get("filepath")
-        if not filepath:
-            return SkillResult(False, None, error="'filepath' is required for append_chunk.")
+        path = params.get("path")
+        if not path:
+            return SkillResult(False, None, error="'path' is required for append_chunk.")
 
         content = params.get("content")
+
+        # FIX-4a: content must be present and must be a string.
         if content is None:
             return SkillResult(False, None, error="'content' is required for append_chunk.")
+        if not isinstance(content, str):
+            return SkillResult(
+                False, None,
+                error=(
+                    f"'content' must be a string, got {type(content).__name__}. "
+                    "Encode binary data before passing."
+                )
+            )
+        # FIX-4b: warn (but do not fail) when content is an empty string so the
+        # caller can detect a likely logic error without hard-failing the stream.
+        if content == "":
+            logger.warning("append_chunk called with empty content for '%s' — no bytes written.", path)
 
-        sentinel = _sentinel_path(filepath)
+        sentinel = _sentinel_path(path)
         if not os.path.exists(sentinel):
             return SkillResult(
                 False, None,
                 error=(
-                    f"No open stream found for '{filepath}'. "
+                    f"No open stream found for '{path}'. "
                     "Call start_file first."
                 )
             )
 
-        if not os.path.exists(filepath):
+        if not os.path.exists(path):
             return SkillResult(
                 False, None,
-                error=f"Target file '{filepath}' is missing — stream may be corrupt."
+                error=f"Target file '{path}' is missing — stream may be corrupt."
             )
 
         try:
             chunk_bytes = len(content.encode("utf-8"))
-            with open(filepath, "a", encoding="utf-8") as fh:
+            with open(path, "a", encoding="utf-8") as fh:
                 fh.write(content)
 
-            total_bytes = os.path.getsize(filepath)
-            logger.info("Chunk appended to %s (%d bytes, total %d)", filepath, chunk_bytes, total_bytes)
+            total_bytes = os.path.getsize(path)
+            logger.info(
+                "Chunk appended to %s (%d bytes, total %d)",
+                path, chunk_bytes, total_bytes,
+            )
             return SkillResult(
                 True,
                 output={
-                    "filepath": filepath,
+                    "path": path,
                     "status": "chunk_appended",
                     "chunk_bytes": chunk_bytes,
                     "total_bytes": total_bytes,
@@ -197,32 +249,53 @@ class FileStreamerSkill:
     async def _finalize_file(self, params: dict) -> SkillResult:
         """
         IN params:
-          filepath (str, required) — path of the stream to close
+          path (str, required) — path of the stream to close
         OUT output:
-          {"filepath": str, "status": "stream_finalized", "total_bytes": int}
-        """
-        filepath = params.get("filepath")
-        if not filepath:
-            return SkillResult(False, None, error="'filepath' is required for finalize_file.")
+          {"path": str, "status": "stream_finalized", "total_bytes": int}
 
-        sentinel = _sentinel_path(filepath)
+        FIX-3: Hard-errors when the target file is absent at finalization time
+               instead of silently returning total_bytes=0, which masked data
+               loss caused by external deletion or a corrupt stream.
+        """
+        path = params.get("path")
+        if not path:
+            return SkillResult(False, None, error="'path' is required for finalize_file.")
+
+        sentinel = _sentinel_path(path)
         if not os.path.exists(sentinel):
             return SkillResult(
                 False, None,
                 error=(
-                    f"No open stream found for '{filepath}'. "
+                    f"No open stream found for '{path}'. "
                     "Either it was already finalized or start_file was never called."
                 )
             )
 
+        # FIX-3: Verify the target file still exists before declaring success.
+        # The original code silently returned total_bytes=0 when the file was
+        # missing, giving the caller a false "success" signal and hiding data loss.
+        if not os.path.exists(path):
+            # Clean up the orphaned sentinel so the path is not permanently locked.
+            try:
+                os.remove(sentinel)
+            except OSError:
+                pass
+            return SkillResult(
+                False, None,
+                error=(
+                    f"Target file '{path}' is missing at finalization — data may have been lost. "
+                    "Sentinel has been removed to unlock the path."
+                )
+            )
+
         try:
+            total_bytes = os.path.getsize(path)
             os.remove(sentinel)
-            total_bytes = os.path.getsize(filepath) if os.path.exists(filepath) else 0
-            logger.info("Stream finalized: %s (%d bytes)", filepath, total_bytes)
+            logger.info("Stream finalized: %s (%d bytes)", path, total_bytes)
             return SkillResult(
                 True,
                 output={
-                    "filepath": filepath,
+                    "path": path,
                     "status": "stream_finalized",
                     "total_bytes": total_bytes,
                 }

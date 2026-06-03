@@ -43,6 +43,8 @@ from skills.self_evolution_skill.evolution_skill import (
 from skills.memory_skill import MemorySkill
 from skills.multimodal_analyzer import MultimodalAnalyzerSkill
 from skills.image_vision_skill import ImageVisionSkill
+from skills.file_streamer import FileStreamerSkill  # FIX-1: explicit import guarantees registration even if load_all_skills silently fails
+from skills.folder_reader import FolderReaderSkill
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("main")
 
@@ -87,9 +89,17 @@ registry.register("cbd_architect", CBDArchitectSkill())
 registry.register("self_evolution", SelfEvolutionSkill())
 registry.register("memory_manager", MemorySkill(memory_manager))
 registry.register("multimodal_analyzer", MultimodalAnalyzerSkill())
-registry.register("image_vision_skill", ImageVisionSkill())
+registry.register("image_vision", ImageVisionSkill())  # FIX-6: key must match skills_manifest.json "image_vision"
 load_all_skills(registry)
-
+# FIX-1: file_streamer is also loaded by load_all_skills via __init__.py, but
+# we register it explicitly here as a safety-net in case the dynamic import
+# silently fails (ImportError is swallowed inside load_all_skills).
+if not registry.get("file_streamer"):
+    registry.register("file_streamer", FileStreamerSkill())
+    logger.warning("file_streamer was not loaded by load_all_skills — registered via fallback.")
+if not registry.get("folder_reader"):
+    registry.register("folder_reader", FolderReaderSkill())
+    logger.warning("folder_reader was not loaded by load_all_skills — registered via fallback.")
 
 
 _persisted = _load_persisted_settings()
@@ -99,7 +109,7 @@ _key_env = _defaults.get("key_env") or ""
 
 current_config = LLMConfig(
     provider=_default_provider,
-    model=_persisted.get("model") or _defaults.get("model", "deepseek-v4-pro"),
+    model=_persisted.get("model") or _defaults.get("model", "deepseek-coder"),
     api_key=os.getenv(_key_env, ""),
     base_url=_persisted.get("base_url") or _defaults.get("base_url", ""),
     temperature=_persisted.get("temperature", 0.7),

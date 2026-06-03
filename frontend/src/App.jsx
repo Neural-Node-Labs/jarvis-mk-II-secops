@@ -510,7 +510,7 @@ const SettingsTab = ({ onClose, onSaved }) => {
     fetch(`${API_URL}/config`).then(r => r.json()).then(data => {
       setCfg(data);
       setProvider(data.provider || "deepseek");
-      setModel(data.model || "deepseek-v4-pro");
+      setModel(data.model || "deepseek-coder");
       setBaseUrl(data.base_url || "");
       setTemperature(data.temperature ?? 0.7);
       setMaxTokens(data.max_tokens ?? DEFAULT_MAX);

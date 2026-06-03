@@ -40,6 +40,7 @@ _SKILL_MODULES = [
     "skills.memory_skills",    # ← skills for interacting with user memory (read/write/search)
     "skills.multimodal_analyzer",
     "skills.image_vision_skill",
+    "skills.folder_reader",    # ← folder tree reader + LLM analyzer
 ]
 
 
@@ -48,7 +49,15 @@ def load_all_skills(registry) -> None:
     Dynamically import every module in _SKILL_MODULES and call its
     ``register(registry)`` hook.  Import errors are logged but do not
     abort the remaining modules.
+
+    FIX-1: Failures are now logged at ERROR level with full exc_info so the
+    traceback appears in structured logs, making silent import failures
+    immediately visible rather than requiring active debugging.
+    A final summary line lists every module that failed so operators know
+    exactly which skills are unavailable without grepping through log lines.
     """
+    failed: list[str] = []
+
     for module_path in _SKILL_MODULES:
         try:
             module = importlib.import_module(module_path)
@@ -61,4 +70,28 @@ def load_all_skills(registry) -> None:
                     module_path,
                 )
         except ImportError as exc:
-            logger.error("Failed to import skill module '%s': %s", module_path, exc)
+            # FIX-1: log full traceback so the root cause (missing dep, typo,
+            # circular import, etc.) is immediately visible in the log stream.
+            logger.error(
+                "Failed to import skill module '%s': %s",
+                module_path, exc, exc_info=True,
+            )
+            failed.append(module_path)
+        except Exception as exc:  # noqa: BLE001 — catch-all so one bad skill can't block others
+            logger.error(
+                "Unexpected error registering skill module '%s': %s",
+                module_path, exc, exc_info=True,
+            )
+            failed.append(module_path)
+
+    # FIX-1: emit a single summary so operators see all failures at a glance.
+    if failed:
+        logger.error(
+            "load_all_skills completed with %d failure(s): %s",
+            len(failed), ", ".join(failed),
+        )
+    else:
+        logger.info(
+            "load_all_skills completed — all %d modules loaded successfully.",
+            len(_SKILL_MODULES),
+        )

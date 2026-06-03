@@ -76,7 +76,7 @@ def get_model_max_tokens(model: str) -> int:
 PROVIDER_DEFAULTS = {
     "deepseek": {
         "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-v4-pro",
+        "model": "deepseek-coder",
         "key_env": "DEEPSEEK_API_KEY",
     },
     "ollama": {
@@ -99,7 +99,7 @@ PROVIDER_DEFAULTS = {
 
 class LLMConfig(BaseModel):
     provider: str = "deepseek"
-    model: str = "deepseek-v4-pro"
+    model: str = "deepseek-coder"
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     temperature: float = 0.7

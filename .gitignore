@@ -22,4 +22,6 @@ Thumbs.db
 output/*
 
 *_OLD/*
-/archive/
+/archive/*
+/jarvis/*
+/.idea/*
