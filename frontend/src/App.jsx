@@ -319,7 +319,7 @@ const InlineModelSwitcher = ({ providerInfo, onChanged }) => {
   const handleSwitch = async () => {
     setSaving(true);
     try {
-      const res = await fetch(`${API_URL}/config`, {
+      const res = await apiFetch(`${API_URL}/config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ provider, model, max_tokens: maxTok }),
@@ -418,7 +418,7 @@ const MemoryPanel = ({ onClose }) => {
   const load = async (count) => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_URL}/memory/${userId}?n=${count}`);
+      const res = await apiFetch(`${API_URL}/memory/${userId}?n=${count}`);
       const data = await res.json();
       setHistory(data.history || "_No history found._");
     } catch {
@@ -432,7 +432,7 @@ const MemoryPanel = ({ onClose }) => {
   const handleClear = async () => {
     setClearing(true);
     try {
-      await fetch(`${API_URL}/memory/${userId}`, { method: "DELETE" });
+      await apiFetch(`${API_URL}/memory/${userId}`, { method: "DELETE" });
       setCleared(true);
       setHistory("_History cleared._");
       setTimeout(() => setCleared(false), 2000);
@@ -507,7 +507,7 @@ const SettingsTab = ({ onClose, onSaved }) => {
   const [activeSchemaTab, setActiveSchemaTab] = useState("openai");
 
   useEffect(() => {
-    fetch(`${API_URL}/config`).then(r => r.json()).then(data => {
+    apiFetch(`${API_URL}/config`).then(r => r.json()).then(data => {
       setCfg(data);
       setProvider(data.provider || "deepseek");
       setModel(data.model || "deepseek-coder");
@@ -554,7 +554,7 @@ const SettingsTab = ({ onClose, onSaved }) => {
         max_tokens: parseInt(maxTokens),
         schema_format: schemaOverride ? schemaFormat : null,
       };
-      const res = await fetch(`${API_URL}/config`, {
+      const res = await apiFetch(`${API_URL}/config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -773,6 +773,165 @@ const SettingsTab = ({ onClose, onSaved }) => {
   );
 };
 
+
+// ─── Auth / JWT ───────────────────────────────────────────────────────────────
+// POST {username, password} to /api/auth/login → backend returns signed JWT.
+// Stored in sessionStorage. Sent as  Authorization: Bearer <token>  on every
+// REST call and as the first WebSocket message {type:"auth", token:"<jwt>"}.
+
+const AUTH_KEY  = "jarvis_jwt";
+const AUTH_USER = "jarvis_user";
+
+function getStoredAuth() {
+  try {
+    const token    = sessionStorage.getItem(AUTH_KEY);
+    const username = sessionStorage.getItem(AUTH_USER);
+    if (!token || !username) return null;
+    const b64     = token.split(".")[1] || "";
+    const padded  = b64.replace(/-/g, "+").replace(/_/g, "/");
+    const pad     = padded.length % 4;
+    const payload = JSON.parse(atob(pad ? padded + "====".slice(pad) : padded));
+    if (payload.exp && payload.exp * 1000 < Date.now()) { clearAuth(); return null; }
+    return { token, username };
+  } catch { return null; }
+}
+
+function storeAuth(token, username) {
+  sessionStorage.setItem(AUTH_KEY, token);
+  sessionStorage.setItem(AUTH_USER, username);
+}
+
+function clearAuth() {
+  sessionStorage.removeItem(AUTH_KEY);
+  sessionStorage.removeItem(AUTH_USER);
+}
+
+async function apiFetch(url, opts = {}) {
+  const auth    = getStoredAuth();
+  const headers = { ...(opts.headers || {}) };
+  if (auth?.token) headers["Authorization"] = `Bearer ${auth.token}`;
+  return fetch(url, { ...opts, headers });
+}
+
+const LoginScreen = ({ onAuth }) => {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError]       = useState("");
+  const [loading, setLoading]   = useState(false);
+  const [shaking, setShaking]   = useState(false);
+
+  const attempt = async () => {
+    const u = username.trim();
+    if (!u || !password) { setError("Username and password are required."); return; }
+    setLoading(true); setError("");
+    try {
+      const res  = await fetch(`${API_URL}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: u, password }),
+      });
+      const data = await res.json();
+      if (res.ok && data.access_token) {
+        storeAuth(data.access_token, u.toLowerCase());
+        onAuth(u.toLowerCase());
+      } else {
+        setError(data.detail || "Invalid credentials. Access denied.");
+        setShaking(true);
+        setTimeout(() => setShaking(false), 500);
+      }
+    } catch {
+      setError("Cannot reach the backend. Is it running?");
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: "#040a04", display: "flex",
+      alignItems: "center", justifyContent: "center", fontFamily: "monospace",
+    }}>
+      <style>{`
+        @keyframes shake { 0%,100%{transform:translateX(0)} 20%,60%{transform:translateX(-8px)} 40%,80%{transform:translateX(8px)} }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+      `}</style>
+      <div style={{
+        width: 360, padding: 32,
+        background: "#060c06", border: "1px solid #2a4a2a", borderRadius: 8,
+        animation: shaking ? "shake 0.4s ease" : "none",
+      }}>
+        <div style={{ textAlign: "center", marginBottom: 28 }}>
+          <div style={{ color: "#4FFFFF", fontSize: 22, fontWeight: "bold", letterSpacing: 3 }}>
+            ◈ JARVIS
+          </div>
+          <div style={{ color: "#3a6a3a", fontSize: 10, marginTop: 6, letterSpacing: 2 }}>
+            SECURE ACCESS TERMINAL
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ color: "#7a9a7a", fontSize: 10, display: "block", marginBottom: 4 }}>USERNAME</label>
+          <input
+            value={username}
+            onChange={e => { setUsername(e.target.value); setError(""); }}
+            onKeyDown={e => e.key === "Enter" && attempt()}
+            autoFocus
+            style={{
+              width: "100%", padding: "8px 12px", borderRadius: 4,
+              background: "#0d150d", border: "1px solid #2a4a2a",
+              color: "#cce8cc", fontFamily: "monospace", fontSize: 13,
+              boxSizing: "border-box", outline: "none",
+            }}
+          />
+        </div>
+
+        <div style={{ marginBottom: 20 }}>
+          <label style={{ color: "#7a9a7a", fontSize: 10, display: "block", marginBottom: 4 }}>PASSWORD</label>
+          <input
+            type="password"
+            value={password}
+            onChange={e => { setPassword(e.target.value); setError(""); }}
+            onKeyDown={e => e.key === "Enter" && attempt()}
+            style={{
+              width: "100%", padding: "8px 12px", borderRadius: 4,
+              background: "#0d150d", border: "1px solid #2a4a2a",
+              color: "#cce8cc", fontFamily: "monospace", fontSize: 13,
+              boxSizing: "border-box", outline: "none",
+            }}
+          />
+        </div>
+
+        {error && (
+          <div style={{
+            color: "#cc4444", fontSize: 11, marginBottom: 14,
+            padding: "6px 10px", background: "#1a0808", border: "1px solid #5a2a2a", borderRadius: 4,
+          }}>
+            ✕ {error}
+          </div>
+        )}
+
+        <button
+          onClick={attempt}
+          disabled={loading}
+          style={{
+            width: "100%", padding: "10px", borderRadius: 4,
+            cursor: loading ? "not-allowed" : "pointer",
+            background: "linear-gradient(135deg,#1a3a1a,#0a2a0a)",
+            border: "1px solid #4a9a4a", color: loading ? "#4a7a4a" : "#90ff90",
+            fontFamily: "monospace", fontSize: 13, fontWeight: "bold", letterSpacing: 1,
+            opacity: loading ? 0.7 : 1,
+          }}
+        >
+          {loading ? "⟳ AUTHENTICATING…" : "▶ AUTHENTICATE"}
+        </button>
+
+        <div style={{ color: "#1a3a1a", fontSize: 9, textAlign: "center", marginTop: 16, lineHeight: 1.6 }}>
+          Authorised personnel only. All access is logged.
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [messages, setMessages] = useState([]);
@@ -800,10 +959,11 @@ export default function App() {
   const bottomRef = useRef(null);
   const handleEventRef = useRef(null);
   const reconnectDelay = useRef(1000);
+  const messagesRef = useRef([]);
 
   useEffect(() => {
-    fetch(`${API_URL}/config`).then(r => r.json()).then(setProviderInfo).catch(() => {});
-    fetch(`${API_URL}/skills`).then(r => r.json()).then(d => setSkills(d.skills || [])).catch(() => {});
+    apiFetch(`${API_URL}/config`).then(r => r.json()).then(setProviderInfo).catch(() => {});
+    apiFetch(`${API_URL}/skills`).then(r => r.json()).then(d => setSkills(d.skills || [])).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -812,7 +972,15 @@ export default function App() {
       if (cancelled) return;
       const ws = new WebSocket(WS_URL);
       wsRef.current = ws;
-      ws.onopen = () => { setConnected(true); reconnectDelay.current = 1000; };
+      ws.onopen = () => {
+        // Send JWT Bearer token as the first WebSocket message
+        const auth = getStoredAuth();
+        if (auth?.token) {
+          ws.send(JSON.stringify({ type: "auth", token: auth.token }));
+        }
+        setConnected(true);
+        reconnectDelay.current = 1000;
+      };
       ws.onclose = () => {
         setConnected(false);
         if (!cancelled) {
@@ -829,7 +997,10 @@ export default function App() {
     return () => { cancelled = true; wsRef.current?.close(); };
   }, []);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+  useEffect(() => {
+    messagesRef.current = messages;
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   // ── File upload handler ────────────────────────────────────────────────────
   const handleFileSelect = useCallback(async (files) => {
@@ -840,7 +1011,7 @@ export default function App() {
       try {
         const fd = new FormData();
         fd.append("file", file);
-        const res = await fetch(`${API_URL}/upload`, { method: "POST", body: fd });
+        const res = await apiFetch(`${API_URL}/upload`, { method: "POST", body: fd });
         if (res.ok) {
           const data = await res.json();
           results.push(data);
@@ -1002,20 +1173,31 @@ export default function App() {
           attachments: iter === 1 && toSend.length ? toSend : undefined,
         }));
 
-        const origHandler = handleEventRef.current;
-        handleEventRef.current = (event) => {
-          origHandler(event);
-          if (event.type === "done") { setStreaming(false); finish(); }
-          else if (event.type === "error") { lastError = event.data; setStreaming(false); finish(); }
-          else if (event.type === "tool_result") {
+        // Capture base handler per iteration; always restore it before resolving
+        const baseHandler = handleEventRef.current;
+        const iterHandler = (event) => {
+          baseHandler(event);
+          if (event.type === "done") {
+            handleEventRef.current = baseHandler;
+            setStreaming(false);
+            finish();
+          } else if (event.type === "error") {
+            lastError = event.data;
+            handleEventRef.current = baseHandler;
+            setStreaming(false);
+            finish();
+          } else if (event.type === "tool_result") {
             if (!event.data?.success) lastError = event.data?.error || "Tool execution failed";
             else lastError = null;
           }
         };
-        setTimeout(finish, 120000);
+        handleEventRef.current = iterHandler;
+        setTimeout(() => { handleEventRef.current = baseHandler; finish(); }, 120000);
       });
 
-      const lastMsg = messages[messages.length - 1];
+      // Use messagesRef so we read the live state, not a stale closure snapshot
+      const liveMsgs = messagesRef.current;
+      const lastMsg = liveMsgs[liveMsgs.length - 1];
       const lastContent = lastMsg?.content?.toLowerCase() || "";
       const taskComplete = !lastError && (
         lastContent.includes("task complete") || lastContent.includes("done") ||
@@ -1032,7 +1214,7 @@ export default function App() {
     }]);
     reactActiveRef.current = false;
     setStreaming(false);
-  }, [input, streaming, attachments, messages]);
+  }, [input, streaming, attachments]);
 
   const handleConfirm = (id) => {
     setPendingConfirms(prev => prev.filter(c => c.confirm_id !== id));
@@ -1045,7 +1227,7 @@ export default function App() {
 
   const handleReset = async () => {
     reactActiveRef.current = false;
-    await fetch(`${API_URL}/reset`, { method: "POST" }).catch(() => {});
+    await apiFetch(`${API_URL}/reset`, { method: "POST" }).catch(() => {});
     setMessages([]); setPendingConfirms([]); setAttachments([]);
   };
 
@@ -1053,6 +1235,12 @@ export default function App() {
   const schemaColor = SCHEMA_DOCS[providerInfo.schema_format]?.badge || "#888";
   const canSend = !streaming && (!!input.trim() || attachments.length > 0);
   const canContinue = !streaming && connected;
+
+  const [authedUser, setAuthedUser] = useState(() => getStoredAuth()?.username || null);
+
+  if (!authedUser) {
+    return <LoginScreen onAuth={(u) => setAuthedUser(u)} />;
+  }
 
   return (
     <div
@@ -1071,6 +1259,8 @@ export default function App() {
         @keyframes react-pulse { 0%,100%{box-shadow:0 0 0 0 #4a9aff33} 50%{box-shadow:0 0 8px 2px #4a9aff44} }
         textarea:focus, input:focus, select:focus { outline: 1px solid #2a5a2a; }
         button:active { opacity: 0.8; }
+        .skill-badge { max-width: 28px; overflow: hidden; transition: max-width 0.25s ease, padding 0.25s ease, background 0.2s; white-space: nowrap; }
+        .skill-badge:hover { max-width: 180px; background: #0a1a0a !important; }
       `}</style>
 
       {/* ── Header ── */}
@@ -1096,7 +1286,7 @@ export default function App() {
             providerInfo={providerInfo}
             onChanged={(data) => {
               setProviderInfo(prev => ({ ...prev, ...data }));
-              fetch(`${API_URL}/config`).then(r => r.json()).then(setProviderInfo).catch(() => {});
+              apiFetch(`${API_URL}/config`).then(r => r.json()).then(setProviderInfo).catch(() => {});
             }}
           />
 
@@ -1114,11 +1304,14 @@ export default function App() {
           {skills.map(s => {
             const sc = SKILL_COLORS[s.name] || { border: "#555", icon: "🔧" };
             return (
-              <span key={s.name} title={s.description} style={{
-                padding: "2px 7px", borderRadius: 3,
+              <span key={s.name} className="skill-badge" title={s.description} style={{
+                display: "inline-flex", alignItems: "center", gap: 4,
+                padding: "2px 6px", borderRadius: 3,
                 border: `1px solid ${sc.border}`, color: sc.border, fontSize: 9, cursor: "default",
+                overflow: "hidden",
               }}>
-                {sc.icon} {s.name}
+                <span style={{ flexShrink: 0 }}>{sc.icon}</span>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</span>
               </span>
             );
           })}
@@ -1134,6 +1327,10 @@ export default function App() {
             padding: "4px 12px", background: "#1f0f0f", border: "1px solid #4a2a2a",
             color: "#aa7a7a", borderRadius: 4, cursor: "pointer", fontSize: 11,
           }}>↺ RESET</button>
+          <button onClick={() => { clearAuth(); setAuthedUser(null); }} style={{
+            padding: "4px 12px", background: "#0f0f1f", border: "1px solid #3a3a6a",
+            color: "#8a8acc", borderRadius: 4, cursor: "pointer", fontSize: 11,
+          }} title={`Logged in as ${authedUser}`}>⇤ {authedUser}</button>
         </div>
       </div>
 
@@ -1332,7 +1529,7 @@ export default function App() {
           onClose={() => setSettingsOpen(false)}
           onSaved={(data) => {
             setProviderInfo(prev => ({ ...prev, ...data }));
-            fetch(`${API_URL}/config`).then(r => r.json()).then(setProviderInfo).catch(() => {});
+            apiFetch(`${API_URL}/config`).then(r => r.json()).then(setProviderInfo).catch(() => {});
           }}
         />
       )}

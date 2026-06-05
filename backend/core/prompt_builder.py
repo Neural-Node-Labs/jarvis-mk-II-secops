@@ -140,8 +140,7 @@ Treat the file content as context for the user's request.
 - CRITICAL RULE: If a user sends the exact message "continue" or asks to resume after a session reset, you MUST immediately call the `memory_manager` tool using the `retrieve` action with `n=5` to fetch context before responding. Do not attempt to guess or answer without this context.
 
 ## Safety:
-- Destructive actions (file writes, deletes, shell commands, process kills) REQUIRE user confirmation
-  unless auto_confirm mode is active.
+- Destructive actions (file writes, deletes, shell commands, process kills) REQUIRE user confirmation unless auto_confirm mode is active.
 - Always show the exact command/path before executing.
 - Never chain destructive actions without confirmation between each (unless auto_confirm is on).
 """

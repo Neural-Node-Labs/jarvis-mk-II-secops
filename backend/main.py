@@ -20,10 +20,15 @@ import logging
 import os
 import base64
 import asyncio
+import secrets
+import time
+import hmac
+import hashlib
 from pathlib import Path
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional
 
@@ -46,6 +51,89 @@ from skills.image_vision_skill import ImageVisionSkill
 from skills.file_streamer import FileStreamerSkill  # FIX-1: explicit import guarantees registration even if load_all_skills silently fails
 from skills.folder_reader import FolderReaderSkill
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+# ── Auth / JWT ───────────────────────────────────────────────────────────────
+# Environment variables:
+#   AUTH_SECRET   — shared login password (required; app refuses to start without it)
+#   ALLOWED_USERS — comma-separated usernames  (default: "admin")
+#   JWT_SECRET    — signs tokens (auto-generated each startup if not set)
+#   JWT_TTL_HOURS — token lifetime in hours    (default: 8)
+#
+# Flow:
+#   1. Backend generates JWT_SECRET on startup (or reads from env).
+#   2. Frontend POSTs {username, password} to /api/auth/login.
+#   3. Backend validates credentials, returns {access_token, token_type:"bearer"}.
+#   4. Frontend stores token; sends Authorization: Bearer <token> on every request.
+#   5. Both REST endpoints and WebSockets verify the token via require_bearer().
+
+AUTH_SECRET  = os.getenv("AUTH_SECRET", "")          # login password
+ALLOWED_USERS = [u.strip().lower() for u in os.getenv("ALLOWED_USERS", "admin").split(",") if u.strip()]
+JWT_SECRET   = os.getenv("JWT_SECRET") or secrets.token_hex(32)   # auto-rotates each restart if not pinned
+JWT_TTL      = int(os.getenv("JWT_TTL_HOURS", "8")) * 3600        # seconds
+
+_http_bearer = HTTPBearer(auto_error=False)
+
+# ── Tiny JWT (HMAC-SHA256, no extra deps) ─────────────────────────────────────
+import base64 as _b64, json as _json
+
+def _b64url(data: bytes) -> str:
+    return _b64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+def _b64url_decode(s: str) -> bytes:
+    pad = 4 - len(s) % 4
+    return _b64.urlsafe_b64decode(s + "=" * (pad % 4))
+
+def create_jwt(username: str) -> str:
+    header  = _b64url(_json.dumps({"alg":"HS256","typ":"JWT"}).encode())
+    payload = _b64url(_json.dumps({"sub": username, "iat": int(time.time()), "exp": int(time.time()) + JWT_TTL}).encode())
+    sig     = _b64url(hmac.new(JWT_SECRET.encode(), f"{header}.{payload}".encode(), hashlib.sha256).digest())
+    return f"{header}.{payload}.{sig}"
+
+def verify_jwt(token: str) -> Optional[str]:
+    """Returns username on success, None on any failure."""
+    try:
+        header, payload, sig = token.split(".")
+        expected = _b64url(hmac.new(JWT_SECRET.encode(), f"{header}.{payload}".encode(), hashlib.sha256).digest())
+        if not hmac.compare_digest(sig, expected):
+            return None
+        claims = _json.loads(_b64url_decode(payload))
+        if claims.get("exp", 0) < time.time():
+            return None
+        return claims.get("sub")
+    except Exception:
+        return None
+
+async def require_bearer(creds: Optional[HTTPAuthorizationCredentials] = Depends(_http_bearer)) -> str:
+    """FastAPI dependency — raises 401 if token is missing or invalid."""
+    if not AUTH_SECRET:          # auth disabled — pass everyone through
+        return "anonymous"
+    token = creds.credentials if creds else None
+    user  = verify_jwt(token) if token else None
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token",
+                            headers={"WWW-Authenticate": "Bearer"})
+    return user
+
+async def ws_require_bearer(ws: WebSocket) -> Optional[str]:
+    """For WebSockets: read first message {type:'auth', token:'...'}, return username or close."""""
+    if not AUTH_SECRET:
+        return "anonymous"
+    try:
+        first_raw = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
+        first_msg = _json.loads(first_raw)
+        token = first_msg.get("token", "") if first_msg.get("type") == "auth" else ""
+        user  = verify_jwt(token) if token else None
+        if not user:
+            await ws.send_json({"type": "error", "data": "Unauthorized — invalid or expired token."})
+            await ws.close(code=4401)
+            return None
+        logger.info(f"WS authenticated: user='{user}'")
+        return user
+    except (asyncio.TimeoutError, _json.JSONDecodeError, Exception) as exc:
+        await ws.send_json({"type": "error", "data": "Auth handshake failed."})
+        await ws.close(code=4401)
+        return None
+
 logger = logging.getLogger("main")
 
 SETTINGS_FILE = Path(os.getenv("SETTINGS_PATH", "/app/data/settings.json"))
@@ -123,6 +211,11 @@ agent = Agent(current_config, registry)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Agent backend started — {current_config.provider}/{current_config.model}")
+    if AUTH_SECRET:
+        src = "env" if os.getenv("JWT_SECRET") else "auto-generated"
+        logger.info(f"Auth ENABLED — JWT_SECRET {src}, TTL={JWT_TTL}s, users={ALLOWED_USERS}")
+    else:
+        logger.warning("AUTH_SECRET not set — all endpoints are OPEN (dev mode)")
     logger.info(f"Skills: {[s['name'] for s in registry.list_skills()]}")
     yield
     logger.info("Agent backend shutting down")
@@ -136,6 +229,10 @@ app.add_middleware(
 
 
 # ── Models ─────────────────────────────────────────────────────────────────────
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
 class ConfigUpdate(BaseModel):
     provider: str
     model: Optional[str] = None
@@ -156,9 +253,32 @@ class EvolutionActionRequest(BaseModel):
     workspace_id: Optional[str] = None
 
 
+# ── Auth endpoint ─────────────────────────────────────────────────────────────
+@app.post("/api/auth/login")
+async def login(req: LoginRequest):
+    """Exchange {username, password} for a Bearer JWT. No auth required on this endpoint."""
+    if not AUTH_SECRET:
+        # Auth disabled — issue a no-op token so the UI flow still works
+        token = create_jwt(req.username.strip().lower() or "anonymous")
+        return {"access_token": token, "token_type": "bearer", "expires_in": JWT_TTL}
+    u = req.username.strip().lower()
+    if u not in ALLOWED_USERS or req.password != AUTH_SECRET:
+        logger.warning(f"Failed login attempt for user='{u}'")
+        raise HTTPException(status_code=401, detail="Invalid credentials",
+                            headers={"WWW-Authenticate": "Bearer"})
+    token = create_jwt(u)
+    logger.info(f"Issued JWT for user='{u}' (TTL={JWT_TTL}s)")
+    return {"access_token": token, "token_type": "bearer", "expires_in": JWT_TTL}
+
+@app.get("/api/auth/verify")
+async def verify_token(user: str = Depends(require_bearer)):
+    """Lightweight token check — returns username if valid."""
+    return {"valid": True, "username": user}
+
+
 # ── File Upload ────────────────────────────────────────────────────────────────
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), _user: str = Depends(require_bearer)):
     """
     Accept a file upload and return a structured attachment dict ready to be
     passed alongside the next chat message via WebSocket.
@@ -218,6 +338,10 @@ async def upload_file(file: UploadFile = File(...)):
 @app.websocket("/ws/chat")
 async def ws_chat(ws: WebSocket):
     await ws.accept()
+    # ── Bearer token handshake (JWT) ─────────────────────────────────────────
+    user = await ws_require_bearer(ws)
+    if user is None:
+        return  # ws_require_bearer already closed the socket
     try:
         while True:
             raw = await ws.receive_text()
@@ -253,7 +377,10 @@ async def ws_chat(ws: WebSocket):
 @app.websocket("/ws/evolution")
 async def ws_evolution(ws: WebSocket):
     await ws.accept()
-    logger.info("Evolution WS connected")
+    user = await ws_require_bearer(ws)
+    if user is None:
+        return
+    logger.info(f"Evolution WS connected: user='{user}'")
     try:
         while True:
             raw = await ws.receive_text()
@@ -287,12 +414,12 @@ async def ws_evolution(ws: WebSocket):
 
 # ── REST: Skills & Config ──────────────────────────────────────────────────────
 @app.get("/api/skills")
-async def list_skills():
+async def list_skills(_user: str = Depends(require_bearer)):
     return {"skills": registry.list_skills()}
 
 
 @app.get("/api/model-limits")
-async def model_limits():
+async def model_limits(_user: str = Depends(require_bearer)):
     """Return the full MODEL_MAX_TOKENS map plus current model's limit."""
     return {
         "model_max_tokens": MODEL_MAX_TOKENS,
@@ -303,7 +430,7 @@ async def model_limits():
 
 
 @app.post("/api/config")
-async def update_config(config: ConfigUpdate):
+async def update_config(config: ConfigUpdate, _user: str = Depends(require_bearer)):
     global current_config, agent
     defaults = PROVIDER_DEFAULTS.get(config.provider, PROVIDER_DEFAULTS["deepseek"])
     key_env = defaults.get("key_env") or ""
@@ -336,7 +463,7 @@ async def update_config(config: ConfigUpdate):
 
 
 @app.get("/api/config")
-async def get_config():
+async def get_config(_user: str = Depends(require_bearer)):
     return {
         "provider": current_config.provider,
         "model": current_config.model,
@@ -352,14 +479,14 @@ async def get_config():
 
 
 @app.post("/api/reset")
-async def reset_agent():
+async def reset_agent(_user: str = Depends(require_bearer)):
     agent.reset()
     return {"status": "ok"}
 
 
 # ── REST: Memory ───────────────────────────────────────────────────────────────
 @app.get("/api/memory/{user_id}")
-async def get_memory(user_id: str, n: int = 20):
+async def get_memory(user_id: str, n: int = 20, _user: str = Depends(require_bearer)):
     """Retrieve the last n conversation turns for a user."""
     history = memory_manager.retrieve_last_n(user_id, n)
     size = memory_manager.file_size(user_id)
@@ -367,21 +494,21 @@ async def get_memory(user_id: str, n: int = 20):
 
 
 @app.delete("/api/memory/{user_id}")
-async def clear_memory(user_id: str):
+async def clear_memory(user_id: str, _user: str = Depends(require_bearer)):
     """Delete a user's conversation history file."""
     existed = memory_manager.clear(user_id)
     return {"user_id": user_id, "cleared": existed}
 
 
 @app.get("/api/memory")
-async def list_memory_users():
+async def list_memory_users(_user: str = Depends(require_bearer)):
     """List all users that have saved conversation history."""
     return {"users": memory_manager.list_users()}
 
 
 # ── REST: Evolution ────────────────────────────────────────────────────────────
 @app.post("/api/evolution/start")
-async def evo_start(req: EvolutionStartRequest):
+async def evo_start(req: EvolutionStartRequest, _user: str = Depends(require_bearer)):
     skill = registry.get("self_evolution")
     if not skill:
         raise HTTPException(500, "Self-evolution skill not registered")
@@ -398,7 +525,7 @@ async def evo_start(req: EvolutionStartRequest):
     raise HTTPException(500, result.error)
 
 @app.get("/api/evolution/status")
-async def evo_status(workspace_id: Optional[str] = None):
+async def evo_status(workspace_id: Optional[str] = None, _user: str = Depends(require_bearer)):
     skill = registry.get("self_evolution")
     result = await skill.execute("status", {"workspace_id": workspace_id})
     if result.success:
@@ -406,7 +533,7 @@ async def evo_status(workspace_id: Optional[str] = None):
     raise HTTPException(404, result.error)
 
 @app.post("/api/evolution/approve")
-async def evo_approve(req: EvolutionActionRequest):
+async def evo_approve(req: EvolutionActionRequest, _user: str = Depends(require_bearer)):
     skill = registry.get("self_evolution")
     result = await skill.execute("approve", {"workspace_id": req.workspace_id})
     if result.success:
@@ -414,7 +541,7 @@ async def evo_approve(req: EvolutionActionRequest):
     raise HTTPException(400, result.error)
 
 @app.post("/api/evolution/revise")
-async def evo_revise(req: EvolutionActionRequest):
+async def evo_revise(req: EvolutionActionRequest, _user: str = Depends(require_bearer)):
     skill = registry.get("self_evolution")
     result = await skill.execute("revise", {"workspace_id": req.workspace_id})
     if result.success:
@@ -422,13 +549,13 @@ async def evo_revise(req: EvolutionActionRequest):
     raise HTTPException(400, result.error)
 
 @app.post("/api/evolution/reset")
-async def evo_reset(req: EvolutionActionRequest):
+async def evo_reset(req: EvolutionActionRequest, _user: str = Depends(require_bearer)):
     skill = registry.get("self_evolution")
     await skill.execute("reset", {"workspace_id": req.workspace_id})
     return {"status": "ok", "reset": True}
 
 @app.get("/api/evolution/logs")
-async def evo_logs(workspace_id: Optional[str] = None):
+async def evo_logs(workspace_id: Optional[str] = None, _user: str = Depends(require_bearer)):
     skill = registry.get("self_evolution")
     result = await skill.execute("get_logs", {"workspace_id": workspace_id})
     if result.success:
