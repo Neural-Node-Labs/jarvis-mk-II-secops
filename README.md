@@ -1,4 +1,4 @@
-# ◈ Jarvis MK II
+# ◈ JARVIS MK-II SECOPS
 
 A skill-based Jarvis MK II — Python/FastAPI backend + React web UI.
 Default LLM: **DeepSeek**. Also supports Ollama/Llama (local), Anthropic, OpenAI.
