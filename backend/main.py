@@ -48,7 +48,6 @@ from skills.self_evolution_skill.evolution_skill import (
 from skills.memory_skill import MemorySkill
 from skills.multimodal_analyzer import MultimodalAnalyzerSkill
 from skills.image_vision_skill import ImageVisionSkill
-from skills.file_streamer import FileStreamerSkill  # FIX-1: explicit import guarantees registration even if load_all_skills silently fails
 from skills.folder_reader import FolderReaderSkill
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
@@ -182,9 +181,7 @@ load_all_skills(registry)
 # FIX-1: file_streamer is also loaded by load_all_skills via __init__.py, but
 # we register it explicitly here as a safety-net in case the dynamic import
 # silently fails (ImportError is swallowed inside load_all_skills).
-if not registry.get("file_streamer"):
-    registry.register("file_streamer", FileStreamerSkill())
-    logger.warning("file_streamer was not loaded by load_all_skills — registered via fallback.")
+
 if not registry.get("folder_reader"):
     registry.register("folder_reader", FolderReaderSkill())
     logger.warning("folder_reader was not loaded by load_all_skills — registered via fallback.")
