@@ -1,6 +1,6 @@
-# ◈ Jarvis
+# ◈ Jarvis MK II
 
-A skill-based Jarvis — Python/FastAPI backend + React web UI.
+A skill-based Jarvis MK II — Python/FastAPI backend + React web UI.
 Default LLM: **DeepSeek**. Also supports Ollama/Llama (local), Anthropic, OpenAI.
 
 ---
