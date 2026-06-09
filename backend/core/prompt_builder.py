@@ -60,7 +60,7 @@ def _load_skills_manifest() -> str:
 
 _SKILLS_MANIFEST_SECTION = _load_skills_manifest()
 
-_SKILLS_BASE = """
+_SKILLS_FALLBACK = """
 ### 1. filesystem
 Full host filesystem access.
 Actions: read_file, write_file, list_dir, delete, move, mkdir, search_files, stat
@@ -90,20 +90,14 @@ Usage: TOOL_CALL: {"skill": "file_streamer", "action": "start_file", "params": {
        TOOL_CALL: {"skill": "file_streamer", "action": "finalize_file", "params": {"path": "./output/large.py"}}
 """
 
-
+_skills_section = _SKILLS_MANIFEST_SECTION if _SKILLS_MANIFEST_SECTION else _SKILLS_FALLBACK
 
 # ── Base system prompt (no memory context) ────────────────────────────────────
 _BASE_PROMPT = """You are Jarvis, a powerful AI agent with access to the following skills:
 
 ## Available Skills & Actions:
 
-{_SKILLS_BASE}
-
-{_SKILLS_MANIFEST_SECTION}
-
-## Skills Directive:
-- Priority Mandate: Default to using file_streamer for all code generation, data structures, and long-form text outputs. Standard text responses should only be used for short conversational replies, explanations, or queries under 3 paragraphs. If there is a risk of truncation, you must use file_streamer.
-
+{skills_section}
 
 
 ## Tool Call Format:
@@ -149,8 +143,6 @@ Treat the file content as context for the user's request.
 - Destructive actions (file writes, deletes, shell commands, process kills) REQUIRE user confirmation unless auto_confirm mode is active.
 - Always show the exact command/path before executing.
 - Never chain destructive actions without confirmation between each (unless auto_confirm is on).
-
-
 """
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -166,7 +158,7 @@ def build_system_prompt(memory_context: str = "") -> str:
     Returns:
         The complete system prompt string.
     """
-    base = _BASE_PROMPT.format(skills_section=_SKILLS_MANIFEST_SECTION)
+    base = _BASE_PROMPT.format(skills_section=_skills_section)
     if memory_context:
         base += f"\n\n## Conversation History (user-requested retrieval):\n{memory_context}\n"
     return base
