@@ -166,7 +166,7 @@ def build_system_prompt(memory_context: str = "") -> str:
     Returns:
         The complete system prompt string.
     """
-    base = _BASE_PROMPT.format(skills_section=_skills_section)
+    base = _BASE_PROMPT.format(skills_section=_SKILLS_MANIFEST_SECTION)
     if memory_context:
         base += f"\n\n## Conversation History (user-requested retrieval):\n{memory_context}\n"
     return base
