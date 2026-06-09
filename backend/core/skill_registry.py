@@ -44,6 +44,9 @@ class SkillRegistry:
                 "name": name,
                 "description": getattr(skill, "description", ""),
                 "actions": getattr(skill, "actions", []),
+                "usage": getattr(skill, "usage", []),
+                "params": getattr(skill, "params", []),
+                "returns": getattr(skill, "returns", []),
             })
         return result
 

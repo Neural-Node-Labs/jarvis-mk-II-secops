@@ -295,7 +295,7 @@ const SchemaViewer = ({ schema }) => {
 const InlineModelSwitcher = ({ providerInfo, onChanged }) => {
   const [open, setOpen] = useState(false);
   const [provider, setProvider] = useState(providerInfo.provider || "deepseek");
-  const [model, setModel] = useState(providerInfo.model || "deepseek-chat");
+  const [model, setModel] = useState(providerInfo.model || "deepseek-coder");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const ref = useRef(null);
@@ -310,7 +310,7 @@ const InlineModelSwitcher = ({ providerInfo, onChanged }) => {
 
   useEffect(() => {
     setProvider(providerInfo.provider || "deepseek");
-    setModel(providerInfo.model || "deepseek-chat");
+    setModel(providerInfo.model || "deepseek-coder");
   }, [providerInfo]);
 
   const prov = PROVIDERS[provider] || PROVIDERS.deepseek;
@@ -492,7 +492,7 @@ const MemoryPanel = ({ onClose }) => {
 const SettingsTab = ({ onClose, onSaved }) => {
   const [cfg, setCfg] = useState(null);
   const [provider, setProvider] = useState("deepseek");
-  const [model, setModel] = useState("deepseek-chat");
+  const [model, setModel] = useState("deepseek-coder");
   const [customModel, setCustomModel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
@@ -941,7 +941,7 @@ export default function App() {
   const [pendingConfirms, setPendingConfirms] = useState([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
-  const [providerInfo, setProviderInfo] = useState({ provider: "deepseek", model: "deepseek-chat", schema_format: "openai" });
+  const [providerInfo, setProviderInfo] = useState({ provider: "deepseek", model: "deepseek-coder", schema_format: "openai" });
   const [skills, setSkills] = useState([]);
 
   // ── Upload state ──

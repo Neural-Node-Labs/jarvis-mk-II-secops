@@ -30,7 +30,7 @@ if [ ! -f "package.json" ]; then
 fi
 
 # Overwrite App.jsx with our version
-cp src/App.jsx src/App.jsx.bak 2>/dev/null || true
+cp src/App.tsx src/App.tsx.bak 2>/dev/null || true
 
 npm install -q
 echo "  ✓ Frontend dependencies installed"

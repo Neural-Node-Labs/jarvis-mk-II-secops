@@ -1,0 +1,761 @@
+{
+  "version": "1.1.0",
+  "last_updated": "2026-06-03",
+  "secops_skills": [
+    {
+      "name": "port_scanner",
+      "description": "Scan TCP ports on a target host",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "dns_lookup",
+      "description": "DNS record resolution (A, AAAA, MX, TXT, etc.)",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "whois_lookup",
+      "description": "WHOIS domain/IP ownership lookup",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "ssl_cert_inspector",
+      "description": "Inspect SSL/TLS certificates",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "http_header_analyzer",
+      "description": "Analyze HTTP response headers for security",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "network_recon",
+      "description": "Full network reconnaissance",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "dns_security",
+      "description": "DNS security checks (zone transfer, DNSSEC, etc.)",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "cve_lookup",
+      "description": "Look up CVE details from NVD/NIST API",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "ip_reputation",
+      "description": "Check IP reputation against threat feeds",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "hash_lookup",
+      "description": "File hash lookups (MD5, SHA1, SHA256)",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "ioc_extractor",
+      "description": "Extract Indicators of Compromise from text",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "log_analyzer",
+      "description": "Parse and analyze log files",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "vulnerability_scorer",
+      "description": "Score vulnerabilities by severity",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "vulnerability_assessment",
+      "description": "Full vulnerability assessment",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "web_app_scanner",
+      "description": "Scan web applications for vulnerabilities",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "api_security_audit",
+      "description": "Audit API security posture",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "firewall_auditor",
+      "description": "Analyze firewall rules and configurations",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "password_audit",
+      "description": "Password strength and policy auditing",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "cloud_posture",
+      "description": "Assess cloud security posture",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "container_scanner",
+      "description": "Scan container images for vulnerabilities",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "utility",
+      "description": "General utility functions",
+      "actions": [
+        "run"
+      ]
+    }
+  ],
+  "architect_skills": [
+    {
+      "name": "cbd_architect",
+      "description": "CBD v2.2 methodology enforcer",
+      "actions": [
+        "analyze_request",
+        "generate_blueprint",
+        "implement_component",
+        "validate_component",
+        "validate_blueprint",
+        "version_read",
+        "experienced_lookup",
+        "experienced_capture",
+        "experienced_promote",
+        "experienced_search",
+        "experienced_rebuild_index",
+        "get_template",
+        "get_skills_registry"
+      ]
+    }
+  ],
+  "brain_skills": [
+    {
+      "name": "memory_manager",
+      "description": "Exposes per-user conversation history persistence, listing, and file manipulation directly to the agent.",
+      "actions": [
+        "retrieve",
+        "clear",
+        "list_users"
+      ],
+      "action_schemas": {
+        "retrieve": {
+          "description": "Retrieve the last 'n' conversation turns as a formatted Markdown string for context.",
+          "params": {
+            "user_id": {
+              "type": "string",
+              "required": false,
+              "default": "default",
+              "description": "Identifier for the target user session history."
+            },
+            "n": {
+              "type": "integer",
+              "required": false,
+              "default": 10,
+              "description": "Number of previous turns to fetch from history."
+            }
+          },
+          "returns": {
+            "user_id": {
+              "type": "string"
+            },
+            "history": {
+              "type": "string"
+            }
+          }
+        },
+        "clear": {
+          "description": "Permanently delete the history log file for a specific user ID. Gated behind a confirmation prompt.",
+          "params": {
+            "user_id": {
+              "type": "string",
+              "required": false,
+              "default": "default",
+              "description": "Identifier for the user whose history will be permanently erased."
+            }
+          },
+          "returns": {
+            "user_id": {
+              "type": "string"
+            },
+            "cleared": {
+              "type": "boolean"
+            }
+          }
+        },
+        "list_users": {
+          "description": "List all unique user IDs that currently have active conversation history logs saved on disk.",
+          "params": {},
+          "returns": {
+            "users": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "system_skills": [
+    {
+      "name": "image_vision",
+      "description": "Analyze images using the LLM's vision capability. Supports general analysis, description, OCR text extraction, object/face/logo detection, and two-image comparison. Accepts base64, URL, or local file path as input. [Registry key: image_vision \u2014 matches main.py registration]",
+      "actions": [
+        "analyze",
+        "describe",
+        "ocr",
+        "detect",
+        "compare",
+        "check_support"
+      ],
+      "action_schemas": {
+        "analyze": {
+          "description": "General-purpose image analysis with a custom prompt.",
+          "params": {
+            "image_b64": {
+              "type": "string",
+              "required": false,
+              "description": "Base64-encoded image string."
+            },
+            "image_url": {
+              "type": "string",
+              "required": false,
+              "description": "Publicly accessible image URL."
+            },
+            "image_path": {
+              "type": "string",
+              "required": false,
+              "description": "Local filesystem path to the image."
+            },
+            "mime": {
+              "type": "string",
+              "required": false,
+              "default": "image/jpeg",
+              "description": "MIME type, e.g., image/png."
+            },
+            "prompt": {
+              "type": "string",
+              "required": false,
+              "default": "Analyze this image thoroughly and describe everything you observe.",
+              "description": "Custom instruction for the model."
+            }
+          },
+          "returns": {
+            "action": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "analysis": {
+              "type": "string"
+            }
+          }
+        },
+        "describe": {
+          "description": "Plain-language detailed description of image contents.",
+          "params": {
+            "image_b64": {
+              "type": "string",
+              "required": false
+            },
+            "image_url": {
+              "type": "string",
+              "required": false
+            },
+            "image_path": {
+              "type": "string",
+              "required": false
+            },
+            "mime": {
+              "type": "string",
+              "required": false,
+              "default": "image/jpeg"
+            }
+          },
+          "returns": {
+            "action": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            }
+          }
+        },
+        "ocr": {
+          "description": "Extract all visible text from an image preserving the original layout.",
+          "params": {
+            "image_b64": {
+              "type": "string",
+              "required": false
+            },
+            "image_url": {
+              "type": "string",
+              "required": false
+            },
+            "image_path": {
+              "type": "string",
+              "required": false
+            },
+            "mime": {
+              "type": "string",
+              "required": false,
+              "default": "image/jpeg"
+            }
+          },
+          "returns": {
+            "action": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "extracted_text": {
+              "type": "string"
+            }
+          }
+        },
+        "detect": {
+          "description": "Detect specific objects, faces, logos, or elements in an image.",
+          "params": {
+            "image_b64": {
+              "type": "string",
+              "required": false
+            },
+            "image_url": {
+              "type": "string",
+              "required": false
+            },
+            "image_path": {
+              "type": "string",
+              "required": false
+            },
+            "mime": {
+              "type": "string",
+              "required": false,
+              "default": "image/jpeg"
+            },
+            "target": {
+              "type": "string",
+              "required": false,
+              "default": "objects, faces, text, logos",
+              "description": "What specific elements to look for."
+            }
+          },
+          "returns": {
+            "action": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            },
+            "detections": {
+              "type": "string"
+            }
+          }
+        },
+        "compare": {
+          "description": "Compare two images and thoroughly describe differences, similarities, and quality alterations.",
+          "params": {
+            "image_b64": {
+              "type": "string",
+              "required": false,
+              "description": "First image base64."
+            },
+            "image_url": {
+              "type": "string",
+              "required": false,
+              "description": "First image URL."
+            },
+            "image_path": {
+              "type": "string",
+              "required": false,
+              "description": "First image local path."
+            },
+            "mime": {
+              "type": "string",
+              "required": false,
+              "default": "image/jpeg"
+            },
+            "image_b64_2": {
+              "type": "string",
+              "required": false,
+              "description": "Second image base64."
+            },
+            "image_url_2": {
+              "type": "string",
+              "required": false,
+              "description": "Second image URL."
+            },
+            "image_path_2": {
+              "type": "string",
+              "required": false,
+              "description": "Second image local path."
+            },
+            "mime_2": {
+              "type": "string",
+              "required": false,
+              "default": "image/jpeg"
+            }
+          },
+          "returns": {
+            "action": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "comparison": {
+              "type": "string"
+            }
+          }
+        },
+        "check_support": {
+          "description": "Return information about whether the currently configured LLM model supports vision features.",
+          "params": {},
+          "returns": {
+            "current_model": {
+              "type": "string"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "vision_supported": {
+              "type": "boolean"
+            },
+            "vision_capable_models": {
+              "type": "object"
+            },
+            "note": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "multimodal_analyzer",
+      "description": "Extracts text, identifies visual features, and performs deep analysis on images or PDF documents using multimodal capabilities.",
+      "actions": [
+        "run"
+      ]
+    },
+    {
+      "name": "filesystem",
+      "description": "Full host filesystem access",
+      "actions": [
+        "read_file",
+        "write_file",
+        "list_dir",
+        "delete",
+        "move",
+        "mkdir",
+        "search_files",
+        "stat"
+      ]
+    },
+    {
+      "name": "os_execution",
+      "description": "Full OS control \u2014 run commands, manage processes",
+      "actions": [
+        "run_command",
+        "list_processes",
+        "kill_process",
+        "send_signal",
+        "system_info",
+        "env_vars"
+      ]
+    },
+    {
+      "name": "file_streamer",
+      "description": "Handles large file payloads by allowing chunked, segmented appending to bypass LLM max_token generation constraints. Essential for writing files that exceed single-turn output limits.",
+      "actions": [
+        "start_file",
+        "append_chunk",
+        "finalize_file"
+      ],
+      "action_schemas": {
+        "start_file": {
+          "description": "Create (or overwrite) the target file and open a stream session.",
+          "params": {
+            "path": {
+              "type": "string",
+              "required": true,
+              "description": "Destination file path (relative or absolute). Parent directories are created automatically."
+            },
+            "overwrite": {
+              "type": "boolean",
+              "required": false,
+              "default": false,
+              "description": "If false (default), returns an error when the file already exists. Set true to truncate and replace."
+            }
+          },
+          "returns": {
+            "path": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "stream_opened"
+              ]
+            },
+            "bytes_written": {
+              "type": "integer"
+            }
+          }
+        },
+        "append_chunk": {
+          "description": "Append a text chunk to a previously opened stream. Call repeatedly until all content is written.",
+          "params": {
+            "path": {
+              "type": "string",
+              "required": true,
+              "description": "Must match the path used in the corresponding start_file call."
+            },
+            "content": {
+              "type": "string",
+              "required": true,
+              "description": "Raw text content to append. No size restriction \u2014 split across as many turns as needed."
+            }
+          },
+          "returns": {
+            "path": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "chunk_appended"
+              ]
+            },
+            "chunk_bytes": {
+              "type": "integer"
+            },
+            "total_bytes": {
+              "type": "integer"
+            }
+          }
+        },
+        "finalize_file": {
+          "description": "Close the stream session. Must be called once after all append_chunk calls.",
+          "params": {
+            "path": {
+              "type": "string",
+              "required": true,
+              "description": "Must match the path used in start_file."
+            }
+          },
+          "returns": {
+            "path": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "stream_finalized"
+              ]
+            },
+            "total_bytes": {
+              "type": "integer"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "folder_reader",
+      "description": "Given a folder path, walks the entire directory tree, reads all readable text files, and either returns raw structure + content (scan) or forwards everything to the LLM with an optional instruction prompt for analysis, review, summarization, or any code-level task (analyze).",
+      "actions": [
+        "scan",
+        "analyze"
+      ],
+      "action_schemas": {
+        "scan": {
+          "description": "Walk folder and return tree structure + file contents as structured data. No LLM call.",
+          "params": {
+            "folder": {
+              "type": "string",
+              "required": true,
+              "description": "Path to the folder to scan."
+            },
+            "include_extensions": {
+              "type": "array",
+              "required": false,
+              "description": "Whitelist of extensions e.g. [\".py\", \".js\"]. Omit to include all text files."
+            },
+            "exclude_extensions": {
+              "type": "array",
+              "required": false,
+              "description": "Blacklist of extensions e.g. [\".lock\", \".min.js\"]."
+            },
+            "exclude_dirs": {
+              "type": "array",
+              "required": false,
+              "description": "Additional directory names to skip on top of defaults (node_modules, .git, etc.)."
+            },
+            "max_file_bytes": {
+              "type": "integer",
+              "required": false,
+              "default": 524288,
+              "description": "Per-file read cap in bytes. Files larger than this are skipped."
+            },
+            "follow_symlinks": {
+              "type": "boolean",
+              "required": false,
+              "default": true,
+              "description": "Whether to follow symbolic links."
+            }
+          },
+          "returns": {
+            "folder": {
+              "type": "string"
+            },
+            "tree": {
+              "type": "string",
+              "description": "Pretty-printed directory tree."
+            },
+            "file_count": {
+              "type": "integer"
+            },
+            "skipped_count": {
+              "type": "integer"
+            },
+            "files": {
+              "type": "array",
+              "description": "List of {rel_path, size_bytes, content}."
+            },
+            "skipped": {
+              "type": "array",
+              "description": "List of {rel_path, reason}."
+            }
+          }
+        },
+        "analyze": {
+          "description": "Walk folder, build context payload, call LLM with optional instruction, return LLM response.",
+          "params": {
+            "folder": {
+              "type": "string",
+              "required": true,
+              "description": "Path to the folder to analyze."
+            },
+            "prompt": {
+              "type": "string",
+              "required": false,
+              "description": "Instruction for the LLM e.g. 'Find security issues in this codebase'. Defaults to a general architecture + issue review."
+            },
+            "include_extensions": {
+              "type": "array",
+              "required": false,
+              "description": "Whitelist of extensions."
+            },
+            "exclude_extensions": {
+              "type": "array",
+              "required": false,
+              "description": "Blacklist of extensions."
+            },
+            "exclude_dirs": {
+              "type": "array",
+              "required": false,
+              "description": "Extra dirs to skip."
+            },
+            "max_file_bytes": {
+              "type": "integer",
+              "required": false,
+              "default": 524288,
+              "description": "Per-file read cap in bytes."
+            },
+            "max_context_bytes": {
+              "type": "integer",
+              "required": false,
+              "default": 204800,
+              "description": "Total context cap sent to LLM in bytes."
+            },
+            "follow_symlinks": {
+              "type": "boolean",
+              "required": false,
+              "default": true,
+              "description": "Whether to follow symbolic links."
+            }
+          },
+          "returns": {
+            "folder": {
+              "type": "string"
+            },
+            "file_count": {
+              "type": "integer"
+            },
+            "skipped_count": {
+              "type": "integer"
+            },
+            "skipped": {
+              "type": "array"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "llm_response": {
+              "type": "string"
+            },
+            "context_bytes": {
+              "type": "integer"
+            }
+          }
+        }
+      }
+    }
+  ]
+}
