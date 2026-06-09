@@ -861,7 +861,7 @@ const LoginScreen = ({ onAuth }) => {
       }}>
         <div style={{ textAlign: "center", marginBottom: 28 }}>
           <div style={{ color: "#4FFFFF", fontSize: 22, fontWeight: "bold", letterSpacing: 3 }}>
-            ◈ JARVIS
+            ◈  JARVIS MK II
           </div>
           <div style={{ color: "#3a6a3a", fontSize: 10, marginTop: 6, letterSpacing: 2 }}>
             SECURE ACCESS TERMINAL
@@ -1270,7 +1270,7 @@ export default function App() {
         position: "sticky", top: 0, zIndex: 10,
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <span style={{ color: "#4FFFFF", fontSize: 15, fontWeight: "bold", letterSpacing: 2 }}>◈ JARVIS</span>
+          <span style={{ color: "#4FFFFF", fontSize: 15, fontWeight: "bold", letterSpacing: 2 }}>◈  JARVIS MK II</span>
           <span style={{
             padding: "2px 7px", borderRadius: 3, fontSize: 10,
             background: connected ? "#0a1f0a" : "#1f0a0a",
