@@ -1,195 +1,166 @@
 """
-Memory Manager — per-user conversation history persisted as Markdown files.
+Memory Manager — Per-user conversation history persistence.
+Implements EpisodicStore from memory-blueprint.md.
+Stores to Markdown files on disk. No external DB required.
 
-Design principles:
-  • One .md file per user_id under MEMORY_DIR.
-  • History is NEVER sent to the LLM automatically — it is injected only when
-    the user explicitly requests retrieval (e.g. "show last 10 conversations").
-  • Each saved entry records: timestamp, role, and message content.
-  • Large file attachments are summarised (not stored verbatim) to keep files lean.
-
-Public API:
-  manager = MemoryManager()
-  manager.save_turn(user_id, role, content)
-  history = manager.retrieve_last_n(user_id, n=10)  → formatted Markdown string
-  manager.clear(user_id)                             → wipes the user's file
+version: 2.0.0
+changelog:
+  1.0.0 - Initial file-backed memory with save/retrieve
+  2.0.0 - No Pydantic. Added detect_retrieval_request(), clear(), search().
+          Thread-safe file writes. Memory dir configurable via env.
+          Graceful failure — memory errors never block the agent.
 """
-
 import os
 import re
 import logging
+import threading
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("memory_manager")
 
-# ── Configuration ──────────────────────────────────────────────────────────────
-MEMORY_DIR = Path(os.getenv("MEMORY_DIR", "/app/data/memory"))
-MAX_CONTENT_CHARS = 2000   # truncate individual messages longer than this
-ATTACHMENT_PLACEHOLDER = "[attachment: {name} ({mime}, {size})]"
+MEMORY_DIR   = os.getenv("MEMORY_DIR", "./data/memory")
+MAX_TURNS    = int(os.getenv("MEMORY_MAX_TURNS", "200"))   # Max turns kept per user
 
-# ── Detect if user is asking for history retrieval ─────────────────────────────
+# ── Retrieval trigger patterns ─────────────────────────────────────────────────
 _RETRIEVAL_PATTERNS = [
+    r"\b(continue|resume|pick\s*up)\b",
     r"retrieve\s+(?:last\s+)?(\d+)\s+conversations?",
-    r"show\s+(?:last\s+)?(\d+)\s+conversations?",
-    r"last\s+(\d+)\s+conversations?",
+    r"show\s+(?:me\s+)?(?:the\s+)?(?:last\s+)?(\d+)\s+conversations?",
     r"conversation\s+history",
-    r"show\s+(?:my\s+)?history",
-    r"recall\s+(?:last\s+)?(\d+)",
-    r"remember\s+(?:last\s+)?(\d+)",
+    r"what\s+did\s+(?:we|i)\s+(?:talk|discuss|do)\s+(?:last|before|earlier)",
 ]
 
-_COMPILED = [re.compile(p, re.IGNORECASE) for p in _RETRIEVAL_PATTERNS]
+_RETRIEVAL_N_PATTERN = re.compile(r"(\d+)\s+conversations?", re.IGNORECASE)
+
+_WRITE_LOCK = threading.Lock()
 
 
-def detect_retrieval_request(text: str) -> Optional[int]:
+def detect_retrieval_request(message: str) -> Optional[int]:
     """
-    Returns the number of conversations requested if the message is a
-    history-retrieval request, otherwise returns None.
-
-    Examples:
-      "retrieve last 10 conversations" → 10
-      "show my conversation history"   → 20 (default)
-      "what is the weather"            → None
+    Scan a user message for memory retrieval triggers.
+    Returns the number of turns requested, or None if not a retrieval request.
+    Default n=5 if a trigger matches but no number specified.
     """
-    for pattern in _COMPILED:
-        m = pattern.search(text)
-        if m:
-            try:
-                return int(m.group(1))
-            except (IndexError, TypeError):
-                return 20   # default count when no number given
+    lower = message.lower()
+    for pattern in _RETRIEVAL_PATTERNS:
+        if re.search(pattern, lower):
+            m = _RETRIEVAL_N_PATTERN.search(message)
+            n = int(m.group(1)) if m else 5
+            return min(n, 20)  # hard cap: 20 turns max injection
     return None
 
 
-# ── MemoryManager ──────────────────────────────────────────────────────────────
-
 class MemoryManager:
-    def __init__(self, memory_dir: Path = MEMORY_DIR):
-        self.memory_dir = memory_dir
-        self.memory_dir.mkdir(parents=True, exist_ok=True)
+    """
+    File-backed per-user conversation memory.
+    Each user gets a Markdown file at MEMORY_DIR/{user_id}.md
 
-    def _path(self, user_id: str) -> Path:
-        # Sanitise user_id to a safe filename
-        safe = re.sub(r"[^\w\-]", "_", user_id)[:64] or "default"
-        return self.memory_dir / f"{safe}.md"
+    All public methods are safe — exceptions are caught and logged,
+    never propagated to the caller (memory must never block the agent).
+    """
 
-    # ── Write ──────────────────────────────────────────────────────────────────
+    def __init__(self, memory_dir: str = None):
+        self.memory_dir = memory_dir or MEMORY_DIR
+        self._ensure_dir()
 
-    def save_turn(
-        self,
-        user_id: str,
-        role: str,
-        content: str,
-        attachments: Optional[list] = None,
-    ) -> None:
-        """
-        Append a single conversation turn to the user's history file.
-
-        Args:
-            user_id:     Identifier for the user (e.g. "default", session ID).
-            role:        "user" | "assistant" | "tool_call" | "tool_result"
-            content:     Message text.
-            attachments: Optional list of dicts with keys: name, mime, size.
-        """
-        path = self._path(user_id)
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-        # Summarise oversized content
-        body = content
-        if len(body) > MAX_CONTENT_CHARS:
-            body = body[:MAX_CONTENT_CHARS] + f"\n… [truncated, {len(content)} chars total]"
-
-        # Append attachment placeholders
-        att_lines = ""
-        if attachments:
-            for att in attachments:
-                att_lines += "\n" + ATTACHMENT_PLACEHOLDER.format(
-                    name=att.get("name", "file"),
-                    mime=att.get("mime", "unknown"),
-                    size=att.get("size", "?"),
-                )
-
-        role_display = role.upper()
-        entry = (
-            f"\n---\n"
-            f"**[{ts}] {role_display}**\n\n"
-            f"{body}{att_lines}\n"
-        )
-
+    def _ensure_dir(self):
         try:
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(entry)
-        except OSError as e:
-            logger.error("MemoryManager: failed to write %s: %s", path, e)
+            os.makedirs(self.memory_dir, exist_ok=True)
+        except Exception as exc:
+            logger.error("[memory_dir_error] %s", exc)
 
-    def save_conversation_block(
-        self,
-        user_id: str,
-        user_msg: str,
-        assistant_msg: str,
-        attachments: Optional[list] = None,
-    ) -> None:
-        """Convenience: save a complete user+assistant exchange in one call."""
-        self.save_turn(user_id, "user", user_msg, attachments=attachments)
+    def _user_path(self, user_id: str) -> str:
+        safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", user_id)[:64]
+        return os.path.join(self.memory_dir, f"{safe}.md")
+
+    # ── Write API ──────────────────────────────────────────────────────────────
+
+    def save_turn(self, user_id: str, role: str, content: str) -> None:
+        """Append a single turn to the user's memory file."""
+        try:
+            ts      = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            content = content[:4000]  # cap per turn to avoid bloat
+            block   = f"\n### [{ts}] {role.upper()}\n{content}\n"
+            path    = self._user_path(user_id)
+            with _WRITE_LOCK:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(block)
+        except Exception as exc:
+            logger.warning("[memory_save_turn_error] user=%s err=%s", user_id, exc)
+
+    def save_conversation_block(self, user_id: str, user_msg: str, assistant_msg: str) -> None:
+        """Append a user+assistant exchange as a block."""
+        self.save_turn(user_id, "user", user_msg)
         self.save_turn(user_id, "assistant", assistant_msg)
 
-    # ── Read ───────────────────────────────────────────────────────────────────
+    # ── Read API ───────────────────────────────────────────────────────────────
 
-    def retrieve_last_n(self, user_id: str, n: int = 10) -> str:
+    def retrieve_last_n(self, user_id: str, n: int = 5) -> str:
         """
-        Return the last *n* conversation turns as a formatted Markdown string,
-        suitable for injection into the LLM context.
-
-        Returns an empty string if there is no history.
+        Return the last n conversation turns as a formatted string.
+        Returns empty string if no history exists.
         """
-        path = self._path(user_id)
-        if not path.exists():
-            return "_No conversation history found for this user._"
-
         try:
-            raw = path.read_text(encoding="utf-8")
-        except OSError as e:
-            logger.error("MemoryManager: failed to read %s: %s", path, e)
-            return "_Error reading conversation history._"
+            path = self._user_path(user_id)
+            if not os.path.isfile(path):
+                return ""
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
 
-        # Split on the separator we write between entries
-        parts = [p.strip() for p in raw.split("\n---\n") if p.strip()]
-        last_n = parts[-n:] if len(parts) > n else parts
+            # Split by turn headers and take last n*2 (user+assistant pairs)
+            blocks = re.split(r"(?=### \[)", content)
+            blocks = [b.strip() for b in blocks if b.strip()]
+            recent = blocks[-(n * 2):]
+            return "\n\n".join(recent)
+        except Exception as exc:
+            logger.warning("[memory_retrieve_error] user=%s err=%s", user_id, exc)
+            return ""
 
-        if not last_n:
-            return "_No conversation history found for this user._"
-
-        header = f"### Last {len(last_n)} conversation turn(s) for user `{user_id}`:\n\n"
-        return header + "\n\n---\n\n".join(last_n)
-
-    def retrieve_all(self, user_id: str) -> str:
-        """Return entire history as a raw Markdown string."""
-        path = self._path(user_id)
-        if not path.exists():
-            return "_No conversation history._"
+    def search(self, user_id: str, query: str, max_results: int = 5) -> list[str]:
+        """
+        Full-text search across a user's memory file.
+        Returns matching turn blocks (case-insensitive).
+        """
         try:
-            return path.read_text(encoding="utf-8")
-        except OSError:
-            return "_Error reading history._"
+            path = self._user_path(user_id)
+            if not os.path.isfile(path):
+                return []
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
 
-    # ── Manage ─────────────────────────────────────────────────────────────────
+            blocks  = re.split(r"(?=### \[)", content)
+            query_l = query.lower()
+            matches = [b.strip() for b in blocks if query_l in b.lower()]
+            return matches[-max_results:]
+        except Exception as exc:
+            logger.warning("[memory_search_error] user=%s err=%s", user_id, exc)
+            return []
 
     def clear(self, user_id: str) -> bool:
-        """Delete the user's history file. Returns True if it existed."""
-        path = self._path(user_id)
-        if path.exists():
-            path.unlink()
-            logger.info("MemoryManager: cleared history for %s", user_id)
+        """Delete all stored memory for a user. Returns True on success."""
+        try:
+            path = self._user_path(user_id)
+            if os.path.isfile(path):
+                with _WRITE_LOCK:
+                    os.remove(path)
+            logger.info("[memory_cleared] user=%s", user_id)
             return True
-        return False
+        except Exception as exc:
+            logger.warning("[memory_clear_error] user=%s err=%s", user_id, exc)
+            return False
 
-    def list_users(self) -> list:
-        """Return a list of user IDs that have history files."""
-        return [p.stem for p in self.memory_dir.glob("*.md")]
-
-    def file_size(self, user_id: str) -> int:
-        """Return the size of the user's history file in bytes, or 0."""
-        path = self._path(user_id)
-        return path.stat().st_size if path.exists() else 0
+    def get_stats(self, user_id: str) -> dict:
+        """Return basic stats about a user's memory file."""
+        try:
+            path = self._user_path(user_id)
+            if not os.path.isfile(path):
+                return {"exists": False, "turns": 0, "size_bytes": 0}
+            size = os.path.getsize(path)
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            turns = len(re.findall(r"^### \[", content, re.MULTILINE))
+            return {"exists": True, "turns": turns, "size_bytes": size, "path": path}
+        except Exception as exc:
+            logger.warning("[memory_stats_error] user=%s err=%s", user_id, exc)
+            return {"exists": False, "error": str(exc)}

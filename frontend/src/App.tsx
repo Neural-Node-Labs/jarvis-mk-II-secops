@@ -4,8 +4,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 const _base = import.meta.env.VITE_API_URL || "";
 const _wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
 const WS_URL = _base
-  ? `${_base.replace(/^http/, "ws")}/ws/chat`
-  : `${_wsProto}//${window.location.host}/ws/chat`;
+  ? `${_base.replace(/^http/, "ws")}/ws/chat/tony`
+  : `${_wsProto}//${window.location.host}/ws/chat/tony`;
 const API_URL = _base ? `${_base}/api` : `/api`;
 
 // ─── Provider catalogue ───────────────────────────────────────────────────────
