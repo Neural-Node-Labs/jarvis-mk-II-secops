@@ -25,3 +25,4 @@ output/*
 /archive/*
 /jarvis/*
 /.idea/*
+/backend/venv/
