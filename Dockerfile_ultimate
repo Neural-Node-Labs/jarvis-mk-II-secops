@@ -1,4 +1,4 @@
-# --- Stage 1: Build React app ---
+# ─── Stage 1: Build React app ────────────────────────────────────────────────
 FROM node:20-alpine AS frontend-builder
 
 WORKDIR /app
@@ -10,13 +10,16 @@ COPY frontend/ ./
 RUN npm run build
 
 
-# --- Stage 2: Combined runtime ---
+# ─── Stage 2: Combined runtime ───────────────────────────────────────────────
 FROM kalilinux/kali-rolling AS runtime
 
-# --- ALL SecOps + Hacker tools ---
+# ─── THE ULTIMATE KALI PENTESTING SUITE ──────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    # ── Kali identity ──
         kali-defaults \
         kali-grant-root \
+        kali-linux-headless \
+    # ── Core network recon ──
         nmap \
         masscan \
         netcat-openbsd \
@@ -29,6 +32,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         fierce \
         recon-ng \
         theharvester \
+        amass \
+        sublist3r \
+        httprobe \
+        hakrawler \
+        gau \
+    # ── Web app testing ──
         nikto \
         gobuster \
         wfuzz \
@@ -36,10 +45,35 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         dirb \
         sqlmap \
         zaproxy \
+        sslyze \
+        burpsuite \
+        beef-xss \
+        ffuf \
+        wpscan \
+        joomscan \
+        commix \
+        xsser \
+        wapiti \
+    # ── Exploitation & payloads ──
         metasploit-framework \
         hydra \
         john \
         exploitdb \
+        shellter \
+        msfpc \
+        veil \
+        gophish \
+        empire \
+        starkiller \
+        koadic \
+    # ── Password cracking ──
+        hashcat \
+        hashcat-utils \
+        hashcat-data \
+        cewl \
+        crunch \
+        rsmangler \
+    # ── Windows/AD pentesting ──
         responder \
         smbclient \
         enum4linux \
@@ -50,9 +84,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         certipy-ad \
         evil-winrm \
         netexec \
+        mimikatz \
+        kerberoast \
+        crackmapexec \
+    # ── Tunneling & pivoting ──
         chisel \
+        proxychains4 \
+    # ── OSINT & social engineering ──
         setoolkit \
-        sslyze \
+        python3-shodan \
+        device-pharmer \
+    # ── Wireless / RF ──
+        aircrack-ng \
+        mdk4 \
+        wifite \
+        kismet \
+        reaver \
+        bully \
+        blue-hydra \
+    # ── System auditing & privesc ──
+        lynis \
+        rkhunter \
+        unhide \
+        peass \
+        ssh-audit \
+        gvm \
+    # ── Forensics & stego ──
+        exiftool \
+        steghide \
+        stegseek \
+        forensics-extra \
+    # ── Runtime & build deps ──
         nginx \
         supervisor \
         wget \
