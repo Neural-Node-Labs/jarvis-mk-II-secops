@@ -26,10 +26,12 @@ import hmac
 import hashlib
 from pathlib import Path
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Depends, Request, Body
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from typing import Optional, Dict, Any
+from pydantic import BaseModel
+from typing import Optional
+
 from core.llm_router import LLMConfig, PROVIDER_DEFAULTS, MODEL_MAX_TOKENS, get_model_max_tokens, DEFAULT_MAX_TOKENS
 from core.skill_registry import SkillRegistry
 from skills import load_all_skills
@@ -224,58 +226,34 @@ app.add_middleware(
 
 
 # ── Models ─────────────────────────────────────────────────────────────────────
-class LoginRequest:
-    def __init__(self, username: str, password: str):
-        self.username = username
-        self.password = password
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
-        return cls(username=data["username"], password=data["password"])
+class ConfigUpdate(BaseModel):
+    provider: str
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    temperature: Optional[float] = 0.7
+    max_tokens: Optional[int] = None   # None → auto from model
+    schema_format: Optional[str] = None
 
-class ImplementationConfigUpdate:
-    def __init__(self, **kwargs):
-        self.provider = kwargs.get("provider")
-        self.model = kwargs.get("model")
-        self.api_key = kwargs.get("api_key")
-        self.base_url = kwargs.get("base_url")
-        self.temperature = kwargs.get("temperature", 0.7)
-        self.max_tokens = kwargs.get("max_tokens")
-        self.schema_format = kwargs.get("schema_format")
+class ConfirmRequest(BaseModel):
+    confirm_id: str
 
-class ConfirmRequest:
-    def __init__(self, confirm_id: str):
-        self.confirm_id = confirm_id
+class EvolutionStartRequest(BaseModel):
+    target_skill: str = ""
+    task_description: str = ""
 
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
-        return cls(confirm_id=data["confirm_id"])
+class EvolutionActionRequest(BaseModel):
+    workspace_id: Optional[str] = None
 
-class EvolutionStartRequest:
-    def __init__(self, target_skill: str = "", task_description: str = ""):
-        self.target_skill = target_skill
-        self.task_description = task_description
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
-        return cls(
-            target_skill=data.get("target_skill", ""),
-            task_description=data.get("task_description", "")
-        )
-
-class EvolutionActionRequest:
-    def __init__(self, workspace_id: Optional[str] = None):
-        self.workspace_id = workspace_id
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
-        return cls(workspace_id=data.get("workspace_id"))
 
 # ── Auth endpoint ─────────────────────────────────────────────────────────────
-@app.post("/api/auth/login", response_model=None)
-async def login(data: Dict[str, Any] = Body(...)):
+@app.post("/api/auth/login")
+async def login(req: LoginRequest):
     """Exchange {username, password} for a Bearer JWT. No auth required on this endpoint."""
-    req = LoginRequest.from_dict(data)
     if not AUTH_SECRET:
         # Auth disabled — issue a no-op token so the UI flow still works
         token = create_jwt(req.username.strip().lower() or "anonymous")
@@ -288,7 +266,6 @@ async def login(data: Dict[str, Any] = Body(...)):
     token = create_jwt(u)
     logger.info(f"Issued JWT for user='{u}' (TTL={JWT_TTL}s)")
     return {"access_token": token, "token_type": "bearer", "expires_in": JWT_TTL}
-
 
 @app.get("/api/auth/verify")
 async def verify_token(user: str = Depends(require_bearer)):
@@ -449,10 +426,8 @@ async def model_limits(_user: str = Depends(require_bearer)):
     }
 
 
-@app.post("/api/config", response_model=None)
-async def update_config(data: Dict[str, Any] = Body(...), _user: str = Depends(require_bearer)):
-
-    req = ConfigUpdate.from_dict(data)
+@app.post("/api/config")
+async def update_config(config: ConfigUpdate, _user: str = Depends(require_bearer)):
     global current_config, agent
     defaults = PROVIDER_DEFAULTS.get(config.provider, PROVIDER_DEFAULTS["deepseek"])
     key_env = defaults.get("key_env") or ""
@@ -529,10 +504,8 @@ async def list_memory_users(_user: str = Depends(require_bearer)):
 
 
 # ── REST: Evolution ────────────────────────────────────────────────────────────
-@app.post("/api/evolution/start", response_model=None)
-async def evo_start(data: Dict[str, Any] = Body(...), _user: str = Depends(require_bearer)):
-
-    req = EvolutionStartRequest.from_dict(data)
+@app.post("/api/evolution/start")
+async def evo_start(req: EvolutionStartRequest, _user: str = Depends(require_bearer)):
     skill = registry.get("self_evolution")
     if not skill:
         raise HTTPException(500, "Self-evolution skill not registered")
@@ -556,28 +529,24 @@ async def evo_status(workspace_id: Optional[str] = None, _user: str = Depends(re
         return {"status": "ok", "state": result.output.get("state")}
     raise HTTPException(404, result.error)
 
-@app.post("/api/evolution/approve", response_model=None)
-async def evo_approve(data: Dict[str, Any] = Body(...), _user: str = Depends(require_bearer)):
-
-    req = EvolutionActionRequest.from_dict(data)
+@app.post("/api/evolution/approve")
+async def evo_approve(req: EvolutionActionRequest, _user: str = Depends(require_bearer)):
     skill = registry.get("self_evolution")
     result = await skill.execute("approve", {"workspace_id": req.workspace_id})
     if result.success:
         return {"status": "ok", "approved": True, "state": result.output.get("state")}
     raise HTTPException(400, result.error)
 
-@app.post("/api/evolution/revise", response_model=None)
-async def evo_revise(req: Dict[str, Any] = Body(...), _user: str = Depends(require_bearer)):
-    req = EvolutionActionRequest.from_dict(data)
+@app.post("/api/evolution/revise")
+async def evo_revise(req: EvolutionActionRequest, _user: str = Depends(require_bearer)):
     skill = registry.get("self_evolution")
     result = await skill.execute("revise", {"workspace_id": req.workspace_id})
     if result.success:
         return {"status": "ok", "revised": True, "state": result.output.get("state")}
     raise HTTPException(400, result.error)
 
-@app.post("/api/evolution/reset", response_model=None)
-async def evo_reset(req: Dict[str, Any] = Body(...), _user: str = Depends(require_bearer)):
-    req = EvolutionActionRequest.from_dict(data)
+@app.post("/api/evolution/reset")
+async def evo_reset(req: EvolutionActionRequest, _user: str = Depends(require_bearer)):
     skill = registry.get("self_evolution")
     await skill.execute("reset", {"workspace_id": req.workspace_id})
     return {"status": "ok", "reset": True}
