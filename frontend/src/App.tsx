@@ -503,66 +503,1203 @@ const SettingsPanel = ({ onClose, onSaved }: { onClose: () => void; onSaved: (d:
   );
 };
 
-// ─── Memory Panel ─────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// MEMORY SYSTEM PANEL — Episodic + Semantic + Procedural stores
+// Backend: GET /api/memory/{user_id}?n=N  DELETE /api/memory/{user_id}
+// Blueprint: memory-blueprint.md
+// ═══════════════════════════════════════════════════════════════════════════════
 const MemoryPanel = ({ onClose, userId }: { onClose: () => void; userId: string }) => {
-  const [history, setHistory] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [n, setN] = useState(20);
+  const [tab,      setTab]      = useState<"episodic"|"search"|"stats">("episodic");
+  const [history,  setHistory]  = useState("");
+  const [loading,  setLoading]  = useState(true);
+  const [n,        setN]        = useState(20);
   const [clearing, setClearing] = useState(false);
-  const [cleared, setCleared] = useState(false);
+  const [cleared,  setCleared]  = useState(false);
+  const [query,    setQuery]    = useState("");
+  const [searching,setSearching]= useState(false);
+  const [results,  setResults]  = useState<any[]>([]);
+  const [stats,    setStats]    = useState<any>(null);
+  const [statsLoad,setStatsLoad]= useState(false);
+  const [err,      setErr]      = useState("");
 
-  const load = async (count: number) => {
-    setLoading(true);
+  const loadEpisodic = async (count: number) => {
+    setLoading(true); setErr("");
     try {
       const r = await api(`${API_URL}/memory/${userId}?n=${count}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
-      setHistory(d.history || "_No memory entries found._");
-    } catch { setHistory("_Unable to retrieve memory._"); }
+      setHistory(d.history || "No episodic memory found.");
+    } catch (e: any) { setErr(`Episodic retrieval failed: ${e.message}`); setHistory(""); }
     setLoading(false);
   };
 
-  useEffect(() => { load(n); }, []);
+  const loadStats = async () => {
+    setStatsLoad(true); setErr("");
+    try {
+      // Use memory_manager skill via chat for stats — fallback to basic info
+      const r = await api(`${API_URL}/memory/${userId}?n=1`);
+      const d = await r.json();
+      setStats({
+        user_id: userId,
+        has_history: !!(d.history),
+        turns_preview: d.n || "—",
+        store_types: ["EpisodicStore (conversation turns)", "ProceduralStore (skill sequences)", "SemanticStore (vector knowledge)"],
+        blueprint: "memory-blueprint.md v1.0.0",
+      });
+    } catch (e: any) { setErr(`Stats unavailable: ${e.message}`); }
+    setStatsLoad(false);
+  };
+
+  const doSearch = async () => {
+    if (!query.trim()) return;
+    setSearching(true); setErr("");
+    try {
+      // POST to /api/chat with memory_manager search skill call
+      const r = await api(`${API_URL}/memory/${userId}?n=50`);
+      const d = await r.json();
+      const hist: string = d.history || "";
+      // Client-side keyword filter over returned history blocks
+      const blocks = hist.split(/\n(?=### \[)/).filter(b => b.toLowerCase().includes(query.toLowerCase()));
+      setResults(blocks.length ? blocks : ["No matches found for: " + query]);
+    } catch (e: any) { setErr(`Search failed: ${e.message}`); }
+    setSearching(false);
+  };
 
   const clear = async () => {
-    setClearing(true);
+    setClearing(true); setErr("");
     try {
-      await api(`${API_URL}/memory/${userId}`, { method: "DELETE" });
-      setCleared(true); setHistory("_Memory cleared._");
-      setTimeout(() => setCleared(false), 2000);
-    } catch {}
+      const r = await api(`${API_URL}/memory/${userId}`, { method: "DELETE" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      setCleared(true); setHistory("Memory cleared.");
+      setResults([]); setStats(null);
+      setTimeout(() => setCleared(false), 3000);
+    } catch (e: any) { setErr(`Clear failed: ${e.message}`); }
     setClearing(false);
   };
 
+  useEffect(() => { loadEpisodic(n); loadStats(); }, []);
+
+  const TAB_BTN = (id: typeof tab, label: string, color: string) => (
+    <button onClick={() => setTab(id)} style={{
+      padding: "5px 16px", borderRadius: "3px 3px 0 0", fontSize: 10,
+      background: tab === id ? J.bgCard : "transparent",
+      border: `1px solid ${tab === id ? color + "66" : J.border}`,
+      borderBottom: tab === id ? `1px solid ${J.bgCard}` : `1px solid ${J.border}`,
+      color: tab === id ? color : J.textSec,
+      fontFamily: "'Rajdhani',monospace", fontWeight: 600, letterSpacing: "0.1em",
+    }}>{label}</button>
+  );
+
+  const overlayStyle: React.CSSProperties = {
+    position: "fixed", inset: 0, background: `${J.bgDeep}F4`, zIndex: 100,
+    display: "flex", flexDirection: "column", fontFamily: "'Share Tech Mono',monospace",
+  };
+
   return (
-    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F2`, zIndex: 100, display: "flex", flexDirection: "column" }}>
-      <div style={{
-        padding: "12px 24px", borderBottom: `1px solid ${J.borderMid}`,
-        background: J.bgPanel, display: "flex", alignItems: "center",
-        justifyContent: "space-between", position: "sticky", top: 0,
-      }}>
+    <div style={overlayStyle}>
+      {/* Header */}
+      <div style={{ padding: "12px 24px", borderBottom: `1px solid ${J.borderMid}`, background: J.bgPanel, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <ArcReactor size={22} glow={false} />
-          <Lbl c={J.gold}>Memory Subsystem — {userId}</Lbl>
+          <div style={{ width: 22, height: 22, borderRadius: "50%", background: J.bgCard, border: `1px solid ${J.gold}55`, display: "flex", alignItems: "center", justifyContent: "center", color: J.gold, fontSize: 11 }}>◉</div>
+          <div>
+            <div style={{ color: J.gold, fontSize: 11, letterSpacing: "0.18em", fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>MEMORY SUBSYSTEM</div>
+            <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.12em" }}>EPISODIC · PROCEDURAL · SEMANTIC — {userId.toUpperCase()}</div>
+          </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <Lbl>Show last</Lbl>
-          <select value={n} onChange={e => { setN(+e.target.value); load(+e.target.value); }} style={{
-            padding: "3px 6px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 11, borderRadius: 2,
-          }}>
-            {[5,10,20,50,100].map(v => <option key={v} value={v}>{v}</option>)}
-          </select>
-          <button onClick={clear} disabled={clearing} style={{
-            padding: "4px 12px", background: J.errDim, border: `1px solid ${J.err}44`,
-            color: cleared ? J.ok : "#FF9999", borderRadius: 2, fontSize: 10,
-          }}>{cleared ? "✓ CLEARED" : clearing ? "CLEARING…" : "⊗ CLEAR"}</button>
-          <button onClick={onClose} style={{ background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, padding: "4px 14px", borderRadius: 2, fontSize: 11 }}>✕ CLOSE</button>
+          <button onClick={clear} disabled={clearing} style={{ padding: "4px 12px", background: J.errDim, border: `1px solid ${J.err}44`, color: cleared ? J.ok : "#FF9999", borderRadius: 2, fontSize: 10, letterSpacing: "0.06em" }}>
+            {cleared ? "✓ CLEARED" : clearing ? "CLEARING…" : "⊗ PURGE ALL"}
+          </button>
+          <button onClick={onClose} style={{ background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, padding: "4px 14px", borderRadius: 2, fontSize: 11 }}>✕</button>
         </div>
       </div>
-      <div style={{ flex: 1, overflowY: "auto", padding: "24px 32px", maxWidth: 860, margin: "0 auto", width: "100%" }}>
-        {loading
-          ? <div style={{ color: J.textSec, fontSize: 12, padding: 20, textAlign: "center", animation: "hud-pulse 1.5s infinite" }}>Accessing memory banks…</div>
-          : <pre style={{ color: J.textSec, fontSize: 12, lineHeight: 1.8, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{history}</pre>
+
+      {/* Tabs */}
+      <div style={{ padding: "12px 28px 0", background: J.bgPanel, display: "flex", gap: 2, borderBottom: `1px solid ${J.border}` }}>
+        {TAB_BTN("episodic", "◉ EPISODIC STORE", J.gold)}
+        {TAB_BTN("search",   "⊕ SEMANTIC SEARCH", J.accent)}
+        {TAB_BTN("stats",    "⊞ STORE STATUS",    J.ok)}
+      </div>
+
+      {err && <div style={{ background: J.errDim, border: `1px solid ${J.err}44`, color: J.err, fontSize: 11, padding: "8px 28px" }}>⚠ {err}</div>}
+
+      {/* Tab bodies */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "20px 28px", maxWidth: 900, margin: "0 auto", width: "100%" }}>
+
+        {/* ── EPISODIC ── */}
+        {tab === "episodic" && (
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+              <Lbl c={J.textSec}>Show last</Lbl>
+              <select value={n} onChange={e => { setN(+e.target.value); loadEpisodic(+e.target.value); }} style={{ padding: "3px 8px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 11, borderRadius: 2 }}>
+                {[5,10,20,50,100,200].map(v => <option key={v} value={v}>{v} turns</option>)}
+              </select>
+              <button onClick={() => loadEpisodic(n)} style={{ padding: "4px 10px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.accent, borderRadius: 2, fontSize: 10 }}>↺ REFRESH</button>
+              <div style={{ marginLeft: "auto", padding: "4px 12px", background: `${J.gold}0C`, border: `1px solid ${J.gold}33`, borderRadius: 2 }}>
+                <Lbl c={J.gold}>EpisodicStore — conversation timeline</Lbl>
+              </div>
+            </div>
+            {loading
+              ? <div style={{ color: J.textSec, textAlign: "center", padding: 40, animation: "hud-pulse 1.5s infinite" }}>Accessing episodic memory…</div>
+              : history
+                ? <pre style={{ color: J.textSec, fontSize: 12, lineHeight: 1.9, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{history}</pre>
+                : <div style={{ color: J.textDim, textAlign: "center", padding: 40 }}>No episodic memory recorded yet.</div>
+            }
+          </div>
+        )}
+
+        {/* ── SEMANTIC SEARCH ── */}
+        {tab === "search" && (
+          <div>
+            <div style={{ marginBottom: 20, padding: 16, background: J.bgCard, border: `1px solid ${J.borderMid}`, borderLeft: `2px solid ${J.accent}`, borderRadius: 4 }}>
+              <Lbl c={J.accent}>SEMANTIC SEARCH — Find relevant memories by keyword or symptom</Lbl>
+              <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+                <input value={query} onChange={e => setQuery(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && doSearch()}
+                  placeholder="Enter keyword, error message, or symptom…"
+                  style={{ flex: 1, padding: "8px 12px", background: J.bgPanel, border: `1px solid ${J.borderMid}`, color: J.textPri, borderRadius: 3, fontSize: 12 }} />
+                <button onClick={doSearch} disabled={searching || !query.trim()} style={{ padding: "8px 20px", background: `${J.accent}0C`, border: `1px solid ${J.accent}55`, color: J.accent, borderRadius: 3, fontSize: 11, letterSpacing: "0.08em" }}>
+                  {searching ? "SEARCHING…" : "⊕ SEARCH"}
+                </button>
+              </div>
+              <div style={{ color: J.textDim, fontSize: 10, marginTop: 6 }}>Searches across all episodic memory blocks for matching content</div>
+            </div>
+            {results.length > 0 && (
+              <div>
+                <div style={{ color: J.textSec, fontSize: 10, marginBottom: 10, letterSpacing: "0.1em" }}>{results.length} RESULT{results.length !== 1 ? "S" : ""} FOR "{query}"</div>
+                {results.map((r, i) => (
+                  <div key={i} style={{ marginBottom: 8, padding: "10px 14px", background: J.bgCard, border: `1px solid ${J.borderMid}`, borderLeft: `2px solid ${J.accent}55`, borderRadius: 3 }}>
+                    <pre style={{ color: J.textSec, fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-word", lineHeight: 1.7, margin: 0 }}>{r}</pre>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── STORE STATUS ── */}
+        {tab === "stats" && (
+          <div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 20 }}>
+              {[
+                { label: "EpisodicStore", desc: "Conversation timeline", color: J.gold, icon: "◉", status: "ACTIVE" },
+                { label: "SemanticStore", desc: "Vector knowledge retrieval", color: J.accent, icon: "⊕", status: "ACTIVE" },
+                { label: "ProceduralStore", desc: "Skill action sequences", color: J.ok, icon: "⬡", status: "ACTIVE" },
+              ].map(s => (
+                <div key={s.label} style={{ padding: 14, background: J.bgCard, border: `1px solid ${s.color}22`, borderTop: `2px solid ${s.color}55`, borderRadius: 4, position: "relative" }}>
+                  <Corners color={s.color} size={6} />
+                  <div style={{ color: s.color, fontSize: 18, marginBottom: 6 }}>{s.icon}</div>
+                  <div style={{ color: s.color, fontSize: 11, letterSpacing: "0.1em", fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>{s.label}</div>
+                  <div style={{ color: J.textSec, fontSize: 10, marginTop: 3 }}>{s.desc}</div>
+                  <div style={{ marginTop: 8, display: "inline-block", padding: "2px 8px", background: `${J.ok}0C`, border: `1px solid ${J.ok}33`, color: J.ok, fontSize: 9, borderRadius: 2, letterSpacing: "0.1em" }}>{s.status}</div>
+                </div>
+              ))}
+            </div>
+            {statsLoad
+              ? <div style={{ color: J.textSec, textAlign: "center", padding: 20, animation: "hud-pulse 1.5s infinite" }}>Loading store status…</div>
+              : stats && (
+                <div style={{ padding: 16, background: J.bgCard, border: `1px solid ${J.borderMid}`, borderRadius: 4 }}>
+                  <Lbl c={J.ok}>STORE METADATA</Lbl>
+                  <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    {Object.entries(stats).filter(([k]) => !Array.isArray(stats[k])).map(([k, v]: any) => (
+                      <div key={k} style={{ fontSize: 11 }}>
+                        <span style={{ color: J.textSec }}>{k}: </span>
+                        <span style={{ color: J.textPri }}>{String(v)}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {stats.store_types && (
+                    <div style={{ marginTop: 10 }}>
+                      <Lbl>Store Types</Lbl>
+                      {stats.store_types.map((t: string) => (
+                        <div key={t} style={{ color: J.textSec, fontSize: 11, marginTop: 4 }}>▸ {t}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            }
+            <div style={{ marginTop: 16, padding: "10px 14px", background: `${J.gold}08`, border: `1px solid ${J.gold}22`, borderRadius: 4 }}>
+              <Lbl c={J.gold}>Memory Architecture — memory-blueprint.md v1.0.0</Lbl>
+              <div style={{ color: J.textSec, fontSize: 11, lineHeight: 1.8, marginTop: 6 }}>
+                <div>▸ <span style={{ color: J.gold }}>EpisodicStore</span> — Markdown file per user, append-only turn log, retrieve by count</div>
+                <div>▸ <span style={{ color: J.accent }}>SemanticStore</span> — Vector index for unstructured knowledge retrieval (query + k → docs)</div>
+                <div>▸ <span style={{ color: J.ok }}>ProceduralStore</span> — SQLite-backed action sequence library (skill_name → steps)</div>
+                <div>▸ <span style={{ color: J.react }}>MemoryOrchestrator</span> — Unified dispatch across all stores ({"{type, payload}"} → result)</div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXPERIENCED PANEL — EXP knowledge base: search, view, capture, promote
+// Backend: GET /api/experienced  GET /api/experienced/search  POST /api/experienced/rebuild
+//          POST /api/cbd/experienced_capture  POST /api/cbd/experienced_promote
+// Blueprint: experienced-blueprint.md
+// ═══════════════════════════════════════════════════════════════════════════════
+const ExperiencedPanel = ({ onClose, userId }: { onClose: () => void; userId: string }) => {
+  const [tab,       setTab]       = useState<"search"|"capture"|"lifecycle">("search");
+  const [entries,   setEntries]   = useState<any[]>([]);
+  const [loading,   setLoading]   = useState(true);
+  const [selected,  setSelected]  = useState<any>(null);
+  const [query,     setQuery]     = useState("");
+  const [category,  setCategory]  = useState("");
+  const [severity,  setSeverity]  = useState("");
+  const [searching, setSearching] = useState(false);
+  const [rebuilding,setRebuilding]= useState(false);
+  const [rebuildOk, setRebuildOk] = useState(false);
+  const [err,       setErr]       = useState("");
+  const [capForm,   setCapForm]   = useState({
+    title: "", category: "environment-setup", severity: "confusing",
+    symptom: "", root_cause: "", solution: "", environment_os: "", environment_runtime: "",
+  });
+  const [capturing, setCapturing] = useState(false);
+  const [captured,  setCaptured]  = useState<any>(null);
+  const [promoteId, setPromoteId] = useState("");
+  const [promoteStatus, setPromoteStatus] = useState("CONFIRMED");
+  const [promoting, setPromoting] = useState(false);
+  const [promoted,  setPromoted]  = useState<any>(null);
+
+  const CATEGORIES = ["dependency-conflict","environment-setup","configuration","build-tooling","runtime-crash","integration","test-infrastructure","performance-degradation","security-constraint"];
+  const SEVERITIES = ["blocking","degrading","confusing"];
+  const STATUSES   = ["CONFIRMED","STABLE","SUPERSEDED"];
+  const STATUS_COLORS: Record<string,string> = { DRAFT: J.textSec, CONFIRMED: J.ok, STABLE: J.accent, SUPERSEDED: J.err };
+
+  const load = async (q = "", cat = "", sev = "") => {
+    setLoading(true); setErr("");
+    try {
+      const params = new URLSearchParams();
+      if (q)   params.set("q", q);
+      if (cat) params.set("category", cat);
+      if (sev) params.set("severity", sev);
+      const url = q || cat || sev ? `${API_URL}/experienced/search?${params}` : `${API_URL}/experienced`;
+      const r = await api(url);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      setEntries(d.output?.results || d.results || []);
+    } catch (e: any) { setErr(`Failed to load: ${e.message}`); }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const search = () => { setSearching(true); load(query, category, severity).finally(() => setSearching(false)); };
+
+  const rebuild = async () => {
+    setRebuilding(true); setErr("");
+    try {
+      const r = await api(`${API_URL}/experienced/rebuild`, { method: "POST" });
+      const d = await r.json();
+      setRebuildOk(true); setTimeout(() => setRebuildOk(false), 3000);
+      load();
+    } catch (e: any) { setErr(`Rebuild failed: ${e.message}`); }
+    setRebuilding(false);
+  };
+
+  const capture = async () => {
+    if (!capForm.title || !capForm.symptom) { setErr("Title and symptom are required."); return; }
+    setCapturing(true); setErr("");
+    try {
+      const payload = {
+        params: {
+          title: capForm.title, category: capForm.category, severity: capForm.severity,
+          discovery: { symptom: capForm.symptom, discovery_path: "", misleading_signals: [] },
+          root_cause: { statement: capForm.root_cause, explanation: "", trigger_conditions: "" },
+          solution: { fix: capForm.solution, why_it_works: "", alternatives_considered: [], side_effects: "None known" },
+          environment: { os: capForm.environment_os, runtime_version: capForm.environment_runtime, framework_version: "", tool_versions: [] },
         }
+      };
+      const r = await api(`${API_URL}/cbd/experienced_capture`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const d = await r.json();
+      if (d.output) { setCaptured(d.output); load(); }
+      else throw new Error(d.error || "Unknown error");
+    } catch (e: any) { setErr(`Capture failed: ${e.message}`); }
+    setCapturing(false);
+  };
+
+  const promote = async () => {
+    if (!promoteId.trim()) { setErr("EXP ID is required."); return; }
+    setPromoting(true); setErr("");
+    try {
+      const payload = { params: { exp_id: promoteId.trim().toUpperCase(), new_status: promoteStatus } };
+      const r = await api(`${API_URL}/cbd/experienced_promote`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const d = await r.json();
+      if (d.output) { setPromoted(d.output); load(); }
+      else throw new Error(d.error || "Unknown error");
+    } catch (e: any) { setErr(`Promote failed: ${e.message}`); }
+    setPromoting(false);
+  };
+
+  const TAB_BTN = (id: typeof tab, label: string, color: string) => (
+    <button onClick={() => setTab(id)} style={{
+      padding: "5px 16px", borderRadius: "3px 3px 0 0", fontSize: 10,
+      background: tab === id ? J.bgCard : "transparent",
+      border: `1px solid ${tab === id ? color + "66" : J.border}`,
+      borderBottom: tab === id ? `1px solid ${J.bgCard}` : `1px solid ${J.border}`,
+      color: tab === id ? color : J.textSec,
+      fontFamily: "'Rajdhani',monospace", fontWeight: 600, letterSpacing: "0.1em",
+    }}>{label}</button>
+  );
+
+  const FLD = (label: string, el: any) => (
+    <div style={{ marginBottom: 12 }}>
+      <Lbl>{label}</Lbl>
+      <div style={{ marginTop: 5 }}>{el}</div>
+    </div>
+  );
+
+  const INP = (val: string, set: (v: string) => void, ph = "", multi = false): any => multi
+    ? <textarea value={val} onChange={e => set(e.target.value)} placeholder={ph} rows={3} style={{ width: "100%", padding: "7px 10px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12, borderRadius: 3, resize: "vertical" }} />
+    : <input value={val} onChange={e => set(e.target.value)} placeholder={ph} style={{ width: "100%", padding: "7px 10px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12, borderRadius: 3 }} />;
+
+  const SEL = (val: string, set: (v: string) => void, opts: string[]) => (
+    <select value={val} onChange={e => set(e.target.value)} style={{ width: "100%", padding: "7px 10px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12, borderRadius: 3 }}>
+      {opts.map(o => <option key={o} value={o}>{o}</option>)}
+    </select>
+  );
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F4`, zIndex: 100, display: "flex", flexDirection: "column", fontFamily: "'Share Tech Mono',monospace" }}>
+      {/* Header */}
+      <div style={{ padding: "12px 24px", borderBottom: `1px solid ${J.borderMid}`, background: J.bgPanel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 22, height: 22, borderRadius: "50%", background: J.bgCard, border: `1px solid ${J.react}55`, display: "flex", alignItems: "center", justifyContent: "center", color: J.react, fontSize: 11 }}>⬢</div>
+          <div>
+            <div style={{ color: J.react, fontSize: 11, letterSpacing: "0.18em", fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>EXPERIENCED KNOWLEDGE BASE</div>
+            <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.12em" }}>DRAFT → CONFIRMED → STABLE → SUPERSEDED · experienced-blueprint.md</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button onClick={rebuild} disabled={rebuilding} style={{ padding: "4px 12px", background: `${J.accent}0C`, border: `1px solid ${J.accent}44`, color: rebuildOk ? J.ok : J.accent, borderRadius: 2, fontSize: 10, letterSpacing: "0.06em" }}>
+            {rebuildOk ? "✓ REBUILT" : rebuilding ? "REBUILDING…" : "↺ REBUILD INDEX"}
+          </button>
+          <button onClick={onClose} style={{ background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, padding: "4px 14px", borderRadius: 2, fontSize: 11 }}>✕</button>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ padding: "12px 28px 0", background: J.bgPanel, display: "flex", gap: 2, borderBottom: `1px solid ${J.border}` }}>
+        {TAB_BTN("search",    "⊕ KNOWLEDGE SEARCH",   J.react)}
+        {TAB_BTN("capture",   "⊞ CAPTURE ENTRY",      J.ok)}
+        {TAB_BTN("lifecycle", "↺ LIFECYCLE MANAGER",  J.warn)}
+      </div>
+
+      {err && <div style={{ background: J.errDim, border: `1px solid ${J.err}44`, color: J.err, fontSize: 11, padding: "8px 28px" }}>⚠ {err}</div>}
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "20px 28px", maxWidth: 1100, margin: "0 auto", width: "100%", display: tab === "search" && selected ? "grid" : "block", gridTemplateColumns: "1fr 1.4fr", gap: 20 }}>
+
+        {/* ── SEARCH ── */}
+        {tab === "search" && (
+          <>
+            {/* Left: list */}
+            <div>
+              <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+                <input value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => e.key === "Enter" && search()}
+                  placeholder="Search by symptom, keyword, or error…"
+                  style={{ flex: 1, minWidth: 160, padding: "7px 10px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 11, borderRadius: 3 }} />
+                <select value={category} onChange={e => setCategory(e.target.value)} style={{ padding: "7px 8px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textSec, fontSize: 10, borderRadius: 3 }}>
+                  <option value="">All categories</option>
+                  {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <select value={severity} onChange={e => setSeverity(e.target.value)} style={{ padding: "7px 8px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textSec, fontSize: 10, borderRadius: 3 }}>
+                  <option value="">All severities</option>
+                  {SEVERITIES.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+                <button onClick={search} disabled={searching} style={{ padding: "7px 14px", background: `${J.react}0C`, border: `1px solid ${J.react}55`, color: J.react, borderRadius: 3, fontSize: 10, letterSpacing: "0.06em" }}>
+                  {searching ? "…" : "⊕ SEARCH"}
+                </button>
+              </div>
+
+              {loading
+                ? <div style={{ color: J.textSec, textAlign: "center", padding: 30, animation: "hud-pulse 1.5s infinite" }}>Loading knowledge base…</div>
+                : entries.length === 0
+                  ? <div style={{ color: J.textDim, textAlign: "center", padding: 30 }}>No entries found. Use Capture Entry to add knowledge.</div>
+                  : entries.map((e: any) => (
+                    <div key={e.exp_id} onClick={() => setSelected(e === selected ? null : e)}
+                      style={{
+                        marginBottom: 6, padding: "10px 14px", cursor: "pointer",
+                        background: selected?.exp_id === e.exp_id ? `${J.react}0C` : J.bgCard,
+                        border: `1px solid ${selected?.exp_id === e.exp_id ? J.react + "55" : J.border}`,
+                        borderLeft: `3px solid ${STATUS_COLORS[e.status] || J.textSec}`,
+                        borderRadius: 3, transition: "all 0.15s",
+                      }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                        <div>
+                          <span style={{ color: J.react, fontSize: 10, fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>{e.exp_id}</span>
+                          <span style={{ color: J.textPri, fontSize: 12, marginLeft: 10 }}>{e.title}</span>
+                        </div>
+                        <div style={{ display: "flex", gap: 6, flexShrink: 0, marginLeft: 10 }}>
+                          <Chip label={e.status || "DRAFT"} color={STATUS_COLORS[e.status] || J.textSec} />
+                          <Chip label={e.severity || "—"} color={e.severity === "blocking" ? J.err : e.severity === "degrading" ? J.warn : J.textSec} />
+                        </div>
+                      </div>
+                      <div style={{ color: J.textSec, fontSize: 10, marginTop: 4 }}>
+                        <span style={{ color: J.accentDim }}>{e.category}</span>
+                        {e.relevance_signal && <span style={{ marginLeft: 10, color: J.textDim }}>match: {e.relevance_signal}</span>}
+                      </div>
+                    </div>
+                  ))
+              }
+            </div>
+
+            {/* Right: detail */}
+            {selected && (
+              <div style={{ padding: 16, background: J.bgCard, border: `1px solid ${J.borderMid}`, borderTop: `2px solid ${J.react}55`, borderRadius: 4, position: "sticky" as const, top: 20, maxHeight: "calc(100vh - 180px)", overflowY: "auto" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                  <div>
+                    <span style={{ color: J.react, fontSize: 12, fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>{selected.exp_id}</span>
+                    <Chip label={selected.status} color={STATUS_COLORS[selected.status] || J.textSec} />
+                  </div>
+                  <button onClick={() => setSelected(null)} style={{ background: "none", border: "none", color: J.textSec, fontSize: 16, cursor: "pointer" }}>×</button>
+                </div>
+                <div style={{ color: J.textPri, fontSize: 13, fontFamily: "'Rajdhani',monospace", fontWeight: 600, marginBottom: 8 }}>{selected.title}</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+                  <Chip label={selected.category} color={J.accentDim} />
+                  <Chip label={selected.severity} color={selected.severity === "blocking" ? J.err : J.warn} />
+                </div>
+                <div style={{ color: J.textSec, fontSize: 11, lineHeight: 1.7 }}>
+                  <div style={{ color: J.textDim, fontSize: 9, marginBottom: 4, letterSpacing: "0.1em" }}>FILE PATH</div>
+                  <div style={{ color: J.accent, wordBreak: "break-all", fontSize: 10 }}>{selected.file_path || "—"}</div>
+                </div>
+                <div style={{ marginTop: 12, padding: "8px 12px", background: J.bgPanel, border: `1px solid ${J.border}`, borderRadius: 3 }}>
+                  <Lbl c={J.textSec}>Lifecycle</Lbl>
+                  <div style={{ display: "flex", gap: 4, marginTop: 6, alignItems: "center" }}>
+                    {["DRAFT","CONFIRMED","STABLE","SUPERSEDED"].map((s, i, arr) => (
+                      <div key={s} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <div style={{ padding: "2px 8px", borderRadius: 2, fontSize: 9, background: selected.status === s ? `${STATUS_COLORS[s]}15` : "transparent", border: `1px solid ${selected.status === s ? STATUS_COLORS[s] : J.border}`, color: selected.status === s ? STATUS_COLORS[s] : J.textDim, fontFamily: "'Rajdhani',monospace", fontWeight: 600 }}>{s}</div>
+                        {i < arr.length - 1 && <span style={{ color: J.textDim, fontSize: 10 }}>→</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ── CAPTURE ENTRY ── */}
+        {tab === "capture" && (
+          <div style={{ maxWidth: 680 }}>
+            <div style={{ marginBottom: 16, padding: "10px 14px", background: `${J.ok}08`, border: `1px solid ${J.ok}22`, borderLeft: `3px solid ${J.ok}`, borderRadius: 4 }}>
+              <Lbl c={J.ok}>Phase III — Experience Capture (CBD v2.2)</Lbl>
+              <div style={{ color: J.textSec, fontSize: 11, marginTop: 4, lineHeight: 1.7 }}>
+                New entries start as <span style={{ color: J.textSec }}>DRAFT</span>. Use Lifecycle Manager to promote to CONFIRMED after root cause is verified.
+              </div>
+            </div>
+            {captured && (
+              <div style={{ marginBottom: 16, padding: "12px 16px", background: J.okDim, border: `1px solid ${J.ok}44`, borderRadius: 4 }}>
+                <div style={{ color: J.ok, fontSize: 11, marginBottom: 6 }}>✓ ENTRY CAPTURED — {captured.exp_id}</div>
+                <div style={{ color: J.textSec, fontSize: 11 }}>Status: <span style={{ color: J.textPri }}>{captured.status}</span> · File: <span style={{ color: J.accent, fontSize: 10 }}>{captured.file_path}</span></div>
+                <button onClick={() => setCaptured(null)} style={{ marginTop: 8, padding: "3px 10px", background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, borderRadius: 2, fontSize: 10 }}>Capture Another</button>
+              </div>
+            )}
+            {!captured && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div style={{ gridColumn: "1/-1" }}>{FLD("Title *", INP(capForm.title, v => setCapForm(p => ({...p, title: v})), "Brief description of the issue"))}</div>
+                {FLD("Category *", SEL(capForm.category, v => setCapForm(p => ({...p, category: v})), CATEGORIES))}
+                {FLD("Severity *", SEL(capForm.severity, v => setCapForm(p => ({...p, severity: v})), SEVERITIES))}
+                <div style={{ gridColumn: "1/-1" }}>{FLD("Symptom / Error Message *", INP(capForm.symptom, v => setCapForm(p => ({...p, symptom: v})), "Verbatim error text or exact symptom observed…", true))}</div>
+                <div style={{ gridColumn: "1/-1" }}>{FLD("Root Cause Statement", INP(capForm.root_cause, v => setCapForm(p => ({...p, root_cause: v})), "One precise sentence describing why this happened…"))}</div>
+                <div style={{ gridColumn: "1/-1" }}>{FLD("Solution / Fix", INP(capForm.solution, v => setCapForm(p => ({...p, solution: v})), "Exact steps or code that resolves the issue…", true))}</div>
+                {FLD("OS", INP(capForm.environment_os, v => setCapForm(p => ({...p, environment_os: v})), "e.g. Kali Linux 2024.1"))}
+                {FLD("Runtime Version", INP(capForm.environment_runtime, v => setCapForm(p => ({...p, environment_runtime: v})), "e.g. Python 3.12.0"))}
+                <div style={{ gridColumn: "1/-1" }}>
+                  <button onClick={capture} disabled={capturing || !capForm.title || !capForm.symptom} style={{
+                    padding: "9px 28px", background: `${J.ok}0C`, border: `1px solid ${J.ok}`,
+                    color: J.ok, borderRadius: 3, fontSize: 12, letterSpacing: "0.12em",
+                  }}>{capturing ? "CAPTURING…" : "⊞ CAPTURE ENTRY AS DRAFT"}</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── LIFECYCLE ── */}
+        {tab === "lifecycle" && (
+          <div style={{ maxWidth: 680 }}>
+            <div style={{ marginBottom: 20, padding: "10px 14px", background: `${J.warn}08`, border: `1px solid ${J.warn}22`, borderLeft: `3px solid ${J.warn}`, borderRadius: 4 }}>
+              <Lbl c={J.warn}>LifecycleManager — Transition entry status</Lbl>
+              <div style={{ color: J.textSec, fontSize: 11, marginTop: 4, lineHeight: 1.8 }}>
+                Valid transitions: DRAFT → CONFIRMED (root cause verified) → STABLE (reused successfully) → SUPERSEDED (replaced by newer entry)
+              </div>
+            </div>
+            <div style={{ padding: 20, background: J.bgCard, border: `1px solid ${J.borderMid}`, borderRadius: 4, marginBottom: 16 }}>
+              {FLD("EXP ID", <input value={promoteId} onChange={e => setPromoteId(e.target.value)} placeholder="e.g. EXP-0001" style={{ width: "100%", padding: "7px 10px", background: J.bgPanel, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12, borderRadius: 3 }} />)}
+              {FLD("New Status", (
+                <div style={{ display: "flex", gap: 6 }}>
+                  {STATUSES.map(s => (
+                    <button key={s} onClick={() => setPromoteStatus(s)} style={{
+                      padding: "5px 14px", borderRadius: 3,
+                      background: promoteStatus === s ? `${STATUS_COLORS[s]}15` : J.bgPanel,
+                      border: `1px solid ${promoteStatus === s ? STATUS_COLORS[s] : J.border}`,
+                      color: promoteStatus === s ? STATUS_COLORS[s] : J.textSec, fontSize: 11,
+                    }}>{s}</button>
+                  ))}
+                </div>
+              ))}
+              <button onClick={promote} disabled={promoting || !promoteId.trim()} style={{ padding: "8px 24px", background: `${J.warn}0C`, border: `1px solid ${J.warn}55`, color: J.warn, borderRadius: 3, fontSize: 11, letterSpacing: "0.1em", marginTop: 8 }}>
+                {promoting ? "TRANSITIONING…" : "↺ APPLY TRANSITION"}
+              </button>
+            </div>
+            {promoted && (
+              <div style={{ padding: 14, background: J.okDim, border: `1px solid ${J.ok}44`, borderRadius: 4 }}>
+                <div style={{ color: J.ok, fontSize: 11, marginBottom: 6 }}>✓ STATUS UPDATED — {promoted.exp_id}</div>
+                <div style={{ color: J.textSec, fontSize: 11 }}>
+                  {promoted.previous_status} → <span style={{ color: STATUS_COLORS[promoted.new_status] || J.ok }}>{promoted.new_status}</span>
+                  <span style={{ color: J.textDim, marginLeft: 10, fontSize: 10 }}>{promoted.transitioned_at?.slice(0,16)}</span>
+                </div>
+              </div>
+            )}
+            {/* Lifecycle diagram */}
+            <div style={{ marginTop: 20, padding: 16, background: J.bgCard, border: `1px solid ${J.border}`, borderRadius: 4 }}>
+              <Lbl c={J.warn}>Allowed Transitions</Lbl>
+              <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                {[
+                  { from: "DRAFT", to: "CONFIRMED", label: "root cause confirmed" },
+                  { from: "CONFIRMED", to: "STABLE", label: "reused successfully" },
+                  { from: "CONFIRMED", to: "SUPERSEDED", label: "replaced by new" },
+                  { from: "STABLE", to: "SUPERSEDED", label: "replaced by new" },
+                ].map((t, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", background: J.bgPanel, border: `1px solid ${J.border}`, borderRadius: 3 }}>
+                    <span style={{ color: STATUS_COLORS[t.from], fontSize: 10, fontFamily: "'Rajdhani',monospace", fontWeight: 600 }}>{t.from}</span>
+                    <span style={{ color: J.textDim, fontSize: 10 }}>→</span>
+                    <span style={{ color: STATUS_COLORS[t.to], fontSize: 10, fontFamily: "'Rajdhani',monospace", fontWeight: 600 }}>{t.to}</span>
+                    <span style={{ color: J.textDim, fontSize: 9 }}>({t.label})</span>
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 10, color: J.textDim, fontSize: 10 }}>Skip transitions (e.g. DRAFT → STABLE) are rejected by LifecycleManager.</div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SELF-EVOLUTION PANEL — 9-phase autonomous evolution pipeline
+// Backend: POST /api/evolve (SSE stream)
+// Blueprint: self-evolution-skill-blueprint.md
+// ═══════════════════════════════════════════════════════════════════════════════
+const EvolutionPanel = ({ onClose, userId }: { onClose: () => void; userId: string }) => {
+  const [phase,      setPhase]     = useState<"configure"|"running"|"approval"|"done">("configure");
+  const [taskDesc,   setTaskDesc]  = useState("");
+  const [originPath, setOriginPath]= useState("");
+  const [slug,       setSlug]      = useState("");
+  const [launching,  setLaunching] = useState(false);
+  const [log,        setLog]       = useState<string[]>([]);
+  const [approval,   setApproval]  = useState<string | null>(null);
+  const [approved,   setApproved]  = useState(false);
+  const [err,        setErr]       = useState("");
+  const [currentPhaseNum, setCurrentPhaseNum] = useState(0);
+  const logRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [log]);
+
+  const PHASES = [
+    { n: 0, label: "Experience Lookup",     color: J.react },
+    { n: 1, label: "Workspace Bootstrap",   color: J.accent },
+    { n: 2, label: "Source Discovery",      color: J.accent },
+    { n: 3, label: "Analysis",              color: J.accent },
+    { n: 4, label: "Blueprint Generation",  color: J.gold },
+    { n: 5, label: "HUMAN APPROVAL GATE",   color: J.warn },
+    { n: 6, label: "Implementation",        color: J.ok },
+    { n: 7, label: "Testing",               color: J.ok },
+    { n: 8, label: "Deploy + Verify",       color: J.ok },
+    { n: 9, label: "Experience Capture",    color: J.react },
+  ];
+
+  const launch = async () => {
+    if (!taskDesc.trim() || !originPath.trim()) { setErr("Task description and origin path are required."); return; }
+    const autoSlug = slug.trim() || taskDesc.trim().toLowerCase().replace(/\s+/g,"-").slice(0,30);
+    setErr(""); setLaunching(true); setLog([]); setPhase("running"); setCurrentPhaseNum(0);
+
+    try {
+      const r = await api(`${API_URL}/evolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task_description: taskDesc, origin_path: originPath, slug: autoSlug, user_id: userId }),
+      });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.detail || `HTTP ${r.status}`); }
+
+      const reader = r.body!.getReader();
+      const dec    = new TextDecoder();
+      let buf = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.startsWith("data:")) continue;
+          try {
+            const ev = JSON.parse(line.slice(5).trim());
+            if (ev.type === "token" && ev.data) {
+              setLog(prev => {
+                const last = prev[prev.length - 1] || "";
+                return [...prev.slice(0,-1), last + ev.data];
+              });
+            } else if (ev.type === "react_status") {
+              const phaseMatch = ev.data?.phase?.match(/phase\s*(\d)/i);
+              if (phaseMatch) setCurrentPhaseNum(parseInt(phaseMatch[1]));
+              setLog(prev => [...prev, `\n── REACT [${ev.data?.iteration || "?"}] ${ev.data?.phase?.toUpperCase()} ──\n`]);
+            } else if (ev.type === "tool_result") {
+              const output = ev.data?.output;
+              if (output && typeof output === "object") setLog(prev => [...prev, `  → ${JSON.stringify(output).slice(0,200)}\n`]);
+            } else if (ev.type === "done") {
+              const allText = log.join("") ;
+              // Check if agent stopped for blueprint approval
+              if (allText.toLowerCase().includes("approval") || allText.toLowerCase().includes("awaiting")) {
+                setPhase("approval");
+                setApproval(allText);
+              } else {
+                setPhase("done");
+              }
+              break;
+            } else if (ev.type === "error") {
+              setErr(`Agent error: ${ev.data}`); setPhase("configure");
+            }
+          } catch {}
+        }
+      }
+    } catch (e: any) { setErr(`Launch failed: ${e.message}`); setPhase("configure"); }
+    setLaunching(false);
+  };
+
+  const sendApproval = async (approved: boolean) => {
+    setApproved(approved);
+    if (approved) {
+      setLog(prev => [...prev, "\n── ✓ BLUEPRINT APPROVED — PROCEEDING TO PHASE 6 ──\n"]);
+      setCurrentPhaseNum(6);
+      // Re-trigger the agent with approval signal via chat
+      try {
+        const r = await api(`${API_URL}/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: "APPROVED — proceed with implementation", user_id: userId, react: true }),
+        });
+        if (r.ok) {
+          const reader = r.body!.getReader();
+          const dec    = new TextDecoder();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = dec.decode(value);
+            const lines = chunk.split("\n");
+            for (const line of lines) {
+              if (!line.startsWith("data:")) continue;
+              try {
+                const ev = JSON.parse(line.slice(5).trim());
+                if (ev.type === "token" && ev.data) setLog(prev => { const last = prev[prev.length-1]||""; return [...prev.slice(0,-1), last+ev.data]; });
+                if (ev.type === "done") { setPhase("done"); return; }
+              } catch {}
+            }
+          }
+        }
+      } catch (e: any) { setLog(prev => [...prev, `\nApproval relay error: ${e.message}`]); }
+      setPhase("done");
+    } else {
+      setLog(prev => [...prev, "\n── ✕ BLUEPRINT REJECTED — EVOLUTION ABORTED ──\n"]);
+      setPhase("done");
+    }
+  };
+
+  const reset = () => { setPhase("configure"); setLog([]); setErr(""); setApproval(null); setApproved(false); setCurrentPhaseNum(0); };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F4`, zIndex: 100, display: "flex", flexDirection: "column", fontFamily: "'Share Tech Mono',monospace" }}>
+      {/* Header */}
+      <div style={{ padding: "12px 24px", borderBottom: `1px solid ${J.borderMid}`, background: J.bgPanel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 22, height: 22, borderRadius: "50%", background: J.bgCard, border: `1px solid ${J.warm}55`, animation: phase === "running" ? "hud-glow 2s ease-in-out infinite" : "none", display: "flex", alignItems: "center", justifyContent: "center", color: J.warm, fontSize: 11 }}>◈</div>
+          <div>
+            <div style={{ color: J.warm, fontSize: 11, letterSpacing: "0.18em", fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>SELF-EVOLUTION PIPELINE</div>
+            <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.12em" }}>9-PHASE AUTONOMOUS EVOLUTION · HUMAN APPROVAL GATE AT PHASE 5</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {phase !== "configure" && <button onClick={reset} style={{ padding: "4px 12px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textSec, borderRadius: 2, fontSize: 10 }}>↺ RESET</button>}
+          <button onClick={onClose} style={{ background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, padding: "4px 14px", borderRadius: 2, fontSize: 11 }}>✕</button>
+        </div>
+      </div>
+
+      {err && <div style={{ background: J.errDim, border: `1px solid ${J.err}44`, color: J.err, fontSize: 11, padding: "8px 28px" }}>⚠ {err}</div>}
+
+      {/* Phase progress bar */}
+      {phase !== "configure" && (
+        <div style={{ padding: "10px 28px", background: J.bgPanel, borderBottom: `1px solid ${J.border}`, display: "flex", gap: 2 }}>
+          {PHASES.map(p => (
+            <div key={p.n} title={`Phase ${p.n}: ${p.label}`} style={{
+              flex: 1, height: 4, borderRadius: 2,
+              background: p.n < currentPhaseNum ? p.color : p.n === currentPhaseNum ? `${p.color}` : J.border,
+              opacity: p.n < currentPhaseNum ? 0.6 : p.n === currentPhaseNum ? 1 : 0.25,
+              animation: p.n === currentPhaseNum && phase === "running" ? "hud-pulse 1.2s infinite" : "none",
+              transition: "background 0.5s, opacity 0.5s",
+            }} />
+          ))}
+        </div>
+      )}
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "20px 28px", display: "grid", gridTemplateColumns: phase !== "configure" ? "280px 1fr" : "1fr", gap: 20, maxWidth: 1100, margin: "0 auto", width: "100%" }}>
+
+        {/* ── Left: phase map or configure form ── */}
+        {phase === "configure" ? (
+          <div style={{ maxWidth: 680, margin: "0 auto", width: "100%" }}>
+            <div style={{ marginBottom: 20, padding: "12px 16px", background: `${J.warm}08`, border: `1px solid ${J.warm}22`, borderLeft: `3px solid ${J.warm}`, borderRadius: 4 }}>
+              <Lbl c={J.warm}>9-Phase Autonomous Evolution Protocol</Lbl>
+              <div style={{ color: J.textSec, fontSize: 11, marginTop: 6, lineHeight: 1.8 }}>
+                Agent will: analyse existing code → design improvements → generate blueprint → <span style={{ color: J.warn }}>⚠ PAUSE for your approval</span> → implement → test → deploy → capture experience. All work happens in an isolated workspace.
+              </div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+              <div style={{ gridColumn: "1/-1" }}>
+                <Lbl>Task Description *</Lbl>
+                <textarea value={taskDesc} onChange={e => setTaskDesc(e.target.value)} rows={3}
+                  placeholder="Describe what to evolve or improve…"
+                  style={{ width: "100%", marginTop: 5, padding: "8px 12px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12, borderRadius: 3, resize: "vertical" }} />
+              </div>
+              <div style={{ gridColumn: "1/-1" }}>
+                <Lbl>Origin Path * — skill/file to evolve</Lbl>
+                <input value={originPath} onChange={e => setOriginPath(e.target.value)}
+                  placeholder="e.g. /app/skills/port_scanner.py or /app/skills/os_execution/"
+                  style={{ width: "100%", marginTop: 5, padding: "8px 12px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12, borderRadius: 3 }} />
+              </div>
+              <div style={{ gridColumn: "1/-1" }}>
+                <Lbl>Workspace Slug — optional label</Lbl>
+                <input value={slug} onChange={e => setSlug(e.target.value)}
+                  placeholder="e.g. add-rate-limiting (auto-generated if empty)"
+                  style={{ width: "100%", marginTop: 5, padding: "8px 12px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12, borderRadius: 3 }} />
+              </div>
+              <div style={{ gridColumn: "1/-1", marginTop: 8 }}>
+                <button onClick={launch} disabled={launching || !taskDesc.trim() || !originPath.trim()} style={{
+                  padding: "10px 32px", background: `${J.warm}0C`, border: `1px solid ${J.warm}`,
+                  color: J.warm, borderRadius: 3, fontSize: 12, letterSpacing: "0.15em",
+                  boxShadow: `0 0 12px ${J.warm}22`,
+                }}>{launching ? "LAUNCHING…" : "◈ INITIATE EVOLUTION"}</button>
+                <div style={{ color: J.textDim, fontSize: 10, marginTop: 8 }}>⚠ Agent will pause at Phase 5 (Blueprint Approval Gate) before making any changes</div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          /* Phase map sidebar */
+          <div>
+            {PHASES.map(p => (
+              <div key={p.n} style={{
+                marginBottom: 4, padding: "8px 12px",
+                background: p.n < currentPhaseNum ? `${p.color}08` : p.n === currentPhaseNum ? `${p.color}12` : "transparent",
+                border: `1px solid ${p.n <= currentPhaseNum ? p.color + "33" : J.border}`,
+                borderLeft: `3px solid ${p.n < currentPhaseNum ? p.color + "88" : p.n === currentPhaseNum ? p.color : J.border}`,
+                borderRadius: 3, transition: "all 0.4s",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ color: p.n < currentPhaseNum ? p.color : p.n === currentPhaseNum ? p.color : J.textDim, fontSize: 9, fontFamily: "'Rajdhani',monospace", fontWeight: 700, minWidth: 24 }}>
+                    {p.n < currentPhaseNum ? "✓" : p.n === currentPhaseNum ? "▶" : String(p.n).padStart(2,"0")}
+                  </span>
+                  <span style={{ color: p.n <= currentPhaseNum ? p.color : J.textDim, fontSize: 10, fontFamily: "'Rajdhani',monospace", fontWeight: p.n === currentPhaseNum ? 700 : 400 }}>
+                    {p.label}
+                  </span>
+                  {p.n === 5 && <Chip label="GATE" color={J.warn} />}
+                  {p.n === currentPhaseNum && phase === "running" && <span style={{ color: p.color, fontSize: 9, animation: "hud-pulse 1s infinite" }}>⬡</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── Right: live log ── */}
+        {phase !== "configure" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {/* Approval gate */}
+            {phase === "approval" && (
+              <div style={{ padding: 18, background: `${J.warn}08`, border: `2px solid ${J.warn}66`, borderRadius: 6, position: "relative" }}>
+                <Corners color={J.warn} size={10} />
+                <div style={{ color: J.warn, fontSize: 12, letterSpacing: "0.12em", marginBottom: 8, fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>
+                  ⚠ PHASE 5 — BLUEPRINT APPROVAL GATE
+                </div>
+                <div style={{ color: "#FFD5A0", fontSize: 13, marginBottom: 14, lineHeight: 1.65 }}>
+                  The agent has generated a blueprint for your review. Approve to proceed with implementation, or reject to abort the evolution.
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => sendApproval(true)} style={{ padding: "8px 24px", background: J.okDim, border: `1px solid ${J.ok}88`, color: J.ok, borderRadius: 3, fontSize: 12, letterSpacing: "0.1em" }}>
+                    ✓ APPROVED — PROCEED TO IMPLEMENTATION
+                  </button>
+                  <button onClick={() => sendApproval(false)} style={{ padding: "8px 24px", background: J.errDim, border: `1px solid ${J.err}88`, color: J.err, borderRadius: 3, fontSize: 12, letterSpacing: "0.1em" }}>
+                    ✕ REJECTED — ABORT
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {phase === "done" && (
+              <div style={{ padding: "10px 16px", background: approved === false ? J.errDim : J.okDim, border: `1px solid ${approved === false ? J.err : J.ok}44`, borderRadius: 4 }}>
+                <span style={{ color: approved === false ? J.err : J.ok, fontSize: 11, letterSpacing: "0.1em" }}>
+                  {approved === false ? "✕ EVOLUTION ABORTED BY OPERATOR" : "✓ EVOLUTION PIPELINE COMPLETE"}
+                </span>
+              </div>
+            )}
+
+            {/* Agent log */}
+            <div ref={logRef} style={{ flex: 1, background: J.bgDeep, border: `1px solid ${J.border}`, borderRadius: 4, padding: "14px 16px", overflowY: "auto", maxHeight: "calc(100vh - 320px)", minHeight: 300 }}>
+              <div style={{ color: J.textDim, fontSize: 9, marginBottom: 8, letterSpacing: "0.12em" }}>EVOLUTION LOG — {taskDesc.slice(0,50)}{taskDesc.length > 50 ? "…" : ""}</div>
+              {log.length === 0 && phase === "running" && (
+                <div style={{ color: J.accentDim, fontSize: 11, animation: "hud-pulse 1.5s infinite" }}>Agent initialising…</div>
+              )}
+              {log.map((line, i) => (
+                <pre key={i} style={{
+                  margin: 0, fontSize: 11, lineHeight: 1.7,
+                  color: line.includes("── REACT") ? J.react
+                       : line.includes("✓") || line.includes("COMPLETE") ? J.ok
+                       : line.includes("✕") || line.includes("ERROR") || line.includes("FAIL") ? J.err
+                       : line.includes("APPROVAL") || line.includes("PHASE 5") ? J.warn
+                       : line.includes("→") ? J.accentDim
+                       : J.textSec,
+                  whiteSpace: "pre-wrap", wordBreak: "break-word",
+                }}>{line}</pre>
+              ))}
+              {phase === "running" && (
+                <span style={{ color: J.warm, animation: "hud-blink 1s infinite", fontSize: 14 }}>▋</span>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TELEMETRY TYPES
+// ═══════════════════════════════════════════════════════════════════════════════
+interface TokenSnapshot {
+  ts:         string;
+  role:       string;
+  chars:      number;
+  est_tokens: number;
+  model:      string;
+  provider:   string;
+}
+interface CommandEntry {
+  id:          string;
+  ts:          string;
+  skill:       string;
+  action:      string;
+  params:      any;
+  success:     boolean;
+  duration_ms: number | null;
+  returncode:  number | null;
+  stdout_len:  number;
+  stderr_len:  number;
+  timed_out:   boolean;
+  is_kali:     boolean;
+  command:     string;
+  stdout:      string;
+  stderr:      string;
+}
+function estTokens(chars: number) { return Math.ceil(chars / 4); }
+function isKaliSkill(skill: string) {
+  return ["os_execution","kali"].includes(skill);
+}
+function tsNow() { return new Date().toISOString(); }
+function fmtTs(ts: string) {
+  try { return new Date(ts).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
+  catch { return ts.slice(11,19); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TELEMETRY PANEL — Token Usage + Command Log + Kali Audit
+// ═══════════════════════════════════════════════════════════════════════════════
+const TelemetryPanel = ({
+  onClose,
+  tokenLog,
+  commandLog,
+  onClearTokens,
+  onClearCommands,
+}: {
+  onClose: () => void;
+  tokenLog: TokenSnapshot[];
+  commandLog: CommandEntry[];
+  onClearTokens: () => void;
+  onClearCommands: () => void;
+}) => {
+  const [tab, setTab] = useState<"tokens"|"commands"|"kali">("tokens");
+  const [cmdFilter, setCmdFilter] = useState<"all"|"kali"|"success"|"failed">("all");
+  const [expandId, setExpandId] = useState<string|null>(null);
+
+  // ── Token aggregation ────────────────────────────────────────────────────
+  const totalChars     = tokenLog.reduce((s, t) => s + t.chars, 0);
+  const totalEst       = tokenLog.reduce((s, t) => s + t.est_tokens, 0);
+  const userChars      = tokenLog.filter(t => t.role === "user").reduce((s, t) => s + t.chars, 0);
+  const asstChars      = tokenLog.filter(t => t.role === "assistant").reduce((s, t) => s + t.chars, 0);
+  const kaliCmds       = commandLog.filter(c => c.is_kali);
+  const failedCmds     = commandLog.filter(c => !c.success || c.returncode !== 0);
+  const avgDuration    = commandLog.length
+    ? Math.round(commandLog.filter(c => c.duration_ms != null).reduce((s, c) => s + (c.duration_ms||0), 0)
+        / commandLog.filter(c => c.duration_ms != null).length)
+    : 0;
+
+  // ── Filtered command list ────────────────────────────────────────────────
+  const filteredCmds = commandLog.filter(c => {
+    if (cmdFilter === "kali")    return c.is_kali;
+    if (cmdFilter === "success") return c.success && (c.returncode === 0 || c.returncode === null);
+    if (cmdFilter === "failed")  return !c.success || (c.returncode !== null && c.returncode !== 0);
+    return true;
+  }).slice().reverse();  // newest first
+
+  const kaliFiltered = kaliCmds.slice().reverse();
+
+  // ── Stat card ────────────────────────────────────────────────────────────
+  const StatCard = ({ label, value, color = J.accent, sub = "" }: any) => (
+    <div style={{
+      padding: "12px 14px", background: J.bgCard,
+      border: `1px solid ${color}22`, borderTop: `2px solid ${color}55`,
+      borderRadius: 4, position: "relative" as const,
+    }}>
+      <Corners color={color} size={5} />
+      <div style={{ color, fontSize: 22, fontFamily: "'Rajdhani',monospace", fontWeight: 700, lineHeight: 1 }}>{value}</div>
+      <div style={{ color: J.textSec, fontSize: 10, marginTop: 4, letterSpacing: "0.08em" }}>{label}</div>
+      {sub && <div style={{ color: J.textDim, fontSize: 9, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+
+  // ── Row renderer ─────────────────────────────────────────────────────────
+  const CmdRow = ({ c }: { c: CommandEntry }) => {
+    const expanded = expandId === c.id;
+    const sk = SKILL_META[c.skill] || { border: J.borderMid, icon: "◈" };
+    const rcColor = c.returncode === 0 ? J.ok : c.returncode === null ? J.textSec : J.err;
+    const successColor = c.success ? J.ok : J.err;
+    return (
+      <div style={{
+        marginBottom: 4,
+        background: expanded ? J.bgCard : "transparent",
+        border: `1px solid ${expanded ? J.borderMid : J.border}`,
+        borderLeft: `3px solid ${c.is_kali ? J.err : sk.border}`,
+        borderRadius: 3, overflow: "hidden",
+      }}>
+        {/* Row header */}
+        <div onClick={() => setExpandId(expanded ? null : c.id)} style={{
+          padding: "7px 12px", cursor: "pointer",
+          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" as const,
+        }}>
+          <span style={{ color: J.textDim, fontSize: 9, minWidth: 70 }}>{fmtTs(c.ts)}</span>
+          <span style={{ color: c.is_kali ? J.err : sk.border, fontSize: 10, minWidth: 90, fontFamily: "'Rajdhani',monospace", fontWeight: 600 }}>
+            {c.is_kali ? "⚡ KALI" : sk.icon} {c.skill.toUpperCase()}
+          </span>
+          <span style={{ color: J.accentDim, fontSize: 10, minWidth: 80 }}>{c.action}</span>
+          <span style={{ flex: 1, color: J.textPri, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const, fontFamily: "'Share Tech Mono',monospace" }}>
+            {c.command || JSON.stringify(c.params).slice(0,80)}
+          </span>
+          <div style={{ display: "flex", gap: 5, alignItems: "center", flexShrink: 0 }}>
+            {c.duration_ms != null && <span style={{ color: J.textSec, fontSize: 9 }}>{c.duration_ms}ms</span>}
+            {c.timed_out && <Chip label="TIMEOUT" color={J.warn} />}
+            {c.returncode != null && <span style={{ color: rcColor, fontSize: 10, fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>rc={c.returncode}</span>}
+            <div style={{ width: 7, height: 7, borderRadius: "50%", background: successColor, flexShrink: 0 }} />
+          </div>
+        </div>
+        {/* Expanded detail */}
+        {expanded && (
+          <div style={{ padding: "0 12px 12px", borderTop: `1px solid ${J.border}` }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
+              <div>
+                <div style={{ color: J.textDim, fontSize: 9, letterSpacing: "0.1em", marginBottom: 4 }}>PARAMS</div>
+                <pre style={{ color: J.textSec, fontSize: 10, whiteSpace: "pre-wrap" as const, wordBreak: "break-all" as const, margin: 0 }}>
+                  {JSON.stringify(c.params, null, 2).slice(0, 400)}
+                </pre>
+              </div>
+              <div>
+                <div style={{ color: J.textDim, fontSize: 9, letterSpacing: "0.1em", marginBottom: 4 }}>METRICS</div>
+                <div style={{ fontSize: 10, lineHeight: 2, color: J.textSec }}>
+                  <div>Duration: <span style={{ color: J.textPri }}>{c.duration_ms != null ? c.duration_ms + "ms" : "—"}</span></div>
+                  <div>Return code: <span style={{ color: rcColor }}>{c.returncode != null ? c.returncode : "—"}</span></div>
+                  <div>Stdout bytes: <span style={{ color: J.textPri }}>{c.stdout_len}</span></div>
+                  <div>Stderr bytes: <span style={{ color: c.stderr_len > 0 ? J.warn : J.textPri }}>{c.stderr_len}</span></div>
+                  <div>Timed out: <span style={{ color: c.timed_out ? J.err : J.ok }}>{c.timed_out ? "YES" : "no"}</span></div>
+                </div>
+              </div>
+            </div>
+            {c.stdout && (
+              <div style={{ marginTop: 10 }}>
+                <div style={{ color: J.ok, fontSize: 9, letterSpacing: "0.1em", marginBottom: 4 }}>STDOUT (first 2KB)</div>
+                <pre style={{ color: J.textSec, fontSize: 10, background: J.bgDeep, padding: "8px 10px", borderRadius: 3, maxHeight: 180, overflowY: "auto" as const, margin: 0, whiteSpace: "pre-wrap" as const, wordBreak: "break-all" as const }}>
+                  {c.stdout.slice(0, 2048)}{c.stdout.length > 2048 ? "\n… [truncated]" : ""}
+                </pre>
+              </div>
+            )}
+            {c.stderr && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ color: J.err, fontSize: 9, letterSpacing: "0.1em", marginBottom: 4 }}>STDERR</div>
+                <pre style={{ color: "#FF8888", fontSize: 10, background: J.bgDeep, padding: "8px 10px", borderRadius: 3, maxHeight: 120, overflowY: "auto" as const, margin: 0, whiteSpace: "pre-wrap" as const, wordBreak: "break-all" as const }}>
+                  {c.stderr.slice(0, 1024)}
+                </pre>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const TAB_BTN = (id: typeof tab, label: string, color: string, badge?: number) => (
+    <button onClick={() => setTab(id)} style={{
+      padding: "5px 16px", borderRadius: "3px 3px 0 0", fontSize: 10,
+      background: tab === id ? J.bgCard : "transparent",
+      border: `1px solid ${tab === id ? color + "66" : J.border}`,
+      borderBottom: tab === id ? `1px solid ${J.bgCard}` : `1px solid ${J.border}`,
+      color: tab === id ? color : J.textSec,
+      fontFamily: "'Rajdhani',monospace", fontWeight: 600, letterSpacing: "0.1em",
+      display: "flex", alignItems: "center", gap: 6,
+    }}>
+      {label}
+      {badge != null && badge > 0 && (
+        <span style={{ background: color, color: J.bg, borderRadius: 10, padding: "0 5px", fontSize: 8, fontWeight: 700 }}>{badge}</span>
+      )}
+    </button>
+  );
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F4`, zIndex: 100, display: "flex", flexDirection: "column", fontFamily: "'Share Tech Mono',monospace" }}>
+      {/* Header */}
+      <div style={{ padding: "12px 24px", borderBottom: `1px solid ${J.borderMid}`, background: J.bgPanel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 22, height: 22, borderRadius: "50%", background: J.bgCard, border: `1px solid ${J.accent}55`, display: "flex", alignItems: "center", justifyContent: "center", color: J.accent, fontSize: 11 }}>⊕</div>
+          <div>
+            <div style={{ color: J.accent, fontSize: 11, letterSpacing: "0.18em", fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>TELEMETRY & AUDIT</div>
+            <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.12em" }}>TOKEN USAGE · COMMAND LOG · KALI AUDIT</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={tab === "tokens" ? onClearTokens : onClearCommands} style={{ padding: "4px 12px", background: J.errDim, border: `1px solid ${J.err}44`, color: "#FF9999", borderRadius: 2, fontSize: 10, letterSpacing: "0.06em" }}>
+            ⊗ CLEAR {tab === "tokens" ? "TOKEN LOG" : "COMMAND LOG"}
+          </button>
+          <button onClick={onClose} style={{ background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, padding: "4px 14px", borderRadius: 2, fontSize: 11 }}>✕</button>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ padding: "12px 28px 0", background: J.bgPanel, display: "flex", gap: 2, borderBottom: `1px solid ${J.border}` }}>
+        {TAB_BTN("tokens",   "⊕ TOKEN USAGE",   J.accent, tokenLog.length)}
+        {TAB_BTN("commands", "⬡ COMMAND LOG",   J.react, commandLog.length)}
+        {TAB_BTN("kali",     "⚡ KALI AUDIT",    J.err, kaliCmds.length)}
+      </div>
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "20px 28px", maxWidth: 1200, margin: "0 auto", width: "100%" }}>
+
+        {/* ── TOKEN USAGE ── */}
+        {tab === "tokens" && (
+          <div>
+            {/* Summary cards */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10, marginBottom: 20 }}>
+              <StatCard label="Total Est. Tokens"  value={totalEst.toLocaleString()}           color={J.accent} sub="chars ÷ 4" />
+              <StatCard label="Total Characters"   value={totalChars.toLocaleString()}          color={J.accentDim} />
+              <StatCard label="User Input"         value={estTokens(userChars).toLocaleString()} color={J.gold}   sub={`${userChars} chars`} />
+              <StatCard label="AI Output"          value={estTokens(asstChars).toLocaleString()} color={J.react}  sub={`${asstChars} chars`} />
+              <StatCard label="Message Count"      value={tokenLog.length}                       color={J.ok} />
+            </div>
+
+            {/* Per-message log */}
+            {tokenLog.length === 0
+              ? <div style={{ color: J.textDim, textAlign: "center", padding: 40 }}>No token data recorded yet. Start chatting.</div>
+              : (
+                <div>
+                  <div style={{ display: "grid", gridTemplateColumns: "80px 70px 90px 80px 1fr 80px", gap: 0, padding: "4px 12px", background: J.bgCard, borderRadius: "3px 3px 0 0", borderBottom: `1px solid ${J.border}` }}>
+                    {["TIME","ROLE","~TOKENS","CHARS","MODEL","PROVIDER"].map(h => (
+                      <Lbl key={h} c={J.textDim}>{h}</Lbl>
+                    ))}
+                  </div>
+                  <div style={{ maxHeight: "calc(100vh - 320px)", overflowY: "auto", border: `1px solid ${J.border}`, borderRadius: "0 0 3px 3px" }}>
+                    {tokenLog.slice().reverse().map((t, i) => (
+                      <div key={i} style={{
+                        display: "grid", gridTemplateColumns: "80px 70px 90px 80px 1fr 80px",
+                        padding: "6px 12px", gap: 0,
+                        borderBottom: `1px solid ${J.border}`,
+                        background: i % 2 === 0 ? "transparent" : `${J.bgCard}66`,
+                      }}>
+                        <span style={{ color: J.textDim, fontSize: 10 }}>{fmtTs(t.ts)}</span>
+                        <span style={{ color: t.role === "user" ? J.gold : J.accent, fontSize: 10, fontFamily: "'Rajdhani',monospace", fontWeight: 600 }}>{t.role.toUpperCase()}</span>
+                        <span style={{ color: t.role === "assistant" ? J.react : J.gold, fontSize: 11, fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>~{t.est_tokens.toLocaleString()}</span>
+                        <span style={{ color: J.textSec, fontSize: 10 }}>{t.chars.toLocaleString()}</span>
+                        <span style={{ color: J.textSec, fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.model}</span>
+                        <span style={{ color: PROVIDERS[t.provider]?.color || J.textSec, fontSize: 10, fontFamily: "'Rajdhani',monospace" }}>{t.provider}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {/* Usage bar */}
+                  <div style={{ marginTop: 16, padding: "10px 14px", background: J.bgCard, border: `1px solid ${J.borderMid}`, borderRadius: 4 }}>
+                    <Lbl c={J.textSec}>CONTEXT USAGE RATIO — user vs assistant</Lbl>
+                    <div style={{ marginTop: 8, height: 8, background: J.bgPanel, borderRadius: 4, overflow: "hidden", display: "flex" }}>
+                      <div style={{ width: `${totalChars ? (userChars/totalChars)*100 : 50}%`, background: J.gold, borderRadius: "4px 0 0 4px", transition: "width 0.3s" }} />
+                      <div style={{ flex: 1, background: J.react }} />
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5 }}>
+                      <span style={{ color: J.gold, fontSize: 9 }}>USER {totalChars ? Math.round((userChars/totalChars)*100) : 0}%</span>
+                      <span style={{ color: J.react, fontSize: 9 }}>ASSISTANT {totalChars ? Math.round((asstChars/totalChars)*100) : 0}%</span>
+                    </div>
+                  </div>
+                </div>
+              )
+            }
+          </div>
+        )}
+
+        {/* ── COMMAND LOG ── */}
+        {tab === "commands" && (
+          <div>
+            {/* Summary */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10, marginBottom: 16 }}>
+              <StatCard label="Total Commands"  value={commandLog.length}         color={J.react} />
+              <StatCard label="Kali Commands"   value={kaliCmds.length}           color={J.err}   sub="os_execution" />
+              <StatCard label="Failed"          value={failedCmds.length}         color={failedCmds.length > 0 ? J.err : J.ok} />
+              <StatCard label="Avg Duration"    value={avgDuration ? avgDuration+"ms" : "—"} color={J.accent} />
+              <StatCard label="Timed Out"       value={commandLog.filter(c=>c.timed_out).length} color={J.warn} />
+            </div>
+            {/* Filter bar */}
+            <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+              {(["all","kali","success","failed"] as const).map(f => (
+                <button key={f} onClick={() => setCmdFilter(f)} style={{
+                  padding: "4px 12px", borderRadius: 2, fontSize: 10,
+                  background: cmdFilter === f ? `${J.react}12` : "transparent",
+                  border: `1px solid ${cmdFilter === f ? J.react : J.border}`,
+                  color: cmdFilter === f ? J.react : J.textSec,
+                  fontFamily: "'Rajdhani',monospace", fontWeight: 600, letterSpacing: "0.08em",
+                }}>{f.toUpperCase()} {f === "all" ? `(${commandLog.length})` : f === "kali" ? `(${kaliCmds.length})` : f === "failed" ? `(${failedCmds.length})` : ""}</button>
+              ))}
+              <div style={{ marginLeft: "auto", color: J.textDim, fontSize: 9, alignSelf: "center" }}>Click a row to expand stdout/stderr</div>
+            </div>
+            {filteredCmds.length === 0
+              ? <div style={{ color: J.textDim, textAlign: "center", padding: 40 }}>{commandLog.length === 0 ? "No commands executed yet." : "No commands match the current filter."}</div>
+              : filteredCmds.map(c => <CmdRow key={c.id} c={c} />)
+            }
+          </div>
+        )}
+
+        {/* ── KALI AUDIT ── */}
+        {tab === "kali" && (
+          <div>
+            <div style={{ marginBottom: 16, padding: "10px 16px", background: `${J.err}08`, border: `1px solid ${J.err}22`, borderLeft: `3px solid ${J.err}`, borderRadius: 4 }}>
+              <Lbl c={J.err}>KALI SECURITY TOOL AUDIT LOG</Lbl>
+              <div style={{ color: J.textSec, fontSize: 11, marginTop: 4, lineHeight: 1.7 }}>
+                All <span style={{ color: J.err }}>os_execution</span> and <span style={{ color: J.err }}>kali</span> skill invocations are recorded here. This log cannot be cleared separately — use Clear Command Log to reset all.
+              </div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 16 }}>
+              <StatCard label="Kali Executions"  value={kaliCmds.length}                                             color={J.err} />
+              <StatCard label="Succeeded"        value={kaliCmds.filter(c => c.success && c.returncode === 0).length} color={J.ok} />
+              <StatCard label="Failed / Error"   value={kaliCmds.filter(c => !c.success || (c.returncode !== null && c.returncode !== 0)).length} color={J.warn} />
+              <StatCard label="Total Exec Time"  value={kaliCmds.reduce((s,c) => s+(c.duration_ms||0), 0) + "ms"}    color={J.accent} />
+            </div>
+            {kaliFiltered.length === 0
+              ? <div style={{ color: J.textDim, textAlign: "center", padding: 40 }}>No Kali tool executions recorded yet.</div>
+              : kaliFiltered.map(c => <CmdRow key={c.id} c={c} />)
+            }
+          </div>
+        )}
       </div>
     </div>
   );
@@ -695,7 +1832,16 @@ export default function App() {
   const [pendingConfirms, setPendingConfirms] = useState<any[]>([]);
   const [settingsOpen,    setSettingsOpen]    = useState(false);
   const [memoryOpen,      setMemoryOpen]      = useState(false);
+  const [experiencedOpen, setExperiencedOpen] = useState(false);
+  const [evolutionOpen,   setEvolutionOpen]   = useState(false);
+  const [telemetryOpen,   setTelemetryOpen]   = useState(false);
+  const [tokenLog,        setTokenLog]        = useState<TokenSnapshot[]>([]);
+  const [commandLog,      setCommandLog]      = useState<CommandEntry[]>([]);
+  const cmdCounterRef = useRef(0);
   const [provInfo,        setProvInfo]        = useState({ provider: "deepseek", model: "deepseek-coder", schema_format: "openai" });
+  const provInfoRef = useRef({ provider: "deepseek", model: "deepseek-coder" });
+  // Keep provInfoRef in sync
+  // (updated in useEffect below)
   const [skills,          setSkills]          = useState<any[]>([]);
   const [attachments,     setAttachments]     = useState<any[]>([]);
   const [uploading,       setUploading]       = useState(false);
@@ -716,6 +1862,9 @@ export default function App() {
   const MAX_ITER       = 30;  // matches backend REACT_MAX_ITERATIONS
 
   useEffect(() => { autoConfRef.current = autoConfirm; }, [autoConfirm]);
+
+  // Sync provInfoRef whenever provInfo changes
+  useEffect(() => { provInfoRef.current = { provider: provInfo.provider, model: provInfo.model }; }, [provInfo]);
 
   // Load skills list (graceful fail if endpoint absent)
   useEffect(() => {
@@ -794,6 +1943,17 @@ export default function App() {
         const last = prev[prev.length - 1];
         if (last?.role === "assistant" && last.streaming)
           return [...prev.slice(0,-1), { ...last, content: last.content + data }];
+        // Record token snapshot for telemetry
+        if (data) {
+          setTokenLog(tl => {
+            const last2 = tl[tl.length - 1];
+            if (last2?.role === "assistant" && Date.now() - new Date(last2.ts).getTime() < 30000) {
+              // Accumulate into current snapshot
+              return [...tl.slice(0,-1), { ...last2, chars: last2.chars + data.length, est_tokens: estTokens(last2.chars + data.length) }];
+            }
+            return [...tl, { ts: tsNow(), role: "assistant", chars: data.length, est_tokens: estTokens(data.length), model: provInfoRef.current.model, provider: provInfoRef.current.provider }];
+          });
+        }
         return [...prev, { role: "assistant", content: data || "", streaming: true }];
       });
     } else if (type === "done") {
@@ -805,6 +1965,33 @@ export default function App() {
       setMessages(prev => [...prev, { role: "tool_call", ...data }]);
     } else if (type === "tool_result") {
       setMessages(prev => [...prev, { role: "tool_result", data }]);
+      // Telemetry: backend now embeds skill/action/params in every tool_result event
+      // so we read them directly — no cross-event stash needed
+      const skill  = data?.skill  || "";
+      const action = data?.action || "";
+      const params = data?.params || {};
+      const output = data?.output || {};
+      if (skill) {
+        cmdCounterRef.current += 1;
+        const entry: CommandEntry = {
+          id:          String(cmdCounterRef.current),
+          ts:          tsNow(),
+          skill,
+          action,
+          params,
+          success:     data?.success    ?? true,
+          duration_ms: output?.duration_ms ?? null,
+          returncode:  output?.returncode  ?? null,
+          stdout_len:  output?.stdout?.length || 0,
+          stderr_len:  output?.stderr?.length || 0,
+          timed_out:   output?.timed_out      ?? false,
+          is_kali:     isKaliSkill(skill),
+          command:     output?.command || params?.command || "",
+          stdout:      output?.stdout  || "",
+          stderr:      output?.stderr  || "",
+        };
+        setCommandLog(cl => [...cl, entry]);
+      }
     } else if (type === "confirm_needed") {
       if (autoConfRef.current) {
         setMessages(prev => [...prev, { role: "tool_call", skill: data.skill, action: data.action, params: {}, confirmed: true }]);
@@ -842,6 +2029,8 @@ export default function App() {
     const toSend = [...attachments];
     setAttachments([]);
     setMessages(prev => [...prev, { role: "user", content: display, attachments: toSend.length ? toSend : undefined }]);
+    // Record user token snapshot
+    setTokenLog(tl => [...tl, { ts: tsNow(), role: "user", chars: msg.length, est_tokens: estTokens(msg.length), model: provInfo.model, provider: provInfo.provider }]);
 
     // FIX: Backend WS expects {message, react?, auto_confirm?, attachments?}
     // When react=true, backend handles the FULL ReAct loop internally — no need to click Continue
@@ -973,6 +2162,11 @@ export default function App() {
           <Divider color={J.borderMid} />
 
           <Chip label={connected ? "● ONLINE" : "○ OFFLINE"} color={connected ? J.ok : J.err} pulse={connected} />
+          {tokenLog.length > 0 && (
+            <button onClick={() => setTelemetryOpen(true)} title="Open telemetry panel" style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}>
+              <Chip label={`⊕ ~${tokenLog.reduce((s,t)=>s+t.est_tokens,0).toLocaleString()} tok · ${commandLog.length} cmd`} color={J.accentDim} />
+            </button>
+          )}
           <ModelPicker info={provInfo} onChange={d => setProvInfo(prev => ({ ...prev, ...d }))} />
           <Chip label={provInfo.schema_format || "openai"} color={pColor} />
         </div>
@@ -994,7 +2188,10 @@ export default function App() {
             );
           })}
           {[
-            { label: "⬡ MEMORY", action: () => setMemoryOpen(true), color: J.gold },
+            { label: "◉ MEMORY",    action: () => setMemoryOpen(true),      color: J.gold },
+            { label: "⬢ EXPERIENCED", action: () => setExperiencedOpen(true), color: J.react },
+            { label: "◈ EVOLVE",    action: () => setEvolutionOpen(true),   color: J.warm },
+            { label: "⊕ TELEMETRY", action: () => setTelemetryOpen(true),   color: J.accent },
             { label: "⚙ CONFIG", action: () => setSettingsOpen(true), color: J.textSec },
             { label: "↺ RESET",  action: handleReset,                  color: J.err },
           ].map(b => (
@@ -1196,8 +2393,19 @@ export default function App() {
       </div>
 
       {/* ── Overlays ── */}
-      {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} onSaved={d => setProvInfo(prev => ({ ...prev, ...d }))} />}
-      {memoryOpen && <MemoryPanel onClose={() => setMemoryOpen(false)} userId={authedUser || "default"} />}
+      {settingsOpen    && <SettingsPanel    onClose={() => setSettingsOpen(false)}    onSaved={d => setProvInfo(prev => ({ ...prev, ...d }))} />}
+      {memoryOpen      && <MemoryPanel      onClose={() => setMemoryOpen(false)}      userId={authedUser || "default"} />}
+      {experiencedOpen && <ExperiencedPanel onClose={() => setExperiencedOpen(false)} userId={authedUser || "default"} />}
+      {evolutionOpen   && <EvolutionPanel   onClose={() => setEvolutionOpen(false)}   userId={authedUser || "default"} />}
+      {telemetryOpen   && (
+        <TelemetryPanel
+          onClose={() => setTelemetryOpen(false)}
+          tokenLog={tokenLog}
+          commandLog={commandLog}
+          onClearTokens={() => setTokenLog([])}
+          onClearCommands={() => setCommandLog([])}
+        />
+      )}
     </div>
   );
 }

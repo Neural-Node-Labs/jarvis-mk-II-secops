@@ -148,7 +148,8 @@ class Agent:
 
         result      = await self.registry.execute(skill_name, action, params, confirmed=True)
         result_dict = result.to_dict()
-        yield {"type": "tool_result", "data": result_dict}
+        # Embed skill/action/params so frontend telemetry can correlate without cross-event state
+        yield {"type": "tool_result", "data": {"skill": skill_name, "action": action, "params": params, **result_dict}}
 
         ctx = f"[CONFIRMED TOOL RESULT: {skill_name}.{action}]\n{json.dumps(result_dict, indent=2)}"
         self._append("user", ctx)
@@ -299,7 +300,7 @@ class Agent:
                     break
 
                 result_dict = result.to_dict()
-                yield {"type": "tool_result", "data": result_dict}
+                yield {"type": "tool_result", "data": {"skill": skill_name, "action": action, "params": params, **result_dict}}
 
                 # ── OBSERVE ────────────────────────────────────────────────────
                 if result_dict.get("success"):
@@ -368,7 +369,7 @@ class Agent:
             }}
         else:
             result_dict = result.to_dict()
-            yield {"type": "tool_result", "data": result_dict}
+            yield {"type": "tool_result", "data": {"skill": skill_name, "action": action, "params": params, **result_dict}}
             ctx = f"[TOOL RESULT: {skill_name}.{action}]\n{json.dumps(result_dict, indent=2, default=str)}"
             self._append("user", ctx)
 
