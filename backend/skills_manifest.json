@@ -1,0 +1,499 @@
+{
+  "manifest_version": "1.0.0",
+  "generated_at": "2026-06-11T21:38:35Z",
+  "skills": [
+    {
+      "id": "SKL-CBD-ARCHITECT",
+      "name": "cbd_architect",
+      "version": "1.0.0",
+      "description": "CBD v2.2 methodology enforcer. Implements the full phase pipeline (-1, 0, I, II, III), blueprint management, and component/experience lifecycle versioning.",
+      "actions": [
+        {
+          "name": "analyze_request",
+          "description": "Phase -1 / Phase 0: Analyze a request, identify ambiguities, and run an Experienced lookup first.",
+          "params": {
+            "request": { "type": "string", "required": true, "description": "The target engineering or implementation request" },
+            "context": { "type": "string", "required": false, "description": "Optional background or project context" }
+          }
+        },
+        {
+          "name": "generate_blueprint",
+          "description": "Phase I: Generate blueprint.md and blueprint.json from a confirmed specification.",
+          "params": {
+            "project_id": { "type": "string", "required": false, "default": "unnamed-project" },
+            "components": { "type": "array", "required": true, "description": "List of component definitions containing name, function, and schemas" },
+            "description": { "type": "string", "required": false, "description": "High-level purpose statement of the project" },
+            "methodology": { "type": "string", "required": false, "default": "CBD-Interface-First v2.2" }
+          }
+        },
+        {
+          "name": "validate_blueprint",
+          "description": "Read and validate the structural schema of the blueprint.json file against CBD v2.2 requirements.",
+          "params": {
+            "path": { "type": "string", "required": false, "description": "Path to blueprint.json" }
+          }
+        },
+        {
+          "name": "implement_component",
+          "description": "Phase II: Transition a component lifecycle status to IN_PROGRESS in blueprint.json.",
+          "params": {
+            "component_name": { "type": "string", "required": true },
+            "blueprint_path": { "type": "string", "required": false }
+          }
+        },
+        {
+          "name": "validate_component",
+          "description": "Phase II gate: Transition a component lifecycle status to COMPLETE after explicit verification reports pass.",
+          "params": {
+            "component_name": { "type": "string", "required": true },
+            "test_report": { "type": "string", "required": true, "description": "Verbatim output or confirmation text from test suite executions" },
+            "blueprint_path": { "type": "string", "required": false }
+          }
+        },
+        {
+          "name": "version_read",
+          "description": "Version Integrity Guardrail: Mandatory pre-modification action to read the precise current versions from the state file.",
+          "params": {
+            "path": { "type": "string", "required": false }
+          }
+        },
+        {
+          "name": "experienced_lookup",
+          "description": "Phase 0: Mandatory pre-task query. Look up symptoms or environmental crashes before attempting setups or debug sessions.",
+          "params": {
+            "symptom": { "type": "string", "required": true },
+            "error_message": { "type": "string", "required": false },
+            "environment": { "type": "string", "required": false }
+          }
+        },
+        {
+          "name": "experienced_search",
+          "description": "Search across experience entries by free text query, explicit categories, or severities.",
+          "params": {
+            "query": { "type": "string", "required": true },
+            "category": { "type": "string", "required": false },
+            "severity": { "type": "string", "required": false },
+            "max_results": { "type": "integer", "required": false, "default": 5 }
+          }
+        },
+        {
+          "name": "experienced_capture",
+          "description": "Phase III: Write an explicitly structured root cause analysis and resolution profile (EXP entry) as DRAFT.",
+          "params": {
+            "title": { "type": "string", "required": true },
+            "category": { "type": "string", "required": false, "default": "general" },
+            "severity": { "type": "string", "required": false, "default": "confusing" },
+            "discovery": {
+              "type": "object",
+              "required": true,
+              "properties": {
+                "symptom": { "type": "string", "required": true },
+                "discovery_path": { "type": "string", "required": false },
+                "misleading_signals": { "type": "array", "items": { "type": "string" } }
+              }
+            },
+            "environment": { "type": "object", "required": false },
+            "root_cause": { "type": "object", "required": false },
+            "solution": { "type": "object", "required": false },
+            "prevention": { "type": "object", "required": false }
+          }
+        },
+        {
+          "name": "experienced_promote",
+          "description": "Advance an experience entry down the lifecycle status track: DRAFT → CONFIRMED → STABLE → SUPERSEDED.",
+          "params": {
+            "exp_id": { "type": "string", "required": true, "placeholder": "EXP-0001" },
+            "new_status": { "type": "string", "required": true, "enum": ["DRAFT", "CONFIRMED", "STABLE", "SUPERSEDED"] },
+            "superseded_by": { "type": "string", "required": false, "description": "Required if new_status is set to SUPERSEDED" }
+          }
+        },
+        {
+          "name": "experienced_rebuild_index",
+          "description": "Parse and re-index all EXP-*.md markdown entries on local disk into experienced/index.md.",
+          "params": {}
+        },
+        {
+          "name": "get_template",
+          "description": "Return clear boilerplates for artifact structures (components, exp entries, test plans, blueprints).",
+          "params": {
+            "type": { "type": "string", "required": true, "enum": ["component", "exp_entry", "blueprint_json", "test_report", "security_report"] }
+          }
+        },
+        {
+          "name": "get_skills_registry",
+          "description": "Fetch the global manifest of high-level functional architectural skill references.",
+          "params": {}
+        }
+      ]
+    },
+    {
+      "id": "SKL-FILE-STREAMER",
+      "name": "file_streamer",
+      "version": "1.0.0",
+      "description": "Chunked large file writer engineered to stream contents over multiple frames, bypassing LLM output max_token constraints safely.",
+      "actions": [
+        {
+          "name": "start_file",
+          "description": "Initialize a thread-safe path tracking descriptor linked to an atomic temp-file write destination.",
+          "params": {
+            "path": { "type": "string", "required": true },
+            "overwrite": { "type": "boolean", "required": false, "default": true },
+            "encoding": { "type": "string", "required": false, "default": "utf-8" }
+          }
+        },
+        {
+          "name": "append_chunk",
+          "description": "Append consecutive text blocks onto the target active transaction stream data.",
+          "params": {
+            "path": { "type": "string", "required": true },
+            "content": { "type": "string", "required": true }
+          }
+        },
+        {
+          "name": "finalize_file",
+          "description": "Close file handles, execute atomic rename onto the final directory block path, and calculate checking MD5 signatures.",
+          "params": {
+            "path": { "type": "string", "required": true }
+          }
+        },
+        {
+          "name": "status",
+          "description": "Inspect metrics of a single active target stream write session, or summarize all current running operations.",
+          "params": {
+            "path": { "type": "string", "required": false }
+          }
+        },
+        {
+          "name": "abort",
+          "description": "Instantly kill and abandon a targeted file transaction stream, safely purging local staging temp cache chunks.",
+          "params": {
+            "path": { "type": "string", "required": true }
+          }
+        }
+      ]
+    },
+    {
+      "id": "SKL-001",
+      "name": "filesystem",
+      "version": "1.0.0",
+      "description": "Full core file layout input/output operations. Leverages atomic temp renames for state-sensitive updates and enforces confirmation barriers on destructive commands.",
+      "actions": [
+        {
+          "name": "read_file",
+          "description": "Extract content fields from a specified file target on disk with an integrated hard safe capping threshold.",
+          "params": {
+            "path": { "type": "string", "required": true },
+            "encoding": { "type": "string", "required": false, "default": "utf-8" },
+            "max_bytes": { "type": "integer", "required": false, "default": 512000 }
+          }
+        },
+        {
+          "name": "write_file",
+          "description": "Write or overwrite content blocks straight onto disk. Enforces strict transactional safety barriers on system state roots.",
+          "params": {
+            "path": { "type": "string", "required": true },
+            "content": { "type": "string", "required": true },
+            "encoding": { "type": "string", "required": false, "default": "utf-8" },
+            "overwrite": { "type": "boolean", "required": false, "default": true }
+          }
+        },
+        {
+          "name": "list_dir",
+          "description": "Enumerate directories, files, sizes, and structure patterns inside target layout endpoints.",
+          "params": {
+            "path": { "type": "string", "required": false, "default": "." },
+            "recursive": { "type": "boolean", "required": false, "default": false },
+            "pattern": { "type": "string", "required": false, "default": "*" }
+          }
+        },
+        {
+          "name": "delete",
+          "description": "Destructive Action (Gated): Permanently clean files or recursive folder trees off the environment completely.",
+          "params": {
+            "path": { "type": "string", "required": true }
+          }
+        },
+        {
+          "name": "move",
+          "description": "Destructive Action (Gated): Move or rename target elements to alternative file trees.",
+          "params": {
+            "src": { "type": "string", "required": true },
+            "dst": { "type": "string", "required": true }
+          }
+        },
+        {
+          "name": "mkdir",
+          "description": "Safely create complete path directories recursively without interrupting existing blocks.",
+          "params": {
+            "path": { "type": "string", "required": true }
+          }
+        },
+        {
+          "name": "search_files",
+          "description": "Traverse targets to look up text or file matches while skipping standard runtime/dependency cache arrays.",
+          "params": {
+            "path": { "type": "string", "required": false, "default": "." },
+            "pattern": { "type": "string", "required": false, "default": "*" },
+            "contains": { "type": "string", "required": false, "description": "Substring text match filter inside the file contents" },
+            "max_results": { "type": "integer", "required": false, "default": 100 }
+          }
+        },
+        {
+          "name": "stat",
+          "description": "Fetch detailed filesystem metadata metrics regarding target size, attributes, types, and modification markers.",
+          "params": {
+            "path": { "type": "string", "required": true }
+          }
+        }
+      ]
+    },
+    {
+      "id": "SKL-FOLDER-READER",
+      "name": "folder_reader",
+      "version": "1.0.0",
+      "description": "Aggregates workspace layouts and structures into a digestible summary, optimizing context windows by auto-stripping binary data and dependency noise.",
+      "actions": [
+        {
+          "name": "read_tree",
+          "description": "Traverse paths to collect localized structural representations alongside raw data from verifiable source layouts.",
+          "params": {
+            "path": { "type": "string", "required": false, "default": "." },
+            "max_depth": { "type": "integer", "required": false, "default": 4 },
+            "include_content": { "type": "boolean", "required": false, "default": true },
+            "pattern": { "type": "string", "required": false, "default": "*" }
+          }
+        },
+        {
+          "name": "summarise",
+          "description": "High-speed directory tree tracking without appending raw internal data frames.",
+          "params": {
+            "path": { "type": "string", "required": false, "default": "." },
+            "max_depth": { "type": "integer", "required": false, "default": 4 },
+            "pattern": { "type": "string", "required": false, "default": "*" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "SKL-JARVIS-MKII",
+      "name": "jarvis_mkii",
+      "version": "1.0.0",
+      "description": "High-performance fan-out task orchestration system. Dispatches asynchronous, isolated agent loops using standalone contexts with individual safety time tracking constraints.",
+      "actions": [
+        {
+          "name": "run_tasks",
+          "description": "Fan out an array of independent tasks to separate execution threads, collecting comprehensive feedback structures.",
+          "params": {
+            "tasks": { "type": "array", "required": true, "description": "Array of TaskDef payloads containing message fields, models, and timeouts" },
+            "max_parallel": { "type": "integer", "required": false, "default": 10 }
+          }
+        },
+        {
+          "name": "list_active",
+          "description": "Poll running subprocess tracking records currently executing within the parallel pool.",
+          "params": {}
+        },
+        {
+          "name": "abort_task",
+          "description": "Deliver a cancellation flag signal to clear a tracking entry at its upcoming checkpoint.",
+          "params": {
+            "task_id": { "type": "string", "required": true }
+          }
+        }
+      ]
+    },
+    {
+      "id": "SKL-MEMORY-MANAGER",
+      "name": "memory_manager",
+      "version": "1.0.0",
+      "description": "Direct wrapper access over EpisodicStore interfaces, dealing with context log transactions, contextual semantic searches, and metric histories.",
+      "actions": [
+        {
+          "name": "save",
+          "description": "Commit explicit historical context records or execution data into individual tracking stores.",
+          "params": {
+            "user_id": { "type": "string", "required": false, "default": "default" },
+            "role": { "type": "string", "required": false, "default": "assistant" },
+            "content": { "type": "string", "required": true }
+          }
+        },
+        {
+          "name": "retrieve",
+          "description": "Fetch chronological session feedback records containing trailing conversations up to index bounds.",
+          "params": {
+            "user_id": { "type": "string", "required": false, "default": "default" },
+            "n": { "type": "integer", "required": false, "default": 5 }
+          }
+        },
+        {
+          "name": "clear",
+          "description": "Destructive Action (Gated): Instantly clear target user metrics and historic arrays out of systemic storage tracking completely.",
+          "params": {
+            "user_id": { "type": "string", "required": false, "default": "default" }
+          }
+        },
+        {
+          "name": "search",
+          "description": "Execute semantic index evaluation routines to discover corresponding historical message context.",
+          "params": {
+            "user_id": { "type": "string", "required": false, "default": "default" },
+            "query": { "type": "string", "required": true },
+            "max_results": { "type": "integer", "required": false, "default": 5 }
+          }
+        },
+        {
+          "name": "stats",
+          "description": "Retrieve status insights, token sizes, or resource profiles from local user session records.",
+          "params": {
+            "user_id": { "type": "string", "required": false, "default": "default" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "SKL-OS-EXECUTION",
+      "name": "os_execution",
+      "version": "1.0.0",
+      "description": "Subprocess shell controller built natively for automated shell executions. Output returns are capped at 128KB to maintain window efficiency, and risky command formats trigger protection walls.",
+      "actions": [
+        {
+          "name": "run_command",
+          "description": "Execute system shell instructions inside targeted working environments with enforced processing runtime limits.",
+          "params": {
+            "command": { "type": "string", "required": true },
+            "cwd": { "type": "string", "required": false, "default": "/tmp" },
+            "timeout": { "type": "integer", "required": false, "default": 120 },
+            "env": { "type": "object", "required": false, "description": "Key-value string pairs to append onto the environment execution map" },
+            "shell": { "type": "boolean", "required": false, "default": true }
+          }
+        },
+        {
+          "name": "list_processes",
+          "description": "Inspect and track live execution structures running on the operating host system environment.",
+          "params": {
+            "name": { "type": "string", "required": false, "description": "Optional substring keyword filter to match against command footprints" }
+          }
+        },
+        {
+          "name": "kill_process",
+          "description": "Destructive Action (Gated): Deliver termination alerts to systems by target process ID pointers or names.",
+          "params": {
+            "pid": { "type": "string", "required": false },
+            "name": { "type": "string", "required": false }
+          }
+        },
+        {
+          "name": "send_signal",
+          "description": "Transmit raw operational control signals directly onto custom running system threads.",
+          "params": {
+            "pid": { "type": "string", "required": true },
+            "signal": { "type": "integer", "required": false, "default": 10, "description": "Signal integer identifier (e.g., 10 for SIGUSR1)" }
+          }
+        },
+        {
+          "name": "system_info",
+          "description": "Extract architecture information, memory profiles, hardware specifics, disk bounds, and platform status indicators.",
+          "params": {}
+        },
+        {
+          "name": "env_vars",
+          "description": "Fetch active system environment configurations with automatic redaction applied to cryptographic fields and passwords.",
+          "params": {}
+        }
+      ]
+    },
+    {
+      "id": "SKL-SENTINEL",
+      "name": "sentinel",
+      "version": "1.0.0",
+      "description": "Autonomous threat mitigation, continuous monitoring, and log analysis subsystem. Automatically detects security threats and can dynamically block malicious IPs.",
+      "actions": [
+        {
+          "name": "start_monitoring",
+          "description": "Launch continuous log evaluation subroutines in the background at set check tracking frequencies.",
+          "params": {
+            "interval": { "type": "integer", "required": false, "default": 60 },
+            "log_path": { "type": "string", "required": false, "default": "/var/log/auth.log" }
+          }
+        },
+        {
+          "name": "stop_monitoring",
+          "description": "Cleanly terminate active background logging tasks and output uptime security diagnostics summary metrics.",
+          "params": {}
+        },
+        {
+          "name": "status",
+          "description": "Inspect metrics on running background processes, historical event tallies, and threat validations.",
+          "params": {}
+        },
+        {
+          "name": "analyze_logs",
+          "description": "Run a single log parsing cycle over raw content strings or disk file records to flag anomalous records.",
+          "params": {
+            "log_content": { "type": "string", "required": false },
+            "log_path": { "type": "string", "required": false }
+          }
+        },
+        {
+          "name": "block_ip",
+          "description": "Destructive Action (Gated): Apply drop filtering instructions across system firewalls to block network endpoints.",
+          "params": {
+            "ip": { "type": "string", "required": true },
+            "duration": { "type": "string", "required": false, "default": "24h" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "SKL-SWARM",
+      "name": "swarm",
+      "version": "1.0.0",
+      "description": "Multi-agent task decomposition coordinator. Leverages parallel execution threads to distribute segmented workloads across independent specialized micro-agents before synthesizing final responses.",
+      "actions": [
+        {
+          "name": "run_full_pipeline",
+          "description": "Execute complete distributed cycles: Segment workloads automatically → Distribute workflows → Synthesize unified outputs.",
+          "params": {
+            "task": { "type": "string", "required": true },
+            "n_agents": { "type": "integer", "required": false, "default": 4 },
+            "provider": { "type": "string", "required": false },
+            "model": { "type": "string", "required": false },
+            "temperature": { "type": "float", "required": false, "default": 0.7 }
+          }
+        },
+        {
+          "name": "orchestrate",
+          "description": "Break down a single task prompt into an explicitly formatted list of distinct specialized subtasks.",
+          "params": {
+            "task": { "type": "string", "required": true },
+            "n_agents": { "type": "integer", "required": false, "default": 4 }
+          }
+        },
+        {
+          "name": "run_swarm",
+          "description": "Execute processed subtasks concurrently using isolated model routing contexts.",
+          "params": {
+            "subtasks": { "type": "array", "required": true, "description": "Array of subtask objects mapping out agent IDs, names, roles, and instructions" },
+            "task_context": { "type": "string", "required": false },
+            "provider": { "type": "string", "required": false },
+            "model": { "type": "string", "required": false },
+            "temperature": { "type": "float", "required": false, "default": 0.7 }
+          }
+        },
+        {
+          "name": "synthesize",
+          "description": "Consolidate raw decentralized outputs collected across individual agent runs into a final cohesive product.",
+          "params": {
+            "task": { "type": "string", "required": true, "description": "The baseline master objective scope" },
+            "results": { "type": "array", "required": true, "description": "Collected text blocks from all completed swarm agent tracks" }
+          }
+        },
+        {
+          "name": "get_status",
+          "description": "Poll running agent swarm orchestration trackers.",
+          "params": {}
+        }
+      ]
+    }
+  ]
+}

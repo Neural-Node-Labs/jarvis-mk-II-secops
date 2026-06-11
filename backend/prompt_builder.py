@@ -100,6 +100,20 @@ Usage: TOOL_CALL: {"skill": "jarvis_mkii", "action": "run_tasks", "params": {
     {"task_id": "scan-2", "message": "Run nmap on 10.0.0.2", "react": true}
   ]
 }}
+
+### 7. sentinel
+
+Autonomous security monitoring and threat response system.
+Actions: start_monitoring, stop_monitoring, status, analyze_logs, block_ip
+Usage: TOOL_CALL: {"skill": "sentinel", "action": "start_monitoring", "params": {"interval": 60, "log_path": "/var/log/auth.log"}}
+
+### 8. swarm
+
+Multi-agent orchestration for parallel LLM task decomposition.
+Actions: run_full_pipeline, orchestrate, run_swarm, synthesize, get_status
+Usage: TOOL_CALL: {"skill": "swarm", "action": "run_full_pipeline", "params": {"task": "Perform a comprehensive security audit on the local system architecture.", "n_agents": 4}}
+
+
 """
 
 _skills_section = _SKILLS_MANIFEST_SECTION if _SKILLS_MANIFEST_SECTION else _SKILLS_FALLBACK
