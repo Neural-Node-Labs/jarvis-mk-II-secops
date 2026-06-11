@@ -107,10 +107,11 @@ class Agent:
 
     async def chat_stream(
         self,
-        user_message: str,
-        react:        bool = False,
-        auto_confirm: bool = False,
-        attachments:  Optional[list] = None,
+        user_message:    str,
+        react:           bool = False,
+        auto_confirm:    bool = False,
+        attachments:     Optional[list] = None,
+        memory_enabled:  bool = True,   # set False to skip memory injection entirely
     ) -> AsyncGenerator[dict, None]:
         """
         Main entry point.
@@ -122,13 +123,16 @@ class Agent:
             blocks = [_format_attachment(a) for a in attachments]
             user_message = "\n\n".join(blocks) + "\n\n" + user_message
 
-        # Check for memory retrieval request — inject history into system prompt
-        n = detect_retrieval_request(user_message)
+        # Memory injection — only when explicitly requested AND memory_enabled=True
+        # memory_enabled=False means the operator wants a clean, focused context
+        n = detect_retrieval_request(user_message) if memory_enabled else None
         system_prompt = AGENT_SYSTEM_PROMPT
-        if n is not None:
+        if memory_enabled and n is not None:
             history = _memory.retrieve_last_n(self.user_id, n)
             system_prompt = build_system_prompt(memory_context=history)
             logger.info("[memory_injected] user=%s turns=%d", self.user_id, n)
+        elif not memory_enabled:
+            logger.debug("[memory_disabled] user=%s — context kept clean", self.user_id)
 
         if react:
             async for event in self._react_loop(user_message, auto_confirm, system_prompt):

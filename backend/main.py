@@ -559,16 +559,54 @@ async def chat_websocket(ws: WebSocket, user_id: str):
             auto_confirm = msg.get("auto_confirm", False)
             model        = msg.get("model")
             provider     = msg.get("provider")
+            attachments  = msg.get("attachments",  []) or []
+            instructions    = msg.get("instructions", "")   # Optional operator instruction block
+            halt            = msg.get("halt",          False)
+            memory_enabled  = msg.get("memory_enabled", True)   # False = skip memory injection
 
-            if not message:
-                await ws.send_json({"type": "error", "data": "message required"})
+            # ── HALT signal: destroy session so agent stops and forgets context ──
+            if halt:
+                _destroy_session(user_id)
+                await ws.send_json({"type": "halted", "data": {"user_id": user_id}})
+                logger.info("[ws_halt] user=%s", user_id)
                 continue
 
-            llm_trace.info("[WS] user=%s react=%s message=%.120s", user_id, react, message)
+            # ── Confirm resume (destructive action gate) ───────────────────────
+            confirm_id = msg.get("confirm_id", "")
+            if confirm_id:
+                with _session_lock:
+                    agent = _sessions.get(user_id)
+                if agent:
+                    async for event in agent.confirm_action(confirm_id):
+                        await ws.send_json(event)
+                else:
+                    await ws.send_json({"type": "error", "data": f"No session for {user_id}"})
+                continue
+
+            # ── Guard: ignore empty messages with no attachments ───────────────
+            # Previously this sent an error even on keep-alive pings from the client.
+            if not message and not attachments:
+                # Silently ignore — do NOT send error, do NOT echo back
+                continue
+
+            llm_trace.info("[WS] user=%s react=%s atts=%d msg=%.120s",
+                           user_id, react, len(attachments), message)
 
             try:
                 agent = _get_session(user_id, model, provider)
-                async for event in agent.chat_stream(message, react=react, auto_confirm=auto_confirm):
+
+                # Prepend operator instructions as a system note if provided
+                effective_msg = message
+                if instructions:
+                    effective_msg = f"[OPERATOR INSTRUCTIONS]\n{instructions}\n\n[MESSAGE]\n{message}"
+
+                async for event in agent.chat_stream(
+                    effective_msg,
+                    react=react,
+                    auto_confirm=auto_confirm,
+                    attachments=attachments if attachments else None,
+                    memory_enabled=memory_enabled,
+                ):
                     await ws.send_json(event)
             except Exception as exc:
                 await ws.send_json({"type": "error", "data": str(exc)})
@@ -1004,6 +1042,18 @@ async def _skill_call(skill: str, action: str, params: dict) -> JSONResponse:
 # ROUTER COMPONENT 19 — SPA Fallback
 # Logical function: Serve React frontend for all non-API routes
 # ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/halt/{user_id}", tags=["Session"])
+async def halt_session(user_id: str):
+    """
+    Hard stop: destroy agent session + clear pending confirms.
+    The agent will not resume halted work even on reconnect because
+    the conversation context is wiped. Client should also clear its own state.
+    """
+    destroyed = _destroy_session(user_id)
+    logger.info("[api_halt] user=%s destroyed=%s", user_id, destroyed)
+    return {"halted": True, "user_id": user_id, "session_destroyed": destroyed}
+
 
 @app.get("/{full_path:path}", tags=["System"])
 async def spa_fallback(full_path: str):

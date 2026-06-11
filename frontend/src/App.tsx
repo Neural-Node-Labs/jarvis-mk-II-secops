@@ -1705,6 +1705,173 @@ const TelemetryPanel = ({
   );
 };
 
+
+// ─── Instruction Store (localStorage-backed) ──────────────────────────────────
+const INSTR_KEY = "jarvis_instructions";
+interface Instruction {
+  id:      string;
+  title:   string;
+  body:    string;
+  enabled: boolean;
+  created: string;
+}
+const DEFAULT_INSTRUCTIONS: Instruction[] = [
+  { id: "i1", title: "Task Validation Rules",      enabled: false, created: new Date().toISOString(),
+    body: "Before starting any task:\n1. Restate the goal in one sentence.\n2. List what you will do (max 5 steps).\n3. Identify any destructive actions and flag them.\n4. Confirm with operator before executing step 1." },
+  { id: "i2", title: "System Upgrade Procedure",   enabled: false, created: new Date().toISOString(),
+    body: "When upgrading system packages:\n1. Run: apt-get update\n2. Check: apt-get --simulate upgrade\n3. Review changes with operator.\n4. Run: apt-get upgrade -y only after approval.\n5. Verify services after upgrade." },
+  { id: "i3", title: "Localhost Security Checklist", enabled: false, created: new Date().toISOString(),
+    body: "Localhost security audit checklist:\n- Open ports: nmap -sV localhost\n- Running services: ss -tulnp\n- World-writable files: find / -perm -002 -type f 2>/dev/null\n- SUID binaries: find / -perm -4000 2>/dev/null\n- Crontabs: cat /etc/crontab && crontab -l\n- Auth log: tail -50 /var/log/auth.log" },
+  { id: "i4", title: "ReAct Self-Healing Rules",    enabled: false, created: new Date().toISOString(),
+    body: "When a tool call fails:\n1. Read the exact error message.\n2. Identify the root cause (wrong path, wrong params, missing dependency).\n3. Fix the specific parameter that caused the failure.\n4. Do NOT retry identically — always change something.\n5. After 3 failures on the same action, report to operator and stop." },
+  { id: "i5", title: "CBD Blueprint Protocol",      enabled: false, created: new Date().toISOString(),
+    body: "For all architectural work:\n1. Run experienced_lookup FIRST.\n2. Use cbd_architect.analyze_request before writing any code.\n3. Generate blueprint.md — STOP and show it to operator.\n4. Do NOT implement until operator explicitly writes APPROVED.\n5. Implement one component at a time. Test before moving to next." },
+];
+function loadInstructions(): Instruction[] {
+  try {
+    const raw = localStorage.getItem(INSTR_KEY);
+    return raw ? JSON.parse(raw) : DEFAULT_INSTRUCTIONS;
+  } catch { return DEFAULT_INSTRUCTIONS; }
+}
+function saveInstructions(list: Instruction[]) {
+  try { localStorage.setItem(INSTR_KEY, JSON.stringify(list)); } catch {}
+}
+function buildInstructionBlock(list: Instruction[]): string {
+  const active = list.filter(i => i.enabled);
+  if (!active.length) return "";
+  return active.map(i => `## ${i.title}\n${i.body}`).join("\n\n");
+}
+
+// ─── Instructions Panel ───────────────────────────────────────────────────────
+const InstructionsPanel = ({
+  instructions, setInstructions, onClose,
+}: {
+  instructions: Instruction[];
+  setInstructions: (v: Instruction[]) => void;
+  onClose: () => void;
+}) => {
+  const [editing, setEditing] = useState<Instruction | null>(null);
+  const [newMode, setNewMode] = useState(false);
+  const [form,    setForm]    = useState({ title: "", body: "" });
+
+  const save = () => {
+    if (!form.title.trim() || !form.body.trim()) return;
+    if (newMode) {
+      const created: Instruction = { id: Date.now().toString(), title: form.title.trim(), body: form.body.trim(), enabled: false, created: new Date().toISOString() };
+      const updated = [...instructions, created];
+      setInstructions(updated); saveInstructions(updated);
+    } else if (editing) {
+      const updated = instructions.map(i => i.id === editing.id ? { ...i, title: form.title.trim(), body: form.body.trim() } : i);
+      setInstructions(updated); saveInstructions(updated);
+    }
+    setEditing(null); setNewMode(false); setForm({ title: "", body: "" });
+  };
+
+  const del = (id: string) => {
+    const updated = instructions.filter(i => i.id !== id);
+    setInstructions(updated); saveInstructions(updated);
+    if (editing?.id === id) { setEditing(null); setForm({ title: "", body: "" }); }
+  };
+
+  const toggle = (id: string) => {
+    const updated = instructions.map(i => i.id === id ? { ...i, enabled: !i.enabled } : i);
+    setInstructions(updated); saveInstructions(updated);
+  };
+
+  const startEdit = (i: Instruction) => { setEditing(i); setNewMode(false); setForm({ title: i.title, body: i.body }); };
+  const startNew  = () => { setEditing(null); setNewMode(true); setForm({ title: "", body: "" }); };
+  const cancel    = () => { setEditing(null); setNewMode(false); setForm({ title: "", body: "" }); };
+
+  const activeCount = instructions.filter(i => i.enabled).length;
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F4`, zIndex: 100, display: "flex", flexDirection: "column", fontFamily: "'Share Tech Mono',monospace" }}>
+      <div style={{ padding: "12px 24px", borderBottom: `1px solid ${J.borderMid}`, background: J.bgPanel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 22, height: 22, borderRadius: "50%", background: J.bgCard, border: `1px solid ${J.gold}55`, display: "flex", alignItems: "center", justifyContent: "center", color: J.gold, fontSize: 11 }}>⬡</div>
+          <div>
+            <div style={{ color: J.gold, fontSize: 11, letterSpacing: "0.18em", fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>OPERATOR INSTRUCTIONS</div>
+            <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.12em" }}>{activeCount} ACTIVE · Checked instructions are sent with every message</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={startNew} style={{ padding: "4px 14px", background: `${J.ok}0C`, border: `1px solid ${J.ok}44`, color: J.ok, borderRadius: 2, fontSize: 10, letterSpacing: "0.06em" }}>⊞ NEW INSTRUCTION</button>
+          <button onClick={onClose}  style={{ background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, padding: "4px 14px", borderRadius: 2, fontSize: 11 }}>✕</button>
+        </div>
+      </div>
+      <div style={{ flex: 1, display: "grid", gridTemplateColumns: "320px 1fr", overflow: "hidden" }}>
+        {/* Left: list */}
+        <div style={{ borderRight: `1px solid ${J.border}`, overflowY: "auto", padding: "14px 16px", display: "flex", flexDirection: "column", gap: 6 }}>
+          {instructions.length === 0 && (
+            <div style={{ color: J.textDim, textAlign: "center", padding: 30, fontSize: 11 }}>No instructions. Click NEW to create one.</div>
+          )}
+          {instructions.map(ins => (
+            <div key={ins.id} onClick={() => startEdit(ins)} style={{
+              padding: "10px 12px", borderRadius: 3, cursor: "pointer",
+              background: editing?.id === ins.id ? `${J.gold}0C` : J.bgCard,
+              border: `1px solid ${editing?.id === ins.id ? J.gold + "55" : J.border}`,
+              borderLeft: `3px solid ${ins.enabled ? J.gold : J.border}`,
+              transition: "all 0.15s",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input type="checkbox" checked={ins.enabled}
+                  onChange={e => { e.stopPropagation(); toggle(ins.id); }}
+                  style={{ accentColor: J.gold, width: 13, height: 13, cursor: "pointer", flexShrink: 0 }}
+                  onClick={e => e.stopPropagation()}
+                />
+                <span style={{ flex: 1, color: ins.enabled ? J.textPri : J.textSec, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ins.title}</span>
+                {ins.enabled && <Chip label="ON" color={J.gold} />}
+              </div>
+              <div style={{ color: J.textDim, fontSize: 10, marginTop: 4, marginLeft: 21, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {ins.body.split("\n")[0].slice(0, 60)}
+              </div>
+            </div>
+          ))}
+        </div>
+        {/* Right: editor */}
+        <div style={{ overflowY: "auto", padding: "20px 24px" }}>
+          {(newMode || editing) ? (
+            <div>
+              <div style={{ color: newMode ? J.ok : J.gold, fontSize: 11, letterSpacing: "0.12em", marginBottom: 16, fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>
+                {newMode ? "⊞ NEW INSTRUCTION" : `EDITING — ${editing?.title}`}
+              </div>
+              <div style={{ marginBottom: 12 }}>
+                <Lbl>Title</Lbl>
+                <input value={form.title} onChange={e => setForm(p => ({ ...p, title: e.target.value }))}
+                  placeholder="e.g. Task Validation Rules"
+                  style={{ width: "100%", marginTop: 5, padding: "8px 12px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12, borderRadius: 3 }} />
+              </div>
+              <div style={{ marginBottom: 16 }}>
+                <Lbl>Instruction Body — sent verbatim to the LLM when enabled</Lbl>
+                <textarea value={form.body} onChange={e => setForm(p => ({ ...p, body: e.target.value }))}
+                  rows={14}
+                  placeholder={"Write step-by-step instructions, rules, or checklists...\nEach line is sent as-is to the LLM system context."}
+                  style={{ width: "100%", marginTop: 5, padding: "10px 12px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12, borderRadius: 3, resize: "vertical", lineHeight: 1.7 }} />
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={save} disabled={!form.title.trim() || !form.body.trim()} style={{ padding: "7px 22px", background: `${J.ok}0C`, border: `1px solid ${J.ok}`, color: J.ok, borderRadius: 3, fontSize: 11, letterSpacing: "0.1em" }}>
+                  {newMode ? "⊞ CREATE" : "✓ SAVE"}
+                </button>
+                {editing && (
+                  <button onClick={() => del(editing.id)} style={{ padding: "7px 16px", background: J.errDim, border: `1px solid ${J.err}44`, color: "#FF9999", borderRadius: 3, fontSize: 11 }}>⊗ DELETE</button>
+                )}
+                <button onClick={cancel} style={{ padding: "7px 16px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textSec, borderRadius: 3, fontSize: 11 }}>CANCEL</button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ color: J.textDim, textAlign: "center", padding: 60 }}>
+              <div style={{ fontSize: 28, marginBottom: 16, color: J.gold, opacity: 0.4 }}>⬡</div>
+              <div style={{ fontSize: 11, lineHeight: 2 }}>Select an instruction to edit it,<br/>or click NEW INSTRUCTION to create one.<br/><br/>
+                <span style={{ color: `${J.gold}66` }}>Checked instructions are prepended to every message sent to the LLM.</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── Login Screen ─────────────────────────────────────────────────────────────
 const Login = ({ onAuth }: { onAuth: (u: string) => void }) => {
   const [user, setUser] = useState("");
@@ -1835,9 +2002,17 @@ export default function App() {
   const [experiencedOpen, setExperiencedOpen] = useState(false);
   const [evolutionOpen,   setEvolutionOpen]   = useState(false);
   const [telemetryOpen,   setTelemetryOpen]   = useState(false);
+  const [instructionsOpen, setInstructionsOpen] = useState(false);
   const [tokenLog,        setTokenLog]        = useState<TokenSnapshot[]>([]);
   const [commandLog,      setCommandLog]      = useState<CommandEntry[]>([]);
   const cmdCounterRef = useRef(0);
+  // Instructions
+  const [instructions,    setInstructions]    = useState<Instruction[]>(() => loadInstructions());
+  // Memory toggle — when false, memory is NOT sent to LLM
+  const [memoryEnabled,   setMemoryEnabled]   = useState(true);
+  // HALT state
+  const [halted,          setHalted]          = useState(false);
+  const haltedRef = useRef(false);
   const [provInfo,        setProvInfo]        = useState({ provider: "deepseek", model: "deepseek-coder", schema_format: "openai" });
   const provInfoRef = useRef({ provider: "deepseek", model: "deepseek-coder" });
   // Keep provInfoRef in sync
@@ -1956,11 +2131,12 @@ export default function App() {
         }
         return [...prev, { role: "assistant", content: data || "", streaming: true }];
       });
+    } else if (type === "halted") {
+      // Server confirmed HALT — already handled client-side but clear streaming flag
+      setStreaming(false);
     } else if (type === "done") {
       setStreaming(false);
       setMessages(prev => prev.map(m => m.streaming ? { ...m, streaming: false } : m));
-      // FIX: If react mode is active server-side, "done" just means the current iteration ended.
-      // The backend's own ReAct loop (react=true) handles continuation automatically.
     } else if (type === "tool_call") {
       setMessages(prev => [...prev, { role: "tool_call", ...data }]);
     } else if (type === "tool_result") {
@@ -2032,13 +2208,15 @@ export default function App() {
     // Record user token snapshot
     setTokenLog(tl => [...tl, { ts: tsNow(), role: "user", chars: msg.length, est_tokens: estTokens(msg.length), model: provInfo.model, provider: provInfo.provider }]);
 
-    // FIX: Backend WS expects {message, react?, auto_confirm?, attachments?}
-    // When react=true, backend handles the FULL ReAct loop internally — no need to click Continue
+    // Send to backend with all operator options
+    const instrBlock = buildInstructionBlock(instructions);
     wsRef.current.send(JSON.stringify({
-      message: msg,
-      react: reactMode,           // FIX: pass react flag so server loop runs to completion
-      auto_confirm: autoConfirm,
-      attachments: toSend.length ? toSend : undefined,
+      message:        msg,
+      react:          reactMode,
+      auto_confirm:   autoConfirm,
+      memory_enabled: memoryEnabled,
+      instructions:   instrBlock || undefined,
+      attachments:    toSend.length ? toSend : undefined,
     }));
   }, [input, streaming, attachments, reactMode, autoConfirm]);
 
@@ -2050,9 +2228,11 @@ export default function App() {
   // This client loop is a FALLBACK for backward compatibility.
   const startClientReact = useCallback(async (initMsg?: string) => {
     if (reactActiveRef.current) return;
+    if (haltedRef.current) return;  // HALT: refuse to start new loop after halt
     reactActiveRef.current = true;
     reactIterRef.current = 0;
     const msg = (initMsg ?? input).trim();
+    // Guard: do not start a client react loop with no message content
     if (!msg || streaming || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       reactActiveRef.current = false; return;
     }
@@ -2065,6 +2245,11 @@ export default function App() {
     let go = true;
 
     while (go && reactIterRef.current < MAX_ITER) {
+      // HALT check at top of every iteration
+      if (haltedRef.current) {
+        setMessages(prev => [...prev, { role: "react_status", iteration: reactIterRef.current, phase: "⛔ HALTED BY OPERATOR", healing: false }]);
+        break;
+      }
       reactIterRef.current++;
       const iter = reactIterRef.current;
       const healing = lastErr !== null;
@@ -2072,16 +2257,20 @@ export default function App() {
       setMessages(prev => [...prev, { role: "react_status", iteration: iter, phase: healing ? "self-healing" : "reasoning", healing }]);
 
       const prompt = healing ? `Previous error: "${lastErr}". Diagnose, correct, retry.` : (iter === 1 ? msg : "continue");
+      // Build active instruction block
+      const instrBlock = buildInstructionBlock(instructions);
 
       await new Promise<void>(resolve => {
         let done = false;
         const finish = () => { if (!done) { done = true; resolve(); } };
         setStreaming(true);
         wsRef.current!.send(JSON.stringify({
-          message: prompt,
-          react: true,
-          auto_confirm: autoConfRef.current,
-          attachments: iter === 1 && toSend.length ? toSend : undefined,
+          message:        prompt,
+          react:          true,
+          auto_confirm:   autoConfRef.current,
+          memory_enabled: memoryEnabled,
+          instructions:   instrBlock || undefined,
+          attachments:    iter === 1 && toSend.length ? toSend : undefined,
         }));
         const base = evtHandlerRef.current!;
         const iter_h = (ev: any) => {
@@ -2123,6 +2312,36 @@ export default function App() {
     if (authedUser) await api(`${API_URL}/session/${authedUser}`, { method: "DELETE" }).catch(() => {});
     setMessages([]); setPendingConfirms([]); setAttachments([]);
   };
+
+  // HALT — hard stop everything, wipe session, prevent resume
+  const handleHalt = useCallback(async () => {
+    // 1. Signal the loop to stop immediately
+    haltedRef.current = true;
+    reactActiveRef.current = false;
+    setStreaming(false);
+    setHalted(true);
+
+    // 2. Send HALT via WS (fast path, fires before REST)
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ halt: true, message: "" }));
+    }
+
+    // 3. Also call REST halt endpoint to destroy server session
+    if (authedUser) {
+      await api(`${API_URL}/halt/${authedUser}`, { method: "POST" }).catch(() => {});
+    }
+
+    // 4. Clear all client state — conversation, pending confirms, attachments
+    setMessages(prev => [...prev, {
+      role: "assistant",
+      content: "⛔ HARD STOP — All execution halted. Session destroyed. Memory cleared. Awaiting new directive.",
+    }]);
+    setPendingConfirms([]);
+    setAttachments([]);
+
+    // 5. Re-enable after brief lockout (prevents accidental immediate restart)
+    setTimeout(() => { haltedRef.current = false; setHalted(false); }, 3000);
+  }, [authedUser]);
 
   const canSend     = !streaming && (!!input.trim() || attachments.length > 0);
   const canContinue = !streaming && connected;
@@ -2192,6 +2411,7 @@ export default function App() {
             { label: "⬢ EXPERIENCED", action: () => setExperiencedOpen(true), color: J.react },
             { label: "◈ EVOLVE",    action: () => setEvolutionOpen(true),   color: J.warm },
             { label: "⊕ TELEMETRY", action: () => setTelemetryOpen(true),   color: J.accent },
+            { label: "⬡ INSTRUCT",  action: () => setInstructionsOpen(true), color: J.gold },
             { label: "⚙ CONFIG", action: () => setSettingsOpen(true), color: J.textSec },
             { label: "↺ RESET",  action: handleReset,                  color: J.err },
           ].map(b => (
@@ -2206,6 +2426,23 @@ export default function App() {
               onMouseLeave={e => { (e.target as any).style.borderColor = J.border; (e.target as any).style.color = J.textSec; }}
             >{b.label}</button>
           ))}
+          {/* ⛔ HALT — hard stop, always visible */}
+          <button
+            onClick={handleHalt}
+            disabled={halted}
+            title="HARD STOP — Halt all execution, destroy session, clear memory"
+            style={{
+              padding: "4px 14px", borderRadius: 2, fontSize: 10,
+              background: halted ? J.errDim : `${J.err}15`,
+              border: `2px solid ${halted ? J.err + "33" : J.err}`,
+              color: halted ? J.err + "88" : J.err,
+              letterSpacing: "0.1em", fontFamily: "'Rajdhani',monospace", fontWeight: 700,
+              animation: streaming && !halted ? "hud-pulse 1.5s infinite" : "none",
+              boxShadow: streaming && !halted ? `0 0 8px ${J.err}33` : "none",
+            }}>
+            {halted ? "⛔ HALTED" : "⛔ HALT"}
+          </button>
+
           <button onClick={() => { clearAuth(); setAuthedUser(null); }}
             title={`Session: ${authedUser}`}
             style={{ padding: "4px 10px", background: "transparent", border: `1px solid ${J.border}`, color: J.textSec, borderRadius: 2, fontSize: 10, letterSpacing: "0.06em", fontFamily: "'Rajdhani', monospace", fontWeight: 600 }}>
@@ -2285,13 +2522,24 @@ export default function App() {
 
         {/* Mode toggles */}
         <div style={{ padding: "8px 16px 0", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-          <Toggle on={autoConfirm} set={setAutoConfirm} color={J.warm} label="⚡ Auto-confirm"
+          <Toggle on={autoConfirm}   set={setAutoConfirm}  color={J.warm}    label="⚡ Auto-confirm"
             title="Automatically approve destructive actions without prompting. Use with caution." />
-          <Toggle on={reactMode} set={setReactMode} color={J.react} label="↺ ReAct"
+          <Toggle on={reactMode}     set={setReactMode}    color={J.react}   label="↺ ReAct"
             title="Enable autonomous ReAct loop. AI will reason, act, observe and self-correct until task is done." />
-          {reactMode && <span style={{ color: `${J.react}55`, fontSize: 9, letterSpacing: "0.06em", fontFamily: "'Rajdhani', monospace" }}>AI runs autonomously to completion · max {MAX_ITER} iterations</span>}
-          {autoConfirm && <span style={{ color: `${J.warm}55`, fontSize: 9, letterSpacing: "0.06em", fontFamily: "'Rajdhani', monospace" }}>⚡ destructive actions execute without confirmation</span>}
-          {uploading && <span style={{ color: `${J.accent}55`, fontSize: 9, animation: "hud-pulse 1s infinite" }}>⬆ reading files…</span>}
+          <Toggle on={memoryEnabled} set={setMemoryEnabled} color={J.gold}   label="◉ Memory"
+            title="When OFF, no conversation history is sent to the LLM. Keeps context clean and prevents hallucination from old turns." />
+          {/* Active instructions chips */}
+          {instructions.filter(i => i.enabled).map(i => (
+            <span key={i.id} onClick={() => setInstructionsOpen(true)} title={i.body} style={{
+              padding: "3px 8px", borderRadius: 2, fontSize: 9, cursor: "pointer",
+              background: `${J.gold}0A`, border: `1px solid ${J.gold}33`, color: J.gold,
+              fontFamily: "'Rajdhani',monospace", fontWeight: 600, letterSpacing: "0.06em",
+              maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            }}>⬡ {i.title}</span>
+          ))}
+          {!memoryEnabled && <span style={{ color: `${J.gold}55`, fontSize: 9, fontFamily: "'Rajdhani',monospace" }}>◉ Memory OFF — clean context</span>}
+          {autoConfirm    && <span style={{ color: `${J.warm}55`, fontSize: 9, fontFamily: "'Rajdhani',monospace" }}>⚡ auto-confirm active</span>}
+          {uploading      && <span style={{ color: `${J.accent}55`, fontSize: 9, animation: "hud-pulse 1s infinite" }}>⬆ reading files…</span>}
         </div>
 
         {/* Input row */}
@@ -2405,6 +2653,31 @@ export default function App() {
           onClearTokens={() => setTokenLog([])}
           onClearCommands={() => setCommandLog([])}
         />
+      )}
+      {instructionsOpen && (
+        <InstructionsPanel
+          instructions={instructions}
+          setInstructions={setInstructions}
+          onClose={() => setInstructionsOpen(false)}
+        />
+      )}
+      {/* ⛔ HALTED overlay — brief 3s flash */}
+      {halted && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 9000, pointerEvents: "none",
+          border: `4px solid ${J.err}`,
+          background: `${J.err}08`,
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <div style={{
+            padding: "20px 48px", background: J.bgPanel,
+            border: `2px solid ${J.err}`, borderRadius: 6,
+            color: J.err, fontSize: 24, letterSpacing: "0.25em",
+            fontFamily: "'Rajdhani',monospace", fontWeight: 700,
+            animation: "hud-pulse 0.5s ease-in-out",
+            boxShadow: `0 0 60px ${J.err}44`,
+          }}>⛔ HARD STOP — EXECUTION HALTED</div>
+        </div>
       )}
     </div>
   );
