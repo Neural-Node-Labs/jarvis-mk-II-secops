@@ -13,6 +13,7 @@ changelog:
           Memory blueprint, RCA blueprint, Experienced blueprint, Self-Evolution blueprint integrated.
           Kali tool execution hardened with async subprocess + timeout.
 """
+import re
 import os
 import json
 import uuid
@@ -1055,6 +1056,280 @@ async def halt_session(user_id: str):
     return {"halted": True, "user_id": user_id, "session_destroyed": destroyed}
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CBD COMPONENT — Auth Router
+# Logical function: Simple token-based login. Token = base64(username:timestamp).
+# In production, replace with proper JWT + user store.
+# ENV: JARVIS_AUTH_ENABLED=true  (default false = username-only dev mode)
+#      JARVIS_USERS=alice:pass1,bob:pass2  (comma-separated user:pass pairs)
+# ══════════════════════════════════════════════════════════════════════════════
+import base64
+import time as _time
+
+_AUTH_ENABLED = os.getenv("JARVIS_AUTH_ENABLED", "false").lower() == "true"
+_JARVIS_USERS: dict[str, str] = {}
+
+def _load_users():
+    raw = os.getenv("JARVIS_USERS", "")
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if ":" in pair:
+            u, p = pair.split(":", 1)
+            _JARVIS_USERS[u.strip().lower()] = p.strip()
+
+_load_users()
+
+
+def _make_token(username: str) -> str:
+    payload = f"{username}:{int(_time.time())}"
+    return base64.b64encode(payload.encode()).decode()
+
+
+@app.post("/api/auth/login", tags=["Auth"])
+async def auth_login(request: Request):
+    """
+    Login endpoint.
+    - Auth disabled (default dev mode): any username accepted, password ignored.
+      Returns a token immediately so the frontend can proceed.
+    - Auth enabled (JARVIS_AUTH_ENABLED=true): validates against JARVIS_USERS env.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    username = (body.get("username") or "").strip().lower()
+    password = body.get("password", "")
+
+    if not username:
+        raise HTTPException(status_code=400, detail="username is required")
+
+    if _AUTH_ENABLED:
+        expected = _JARVIS_USERS.get(username)
+        if expected is None or expected != password:
+            logger.warning("[auth_fail] user=%s", username)
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = _make_token(username)
+    logger.info("[auth_ok] user=%s auth_enabled=%s", username, _AUTH_ENABLED)
+    return {"access_token": token, "token_type": "bearer", "username": username}
+
+
+@app.get("/api/auth/me", tags=["Auth"])
+async def auth_me(request: Request):
+    """Return the current user from the Authorization header token."""
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        try:
+            decoded = base64.b64decode(auth_header[7:]).decode()
+            username = decoded.split(":")[0]
+            return {"username": username, "authenticated": True}
+        except Exception:
+            pass
+    return {"username": None, "authenticated": False}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CBD COMPONENT — Workspace File Browser
+# Logical function: List and read files from per-user workspace directory.
+# Default workspace: /app/{user_id}/workspace/
+# ENV: JARVIS_WORKSPACE_ROOT=/app  (root under which per-user dirs are created)
+# ══════════════════════════════════════════════════════════════════════════════
+import fnmatch as _fnmatch
+
+WORKSPACE_ROOT = os.getenv("JARVIS_WORKSPACE_ROOT", "/app")
+WS_MAX_FILE_BYTES  = 128_000   # 128KB per file sent to LLM
+WS_MAX_TOTAL_BYTES = 512_000   # 512KB total across checked files
+WS_SKIP_DIRS  = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
+WS_TEXT_EXTS  = {
+    ".py",".js",".ts",".jsx",".tsx",".sh",".bash",".zsh",
+    ".md",".txt",".rst",".cfg",".ini",".toml",".yaml",".yml",
+    ".json",".xml",".html",".css",".sql",".go",".rs",".java",
+    ".c",".cpp",".h",".env",".conf",".log",".csv",
+}
+
+
+def _workspace_path(user_id: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "_", user_id)[:32]
+    path = os.path.join(WORKSPACE_ROOT, safe, "workspace")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _is_text_file(name: str) -> bool:
+    _, ext = os.path.splitext(name)
+    return ext.lower() in WS_TEXT_EXTS
+
+
+
+@app.get("/api/workspace/{user_id}", tags=["Workspace"])
+async def workspace_list(
+    user_id: str,
+    path:    str = "",
+    depth:   int = 4,
+):
+    """
+    List files and directories in the user's workspace.
+    Returns a flat list with relative path, size, type, is_text flag.
+    Query params:
+      path  — sub-path within the workspace (default: root)
+      depth — max recursion depth (default 4)
+    """
+    ws_root = _workspace_path(user_id)
+    target  = os.path.normpath(os.path.join(ws_root, path.lstrip("/app"))) if path else ws_root
+
+
+    # Create the directory
+    # target.mkdir(parents=True, exist_ok=True)
+
+    # Security: never escape the workspace root
+    if not target.startswith(ws_root):
+        raise HTTPException(status_code=403, detail="Path outside workspace")
+
+    if not os.path.isdir(target):
+        raise HTTPException(status_code=404, detail=f"Directory not found: {path}")
+
+    entries = []
+    try:
+        for dirpath, dirs, files in os.walk(target):
+            # Depth gate
+            rel_dir = os.path.relpath(dirpath, ws_root)
+            current_depth = 0 if rel_dir == "." else rel_dir.count(os.sep) + 1
+            if current_depth >= depth:
+                dirs.clear()
+                continue
+
+            dirs[:] = sorted(d for d in dirs if d not in WS_SKIP_DIRS and not d.startswith("."))
+
+            for fname in sorted(files):
+                if fname.startswith("."):
+                    continue
+                fpath     = os.path.join(dirpath, fname)
+                rel_path  = os.path.relpath(fpath, ws_root)
+                try:
+                    fsize = os.path.getsize(fpath)
+                except OSError:
+                    fsize = 0
+
+                entries.append({
+                    "name":      fname,
+                    "path":      rel_path,          # relative to workspace root
+                    "abs_path":  fpath,
+                    "dir":       rel_dir if rel_dir != "." else "",
+                    "size":      fsize,
+                    "is_text":   _is_text_file(fname),
+                    "type":      "file",
+                })
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    return {
+        "workspace_root": ws_root,
+        "user_id":        user_id,
+        "path":           path or "/",
+        "entries":        entries,
+        "count":          len(entries),
+    }
+
+
+@app.post("/api/workspace/{user_id}/read", tags=["Workspace"])
+async def workspace_read_files(user_id: str, request: Request):
+    """
+    Read content of selected workspace files.
+    Body: { "files": ["relative/path/to/file.py", ...] }
+    Returns list of {path, name, content, size, truncated, is_text}
+    Total content capped at WS_MAX_TOTAL_BYTES.
+    """
+    body = await request.json()
+    files     = body.get("files", [])
+    ws_root   = _workspace_path(user_id)
+    results   = []
+    total     = 0
+
+    for rel_path in files[:50]:  # hard limit 50 files per request
+        # Security: prevent path traversal
+        abs_path = os.path.normpath(os.path.join(ws_root, rel_path))
+        if not abs_path.startswith(ws_root):
+            results.append({"path": rel_path, "error": "Path outside workspace", "content": ""})
+            continue
+        if not os.path.isfile(abs_path):
+            results.append({"path": rel_path, "error": "File not found", "content": ""})
+            continue
+
+        try:
+            fsize = os.path.getsize(abs_path)
+            read_limit = min(WS_MAX_FILE_BYTES, WS_MAX_TOTAL_BYTES - total)
+            if read_limit <= 0:
+                results.append({"path": rel_path, "error": "Total size limit reached", "content": ""})
+                continue
+
+            is_text = _is_text_file(os.path.basename(abs_path))
+            if is_text:
+                with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read(read_limit)
+                truncated = fsize > read_limit
+            else:
+                import base64 as _b64
+                with open(abs_path, "rb") as f:
+                    raw = f.read(read_limit)
+                content   = _b64.b64encode(raw).decode()
+                truncated = fsize > read_limit
+
+            total += len(content)
+            results.append({
+                "path":      rel_path,
+                "name":      os.path.basename(abs_path),
+                "abs_path":  abs_path,
+                "content":   content,
+                "size":      fsize,
+                "truncated": truncated,
+                "is_text":   is_text,
+                "error":     None,
+            })
+        except Exception as exc:
+            results.append({"path": rel_path, "error": str(exc), "content": ""})
+
+    return {
+        "files":        results,
+        "count":        len(results),
+        "total_bytes":  total,
+    }
+
+
+@app.post("/api/workspace/{user_id}/mkdir", tags=["Workspace"])
+async def workspace_mkdir(user_id: str, request: Request):
+    """Create a directory inside the user's workspace."""
+    body     = await request.json()
+    rel_path = body.get("path", "").strip().lstrip("/")
+    if not rel_path:
+        raise HTTPException(status_code=400, detail="path is required")
+    ws_root  = _workspace_path(user_id)
+    abs_path = os.path.normpath(os.path.join(ws_root, rel_path))
+    if not abs_path.startswith(ws_root):
+        raise HTTPException(status_code=403, detail="Path outside workspace")
+    os.makedirs(abs_path, exist_ok=True)
+    return {"created": True, "path": rel_path, "abs_path": abs_path}
+
+
+@app.delete("/api/workspace/{user_id}/file", tags=["Workspace"])
+async def workspace_delete_file(user_id: str, request: Request):
+    """Delete a file from the user's workspace (with confirmation guard)."""
+    body     = await request.json()
+    rel_path = body.get("path", "").strip()
+    if not rel_path:
+        raise HTTPException(status_code=400, detail="path is required")
+    ws_root  = _workspace_path(user_id)
+    abs_path = os.path.normpath(os.path.join(ws_root, rel_path))
+    if not abs_path.startswith(ws_root):
+        raise HTTPException(status_code=403, detail="Path outside workspace")
+    if not os.path.isfile(abs_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    os.remove(abs_path)
+    logger.info("[workspace_delete] user=%s path=%s", user_id, rel_path)
+    return {"deleted": True, "path": rel_path}
+
+
 @app.get("/{full_path:path}", tags=["System"])
 async def spa_fallback(full_path: str):
     """Serve the React SPA for any path not matched by an API route."""
@@ -1099,68 +1374,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host=os.getenv("HOST", "0.0.0.0"),
-        port=int(os.getenv("PORT", "8000")),
+        port=int(os.getenv("PORT", "8001")),
         reload=os.getenv("DEV", "false").lower() == "true",
         log_level="info",
     )
-
-
-# ADDED BY SJMN
-from typing import Optional, Dict, Any
-import secrets
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Depends, Request, Body
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-import base64 as _b64, json as _json
-import time
-import hmac
-import hashlib
-
-def _b64url(data: bytes) -> str:
-    return _b64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
-def _b64url_decode(s: str) -> bytes:
-    pad = 4 - len(s) % 4
-    return _b64.urlsafe_b64decode(s + "=" * (pad % 4))
-
-AUTH_SECRET  = os.getenv("AUTH_SECRET", "")          # login password
-ALLOWED_USERS = [u.strip().lower() for u in os.getenv("ALLOWED_USERS", "admin").split(",") if u.strip()]
-JWT_SECRET   = os.getenv("JWT_SECRET") or secrets.token_hex(32)   # auto-rotates each restart if not pinned
-JWT_TTL      = int(os.getenv("JWT_TTL_HOURS", "8")) * 3600
-
-_http_bearer = HTTPBearer(auto_error=False)
-
-class LoginRequest:
-    def __init__(self, username: str, password: str):
-        self.username = username
-        self.password = password
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
-        return cls(username=data["username"], password=data["password"])
-
-
-def create_jwt(username: str) -> str:
-    header  = _b64url(_json.dumps({"alg":"HS256","typ":"JWT"}).encode())
-    payload = _b64url(_json.dumps({"sub": username, "iat": int(time.time()), "exp": int(time.time()) + JWT_TTL}).encode())
-    sig     = _b64url(hmac.new(JWT_SECRET.encode(), f"{header}.{payload}".encode(), hashlib.sha256).digest())
-    return f"{header}.{payload}.{sig}"
-
-
-# ── Auth endpoint ─────────────────────────────────────────────────────────────
-@app.post("/api/auth/login", response_model=None)
-async def login(data: Dict[str, Any] = Body(...)):
-    """Exchange {username, password} for a Bearer JWT. No auth required on this endpoint."""
-    req = LoginRequest.from_dict(data)
-    if not AUTH_SECRET:
-        # Auth disabled — issue a no-op token so the UI flow still works
-        token = create_jwt(req.username.strip().lower() or "anonymous")
-        return {"access_token": token, "token_type": "bearer", "expires_in": JWT_TTL}
-    u = req.username.strip().lower()
-    if u not in ALLOWED_USERS or req.password != AUTH_SECRET:
-        logger.warning(f"Failed login attempt for user='{u}'")
-        raise HTTPException(status_code=401, detail="Invalid credentials",
-                            headers={"WWW-Authenticate": "Bearer"})
-    token = create_jwt(u)
-    logger.info(f"Issued JWT for user='{u}' (TTL={JWT_TTL}s)")
-    return {"access_token": token, "token_type": "bearer", "expires_in": JWT_TTL}
