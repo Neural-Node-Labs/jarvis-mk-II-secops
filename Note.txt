@@ -22,6 +22,8 @@ docker exec -u root -it agent-backend chmod -R 777 /app/frontend/
 
 docker cp agent-backend:/app ./agent-app-docker/
 
+docker exec -it <container_name_or_id> ls -la /path/to/directory
+docker exec -it <jarvis-app> ls -la /tmp
 
 
 Max Token Issued: 4096
