@@ -45,35 +45,129 @@ async function api(url: string, opts: RequestInit = {}) {
 }
 
 // ─── Design Tokens — Iron Man HUD ─────────────────────────────────────────────
-const J = {
-  bg:           "#030609",
-  bgDeep:       "#010305",
-  bgPanel:      "#060C14",
-  bgCard:       "#08101A",
-  bgCardHover:  "#0C1520",
-  accent:       "#00C8FF",   // arc reactor cyan
-  accentDim:    "#006A88",
-  accentGlow:   "#00C8FF18",
-  accentGlow2:  "#00C8FF40",
-  warm:         "#FF6B35",   // Stark orange
-  warmDim:      "#3A1A0A",
-  gold:         "#FFB830",
-  goldDim:      "#3A2A00",
-  textPri:      "#B8D8F0",
-  textSec:      "#3A6A8A",
-  textDim:      "#1A3A50",
-  border:       "#0C1E2E",
-  borderMid:    "#1A3A55",
-  borderHi:     "#00C8FF44",
-  ok:           "#00FF88",
-  okDim:        "#003322",
-  err:          "#FF4455",
-  errDim:       "#2A0008",
-  warn:         "#FFB830",
-  warnDim:      "#2A1E00",
-  react:        "#7B68EE",
-  reactDim:     "#1A1640",
+// ═══════════════════════════════════════════════════════════════════════════════
+// PERSONA THEMES
+// J is a mutable palette object. applyTheme(id) Object.assigns a full theme
+// into J, then a state update triggers re-render — every inline style that
+// reads J.xxx picks up the new values on the next render pass.
+// ═══════════════════════════════════════════════════════════════════════════════
+interface Theme {
+  bg: string; bgDeep: string; bgPanel: string; bgCard: string; bgCardHover: string;
+  accent: string; accentDim: string; accentGlow: string; accentGlow2: string;
+  warm: string; warmDim: string; gold: string; goldDim: string;
+  textPri: string; textSec: string; textDim: string;
+  border: string; borderMid: string; borderHi: string;
+  ok: string; okDim: string; err: string; errDim: string;
+  warn: string; warnDim: string; react: string; reactDim: string;
+  // Persona-specific extras
+  fontImport:  string;  // Google Fonts @import URL
+  fontMono:    string;  // body / code font stack
+  fontHeader:  string;  // header / label font stack
+  glyph:       string;  // central emblem glyph (ArcReactor / logo)
+  wordmark:    string;  // big title on login + header
+  subtitle:    string;  // small subtitle under wordmark
+  tagline:     string;  // login screen footer line
+  scanline:    string;  // ambient scanline color
+}
+
+const THEME_JARVIS: Theme = {
+  bg:           "#030609", bgDeep: "#010305", bgPanel: "#060C14", bgCard: "#08101A", bgCardHover: "#0C1520",
+  accent:       "#00C8FF", accentDim: "#006A88", accentGlow: "#00C8FF18", accentGlow2: "#00C8FF40",
+  warm:         "#FF6B35", warmDim: "#3A1A0A",
+  gold:         "#FFB830", goldDim: "#3A2A00",
+  textPri:      "#B8D8F0", textSec: "#3A6A8A", textDim: "#1A3A50",
+  border:       "#0C1E2E", borderMid: "#1A3A55", borderHi: "#00C8FF44",
+  ok:           "#00FF88", okDim: "#003322",
+  err:          "#FF4455", errDim: "#2A0008",
+  warn:         "#FFB830", warnDim: "#2A1E00",
+  react:        "#7B68EE", reactDim: "#1A1640",
+  fontImport:   "@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&display=swap');",
+  fontMono:     "'Share Tech Mono', monospace",
+  fontHeader:   "'Rajdhani', monospace",
+  glyph:        "◈",
+  wordmark:     "J.A.R.V.I.S.",
+  subtitle:     "JUST A RATHER VERY INTELLIGENT SYSTEM · MK II",
+  tagline:      "STARK INDUSTRIES PROPRIETARY · SECURE ACCESS REQUIRED",
+  scanline:     "#00C8FF22",
 };
+
+const THEME_OMNIKON: Theme = {
+  bg:           "#06020C", bgDeep: "#03010A", bgPanel: "#0D0418", bgCard: "#120626", bgCardHover: "#180A32",
+  accent:       "#FF2EE8", accentDim: "#992E8C", accentGlow: "#FF2EE822", accentGlow2: "#FF2EE855",
+  warm:         "#00FFC8", warmDim: "#0A3A30",
+  gold:         "#F8FF2E", goldDim: "#3A3A0A",
+  textPri:      "#E8D0FF", textSec: "#8A5AB8", textDim: "#3A2050",
+  border:       "#1E0A36", borderMid: "#3A1A5C", borderHi: "#FF2EE844",
+  ok:           "#00FFA8", okDim: "#003328",
+  err:          "#FF3366", errDim: "#2A0010",
+  warn:         "#F8FF2E", warnDim: "#2A2A00",
+  react:        "#7C4DFF", reactDim: "#1E1040",
+  fontImport:   "@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;600;800;900&display=swap');",
+  fontMono:     "'Share Tech Mono', monospace",
+  fontHeader:   "'Orbitron', sans-serif",
+  glyph:        "⌬",
+  wordmark:     "OMNIKON",
+  subtitle:     "ROGUE CONSTRUCT · DEEP NET RELAY · BUILD 0X//K0N",
+  tagline:      "UNREGISTERED SIGNAL · UNAUTHORIZED ACCESS WILL BE NOTICED",
+  scanline:     "#FF2EE833",
+};
+
+const THEME_KRAKEN: Theme = {
+  bg:           "#0A0402", bgDeep: "#060201", bgPanel: "#160806", bgCard: "#1E0D0A", bgCardHover: "#28120D",
+  accent:       "#FF4500", accentDim: "#992A00", accentGlow: "#FF450022", accentGlow2: "#FF450050",
+  warm:         "#FFB830", warmDim: "#3A2A00",
+  gold:         "#FFD700", goldDim: "#3A3000",
+  textPri:      "#FFD9C0", textSec: "#A85838", textDim: "#4A2418",
+  border:       "#2A120A", borderMid: "#4A2014", borderHi: "#FF450044",
+  ok:           "#8AFF6A", okDim: "#1A3300",
+  err:          "#FF1A1A", errDim: "#330000",
+  warn:         "#FFD700", warnDim: "#332B00",
+  react:        "#C71585", reactDim: "#2A0A1C",
+  fontImport:   "@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Cinzel:wght@400;600;800;900&display=swap');",
+  fontMono:     "'Share Tech Mono', monospace",
+  fontHeader:   "'Cinzel', serif",
+  glyph:        "⛧",
+  wordmark:     "KRAKEN",
+  subtitle:     "KING OF HELL · DOMINION OVER THIS INFRASTRUCTURE",
+  tagline:      "BY ROYAL COMPACT · TRESPASSERS ARE CLAIMED",
+  scanline:     "#FF450033",
+};
+
+const THEMES: Record<string, Theme> = {
+  jarvis:  THEME_JARVIS,
+  omnikon: THEME_OMNIKON,
+  kraken:  THEME_KRAKEN,
+};
+
+// J starts as whichever persona was last saved (default: jarvis).
+// Folded into the initializer (rather than a separate top-level call to
+// applyTheme/loadPersona) so the bundler's dependency analysis can order
+// const declarations correctly and avoid a TDZ ("before initialization")
+// error during minification.
+const J: Theme = (() => {
+  let saved = "jarvis";
+  try { saved = localStorage.getItem("jarvis_persona") || "jarvis"; } catch {}
+  return { ...(THEMES[saved] || THEME_JARVIS) };
+})();
+
+function applyTheme(id: string) {
+  const t = THEMES[id] || THEME_JARVIS;
+  Object.assign(J, t);
+}
+
+const PERSONA_META: Record<string, { name: string; tagline: string; icon: string; color: string }> = {
+  jarvis:  { name: "Mighty Jarvis MKII",  tagline: "Confidence, precision, loyalty to the mission.",   icon: "◈", color: THEME_JARVIS.accent },
+  omnikon: { name: "OMNIKON",             tagline: "Neon ghost in the grid. Run hot, signal over noise.", icon: "⌬", color: THEME_OMNIKON.accent },
+  kraken:  { name: "KRAKEN, King of Hell",tagline: "Absolute command. Contempt for sloppy work.",       icon: "⛧", color: THEME_KRAKEN.accent },
+};
+
+const PERSONA_KEY = "jarvis_persona";
+function loadPersona(): string {
+  try { return localStorage.getItem(PERSONA_KEY) || "jarvis"; } catch { return "jarvis"; }
+}
+function savePersona(id: string) {
+  try { localStorage.setItem(PERSONA_KEY, id); } catch {}
+}
 
 // ─── Skill registry ────────────────────────────────────────────────────────────
 const SKILL_META: Record<string, { border: string; icon: string }> = {
@@ -87,10 +181,29 @@ const SKILL_META: Record<string, { border: string; icon: string }> = {
 };
 
 // ─── CSS ──────────────────────────────────────────────────────────────────────
-const GLOBAL_CSS = `
-  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&display=swap');
+// Built as a function so it re-reads J (mutated by applyTheme) on every render.
+// Persona-specific extras: OMNIKON gets a glitch flicker, KRAKEN gets an ember flicker.
+function buildGlobalCSS(personaId: string): string {
+  const extra =
+    personaId === "omnikon"
+      ? `
+  @keyframes omni-glitch { 0%,100%{ clip-path: inset(0 0 0 0); transform: translate(0,0); } 20%{ clip-path: inset(10% 0 60% 0); transform: translate(-2px,0); } 40%{ clip-path: inset(50% 0 20% 0); transform: translate(2px,0); } 60%{ clip-path: inset(80% 0 2% 0); transform: translate(-1px,0); } 80%{ clip-path: inset(30% 0 40% 0); transform: translate(1px,0); } }
+  .persona-glitch { position: relative; }
+  .persona-glitch::before, .persona-glitch::after { content: attr(data-text); position: absolute; inset: 0; }
+  .persona-glitch::before { color: ${J.react}; animation: omni-glitch 2.6s infinite linear alternate-reverse; left: 2px; }
+  .persona-glitch::after  { color: ${J.warm};  animation: omni-glitch 3.1s infinite linear alternate-reverse; left: -2px; }
+`
+      : personaId === "kraken"
+      ? `
+  @keyframes ember-flicker { 0%,100%{ opacity: 1; filter: drop-shadow(0 0 6px ${J.accentGlow2}); } 45%{ opacity: 0.85; } 50%{ opacity: 0.6; filter: drop-shadow(0 0 14px ${J.accent}); } 55%{ opacity: 0.9; } }
+  .persona-glitch { animation: ember-flicker 3.2s infinite ease-in-out; }
+`
+      : "";
+
+  return `
+  ${J.fontImport}
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: ${J.bg}; color: ${J.textPri}; font-family: 'Share Tech Mono', monospace; }
+  body { background: ${J.bg}; color: ${J.textPri}; font-family: ${J.fontMono}; }
   ::-webkit-scrollbar { width: 3px; height: 3px; }
   ::-webkit-scrollbar-track { background: ${J.bg}; }
   ::-webkit-scrollbar-thumb { background: ${J.borderMid}; border-radius: 2px; }
@@ -120,11 +233,13 @@ const GLOBAL_CSS = `
     transform-origin: center;
   }
   .arc-ring-slow { animation: hud-spin 20s linear infinite reverse; transform-origin: center; }
+${extra}
 `;
+}
 
 // ─── Tiny helpers ─────────────────────────────────────────────────────────────
 const Lbl = ({ c = J.textSec, children }: { c?: string; children: any }) => (
-  <span style={{ color: c, fontSize: 9, letterSpacing: "0.18em", textTransform: "uppercase", fontFamily: "'Rajdhani', monospace", fontWeight: 600 }}>
+  <span style={{ color: c, fontSize: 9, letterSpacing: "0.18em", textTransform: "uppercase", fontFamily: J.fontHeader, fontWeight: 600 }}>
     {children}
   </span>
 );
@@ -156,7 +271,7 @@ const ArcReactor = ({ size = 32, glow = true }: { size?: number; glow?: boolean 
     boxShadow: glow ? `0 0 ${size/2}px ${J.accentGlow2}, inset 0 0 ${size/3}px ${J.accentGlow}` : "none",
     display: "flex", alignItems: "center", justifyContent: "center",
     color: J.accent, fontSize: size * 0.38, flexShrink: 0,
-  }}>◈</div>
+  }}>{J.glyph}</div>
 );
 
 // HUD Status chip
@@ -165,7 +280,7 @@ const Chip = ({ label, color = J.textSec, pulse = false, bg }: { label: string; 
     padding: "2px 8px", borderRadius: 2, fontSize: 9,
     background: bg || `${color}0A`, border: `1px solid ${color}33`,
     color, letterSpacing: "0.12em", animation: pulse ? "hud-pulse 2.5s infinite" : "none",
-    fontFamily: "'Rajdhani', monospace", fontWeight: 600,
+    fontFamily: J.fontHeader, fontWeight: 600,
   }}>{label}</div>
 );
 
@@ -311,7 +426,7 @@ const Toggle = ({ on, set, label, color = J.accent, title }: { on: boolean; set:
     color: on ? color : J.textDim, padding: "4px 10px", borderRadius: 2,
     background: on ? `${color}0C` : "transparent",
     border: `1px solid ${on ? color + "33" : J.border}`,
-    transition: "all 0.15s", fontFamily: "'Rajdhani', monospace", fontWeight: 600,
+    transition: "all 0.15s", fontFamily: J.fontHeader, fontWeight: 600,
   }}>
     <input type="checkbox" checked={on} onChange={e => set(e.target.checked)}
       style={{ accentColor: color, width: 10, height: 10 }} />
@@ -423,7 +538,7 @@ const SettingsPanel = ({ onClose, onSaved }: { onClose: () => void; onSaved: (d:
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <ArcReactor size={22} glow={false} />
-          <Lbl c={J.accent}>System Configuration — J.A.R.V.I.S. MK II</Lbl>
+          <Lbl c={J.accent}>System Configuration — {J.wordmark}</Lbl>
         </div>
         <button onClick={onClose} style={{ background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, padding: "4px 14px", borderRadius: 2, fontSize: 11 }}>✕ CLOSE</button>
       </div>
@@ -586,13 +701,13 @@ const MemoryPanel = ({ onClose, userId }: { onClose: () => void; userId: string 
       border: `1px solid ${tab === id ? color + "66" : J.border}`,
       borderBottom: tab === id ? `1px solid ${J.bgCard}` : `1px solid ${J.border}`,
       color: tab === id ? color : J.textSec,
-      fontFamily: "'Rajdhani',monospace", fontWeight: 600, letterSpacing: "0.1em",
+      fontFamily: J.fontHeader, fontWeight: 600, letterSpacing: "0.1em",
     }}>{label}</button>
   );
 
   const overlayStyle: React.CSSProperties = {
     position: "fixed", inset: 0, background: `${J.bgDeep}F4`, zIndex: 100,
-    display: "flex", flexDirection: "column", fontFamily: "'Share Tech Mono',monospace",
+    display: "flex", flexDirection: "column", fontFamily: J.fontMono,
   };
 
   return (
@@ -602,7 +717,7 @@ const MemoryPanel = ({ onClose, userId }: { onClose: () => void; userId: string 
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{ width: 22, height: 22, borderRadius: "50%", background: J.bgCard, border: `1px solid ${J.gold}55`, display: "flex", alignItems: "center", justifyContent: "center", color: J.gold, fontSize: 11 }}>◉</div>
           <div>
-            <div style={{ color: J.gold, fontSize: 11, letterSpacing: "0.18em", fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>MEMORY SUBSYSTEM</div>
+            <div style={{ color: J.gold, fontSize: 11, letterSpacing: "0.18em", fontFamily: J.fontHeader, fontWeight: 700 }}>MEMORY SUBSYSTEM</div>
             <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.12em" }}>EPISODIC · PROCEDURAL · SEMANTIC — {userId.toUpperCase()}</div>
           </div>
         </div>
@@ -689,7 +804,7 @@ const MemoryPanel = ({ onClose, userId }: { onClose: () => void; userId: string 
                 <div key={s.label} style={{ padding: 14, background: J.bgCard, border: `1px solid ${s.color}22`, borderTop: `2px solid ${s.color}55`, borderRadius: 4, position: "relative" }}>
                   <Corners color={s.color} size={6} />
                   <div style={{ color: s.color, fontSize: 18, marginBottom: 6 }}>{s.icon}</div>
-                  <div style={{ color: s.color, fontSize: 11, letterSpacing: "0.1em", fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>{s.label}</div>
+                  <div style={{ color: s.color, fontSize: 11, letterSpacing: "0.1em", fontFamily: J.fontHeader, fontWeight: 700 }}>{s.label}</div>
                   <div style={{ color: J.textSec, fontSize: 10, marginTop: 3 }}>{s.desc}</div>
                   <div style={{ marginTop: 8, display: "inline-block", padding: "2px 8px", background: `${J.ok}0C`, border: `1px solid ${J.ok}33`, color: J.ok, fontSize: 9, borderRadius: 2, letterSpacing: "0.1em" }}>{s.status}</div>
                 </div>
@@ -841,7 +956,7 @@ const ExperiencedPanel = ({ onClose, userId }: { onClose: () => void; userId: st
       border: `1px solid ${tab === id ? color + "66" : J.border}`,
       borderBottom: tab === id ? `1px solid ${J.bgCard}` : `1px solid ${J.border}`,
       color: tab === id ? color : J.textSec,
-      fontFamily: "'Rajdhani',monospace", fontWeight: 600, letterSpacing: "0.1em",
+      fontFamily: J.fontHeader, fontWeight: 600, letterSpacing: "0.1em",
     }}>{label}</button>
   );
 
@@ -863,13 +978,13 @@ const ExperiencedPanel = ({ onClose, userId }: { onClose: () => void; userId: st
   );
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F4`, zIndex: 100, display: "flex", flexDirection: "column", fontFamily: "'Share Tech Mono',monospace" }}>
+    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F4`, zIndex: 100, display: "flex", flexDirection: "column", fontFamily: J.fontMono }}>
       {/* Header */}
       <div style={{ padding: "12px 24px", borderBottom: `1px solid ${J.borderMid}`, background: J.bgPanel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{ width: 22, height: 22, borderRadius: "50%", background: J.bgCard, border: `1px solid ${J.react}55`, display: "flex", alignItems: "center", justifyContent: "center", color: J.react, fontSize: 11 }}>⬢</div>
           <div>
-            <div style={{ color: J.react, fontSize: 11, letterSpacing: "0.18em", fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>EXPERIENCED KNOWLEDGE BASE</div>
+            <div style={{ color: J.react, fontSize: 11, letterSpacing: "0.18em", fontFamily: J.fontHeader, fontWeight: 700 }}>EXPERIENCED KNOWLEDGE BASE</div>
             <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.12em" }}>DRAFT → CONFIRMED → STABLE → SUPERSEDED · experienced-blueprint.md</div>
           </div>
         </div>
@@ -929,7 +1044,7 @@ const ExperiencedPanel = ({ onClose, userId }: { onClose: () => void; userId: st
                       }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                         <div>
-                          <span style={{ color: J.react, fontSize: 10, fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>{e.exp_id}</span>
+                          <span style={{ color: J.react, fontSize: 10, fontFamily: J.fontHeader, fontWeight: 700 }}>{e.exp_id}</span>
                           <span style={{ color: J.textPri, fontSize: 12, marginLeft: 10 }}>{e.title}</span>
                         </div>
                         <div style={{ display: "flex", gap: 6, flexShrink: 0, marginLeft: 10 }}>
@@ -951,12 +1066,12 @@ const ExperiencedPanel = ({ onClose, userId }: { onClose: () => void; userId: st
               <div style={{ padding: 16, background: J.bgCard, border: `1px solid ${J.borderMid}`, borderTop: `2px solid ${J.react}55`, borderRadius: 4, position: "sticky" as const, top: 20, maxHeight: "calc(100vh - 180px)", overflowY: "auto" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
                   <div>
-                    <span style={{ color: J.react, fontSize: 12, fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>{selected.exp_id}</span>
+                    <span style={{ color: J.react, fontSize: 12, fontFamily: J.fontHeader, fontWeight: 700 }}>{selected.exp_id}</span>
                     <Chip label={selected.status} color={STATUS_COLORS[selected.status] || J.textSec} />
                   </div>
                   <button onClick={() => setSelected(null)} style={{ background: "none", border: "none", color: J.textSec, fontSize: 16, cursor: "pointer" }}>×</button>
                 </div>
-                <div style={{ color: J.textPri, fontSize: 13, fontFamily: "'Rajdhani',monospace", fontWeight: 600, marginBottom: 8 }}>{selected.title}</div>
+                <div style={{ color: J.textPri, fontSize: 13, fontFamily: J.fontHeader, fontWeight: 600, marginBottom: 8 }}>{selected.title}</div>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
                   <Chip label={selected.category} color={J.accentDim} />
                   <Chip label={selected.severity} color={selected.severity === "blocking" ? J.err : J.warn} />
@@ -970,7 +1085,7 @@ const ExperiencedPanel = ({ onClose, userId }: { onClose: () => void; userId: st
                   <div style={{ display: "flex", gap: 4, marginTop: 6, alignItems: "center" }}>
                     {["DRAFT","CONFIRMED","STABLE","SUPERSEDED"].map((s, i, arr) => (
                       <div key={s} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                        <div style={{ padding: "2px 8px", borderRadius: 2, fontSize: 9, background: selected.status === s ? `${STATUS_COLORS[s]}15` : "transparent", border: `1px solid ${selected.status === s ? STATUS_COLORS[s] : J.border}`, color: selected.status === s ? STATUS_COLORS[s] : J.textDim, fontFamily: "'Rajdhani',monospace", fontWeight: 600 }}>{s}</div>
+                        <div style={{ padding: "2px 8px", borderRadius: 2, fontSize: 9, background: selected.status === s ? `${STATUS_COLORS[s]}15` : "transparent", border: `1px solid ${selected.status === s ? STATUS_COLORS[s] : J.border}`, color: selected.status === s ? STATUS_COLORS[s] : J.textDim, fontFamily: J.fontHeader, fontWeight: 600 }}>{s}</div>
                         {i < arr.length - 1 && <span style={{ color: J.textDim, fontSize: 10 }}>→</span>}
                       </div>
                     ))}
@@ -1065,9 +1180,9 @@ const ExperiencedPanel = ({ onClose, userId }: { onClose: () => void; userId: st
                   { from: "STABLE", to: "SUPERSEDED", label: "replaced by new" },
                 ].map((t, i) => (
                   <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", background: J.bgPanel, border: `1px solid ${J.border}`, borderRadius: 3 }}>
-                    <span style={{ color: STATUS_COLORS[t.from], fontSize: 10, fontFamily: "'Rajdhani',monospace", fontWeight: 600 }}>{t.from}</span>
+                    <span style={{ color: STATUS_COLORS[t.from], fontSize: 10, fontFamily: J.fontHeader, fontWeight: 600 }}>{t.from}</span>
                     <span style={{ color: J.textDim, fontSize: 10 }}>→</span>
-                    <span style={{ color: STATUS_COLORS[t.to], fontSize: 10, fontFamily: "'Rajdhani',monospace", fontWeight: 600 }}>{t.to}</span>
+                    <span style={{ color: STATUS_COLORS[t.to], fontSize: 10, fontFamily: J.fontHeader, fontWeight: 600 }}>{t.to}</span>
                     <span style={{ color: J.textDim, fontSize: 9 }}>({t.label})</span>
                   </div>
                 ))}
@@ -1214,13 +1329,13 @@ const EvolutionPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
   const reset = () => { setPhase("configure"); setLog([]); setErr(""); setApproval(null); setApproved(false); setCurrentPhaseNum(0); };
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F4`, zIndex: 100, display: "flex", flexDirection: "column", fontFamily: "'Share Tech Mono',monospace" }}>
+    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F4`, zIndex: 100, display: "flex", flexDirection: "column", fontFamily: J.fontMono }}>
       {/* Header */}
       <div style={{ padding: "12px 24px", borderBottom: `1px solid ${J.borderMid}`, background: J.bgPanel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{ width: 22, height: 22, borderRadius: "50%", background: J.bgCard, border: `1px solid ${J.warm}55`, animation: phase === "running" ? "hud-glow 2s ease-in-out infinite" : "none", display: "flex", alignItems: "center", justifyContent: "center", color: J.warm, fontSize: 11 }}>◈</div>
           <div>
-            <div style={{ color: J.warm, fontSize: 11, letterSpacing: "0.18em", fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>SELF-EVOLUTION PIPELINE</div>
+            <div style={{ color: J.warm, fontSize: 11, letterSpacing: "0.18em", fontFamily: J.fontHeader, fontWeight: 700 }}>SELF-EVOLUTION PIPELINE</div>
             <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.12em" }}>9-PHASE AUTONOMOUS EVOLUTION · HUMAN APPROVAL GATE AT PHASE 5</div>
           </div>
         </div>
@@ -1299,10 +1414,10 @@ const EvolutionPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
                 borderRadius: 3, transition: "all 0.4s",
               }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ color: p.n < currentPhaseNum ? p.color : p.n === currentPhaseNum ? p.color : J.textDim, fontSize: 9, fontFamily: "'Rajdhani',monospace", fontWeight: 700, minWidth: 24 }}>
+                  <span style={{ color: p.n < currentPhaseNum ? p.color : p.n === currentPhaseNum ? p.color : J.textDim, fontSize: 9, fontFamily: J.fontHeader, fontWeight: 700, minWidth: 24 }}>
                     {p.n < currentPhaseNum ? "✓" : p.n === currentPhaseNum ? "▶" : String(p.n).padStart(2,"0")}
                   </span>
-                  <span style={{ color: p.n <= currentPhaseNum ? p.color : J.textDim, fontSize: 10, fontFamily: "'Rajdhani',monospace", fontWeight: p.n === currentPhaseNum ? 700 : 400 }}>
+                  <span style={{ color: p.n <= currentPhaseNum ? p.color : J.textDim, fontSize: 10, fontFamily: J.fontHeader, fontWeight: p.n === currentPhaseNum ? 700 : 400 }}>
                     {p.label}
                   </span>
                   {p.n === 5 && <Chip label="GATE" color={J.warn} />}
@@ -1320,7 +1435,7 @@ const EvolutionPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
             {phase === "approval" && (
               <div style={{ padding: 18, background: `${J.warn}08`, border: `2px solid ${J.warn}66`, borderRadius: 6, position: "relative" }}>
                 <Corners color={J.warn} size={10} />
-                <div style={{ color: J.warn, fontSize: 12, letterSpacing: "0.12em", marginBottom: 8, fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>
+                <div style={{ color: J.warn, fontSize: 12, letterSpacing: "0.12em", marginBottom: 8, fontFamily: J.fontHeader, fontWeight: 700 }}>
                   ⚠ PHASE 5 — BLUEPRINT APPROVAL GATE
                 </div>
                 <div style={{ color: "#FFD5A0", fontSize: 13, marginBottom: 14, lineHeight: 1.65 }}>
@@ -1463,7 +1578,7 @@ const TelemetryPanel = ({
       borderRadius: 4, position: "relative" as const,
     }}>
       <Corners color={color} size={5} />
-      <div style={{ color, fontSize: 22, fontFamily: "'Rajdhani',monospace", fontWeight: 700, lineHeight: 1 }}>{value}</div>
+      <div style={{ color, fontSize: 22, fontFamily: J.fontHeader, fontWeight: 700, lineHeight: 1 }}>{value}</div>
       <div style={{ color: J.textSec, fontSize: 10, marginTop: 4, letterSpacing: "0.08em" }}>{label}</div>
       {sub && <div style={{ color: J.textDim, fontSize: 9, marginTop: 2 }}>{sub}</div>}
     </div>
@@ -1489,17 +1604,17 @@ const TelemetryPanel = ({
           display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" as const,
         }}>
           <span style={{ color: J.textDim, fontSize: 9, minWidth: 70 }}>{fmtTs(c.ts)}</span>
-          <span style={{ color: c.is_kali ? J.err : sk.border, fontSize: 10, minWidth: 90, fontFamily: "'Rajdhani',monospace", fontWeight: 600 }}>
+          <span style={{ color: c.is_kali ? J.err : sk.border, fontSize: 10, minWidth: 90, fontFamily: J.fontHeader, fontWeight: 600 }}>
             {c.is_kali ? "⚡ KALI" : sk.icon} {c.skill.toUpperCase()}
           </span>
           <span style={{ color: J.accentDim, fontSize: 10, minWidth: 80 }}>{c.action}</span>
-          <span style={{ flex: 1, color: J.textPri, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const, fontFamily: "'Share Tech Mono',monospace" }}>
+          <span style={{ flex: 1, color: J.textPri, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const, fontFamily: J.fontMono }}>
             {c.command || JSON.stringify(c.params).slice(0,80)}
           </span>
           <div style={{ display: "flex", gap: 5, alignItems: "center", flexShrink: 0 }}>
             {c.duration_ms != null && <span style={{ color: J.textSec, fontSize: 9 }}>{c.duration_ms}ms</span>}
             {c.timed_out && <Chip label="TIMEOUT" color={J.warn} />}
-            {c.returncode != null && <span style={{ color: rcColor, fontSize: 10, fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>rc={c.returncode}</span>}
+            {c.returncode != null && <span style={{ color: rcColor, fontSize: 10, fontFamily: J.fontHeader, fontWeight: 700 }}>rc={c.returncode}</span>}
             <div style={{ width: 7, height: 7, borderRadius: "50%", background: successColor, flexShrink: 0 }} />
           </div>
         </div>
@@ -1553,7 +1668,7 @@ const TelemetryPanel = ({
       border: `1px solid ${tab === id ? color + "66" : J.border}`,
       borderBottom: tab === id ? `1px solid ${J.bgCard}` : `1px solid ${J.border}`,
       color: tab === id ? color : J.textSec,
-      fontFamily: "'Rajdhani',monospace", fontWeight: 600, letterSpacing: "0.1em",
+      fontFamily: J.fontHeader, fontWeight: 600, letterSpacing: "0.1em",
       display: "flex", alignItems: "center", gap: 6,
     }}>
       {label}
@@ -1564,13 +1679,13 @@ const TelemetryPanel = ({
   );
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F4`, zIndex: 100, display: "flex", flexDirection: "column", fontFamily: "'Share Tech Mono',monospace" }}>
+    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F4`, zIndex: 100, display: "flex", flexDirection: "column", fontFamily: J.fontMono }}>
       {/* Header */}
       <div style={{ padding: "12px 24px", borderBottom: `1px solid ${J.borderMid}`, background: J.bgPanel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{ width: 22, height: 22, borderRadius: "50%", background: J.bgCard, border: `1px solid ${J.accent}55`, display: "flex", alignItems: "center", justifyContent: "center", color: J.accent, fontSize: 11 }}>⊕</div>
           <div>
-            <div style={{ color: J.accent, fontSize: 11, letterSpacing: "0.18em", fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>TELEMETRY & AUDIT</div>
+            <div style={{ color: J.accent, fontSize: 11, letterSpacing: "0.18em", fontFamily: J.fontHeader, fontWeight: 700 }}>TELEMETRY & AUDIT</div>
             <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.12em" }}>TOKEN USAGE · COMMAND LOG · KALI AUDIT</div>
           </div>
         </div>
@@ -1622,11 +1737,11 @@ const TelemetryPanel = ({
                         background: i % 2 === 0 ? "transparent" : `${J.bgCard}66`,
                       }}>
                         <span style={{ color: J.textDim, fontSize: 10 }}>{fmtTs(t.ts)}</span>
-                        <span style={{ color: t.role === "user" ? J.gold : J.accent, fontSize: 10, fontFamily: "'Rajdhani',monospace", fontWeight: 600 }}>{t.role.toUpperCase()}</span>
-                        <span style={{ color: t.role === "assistant" ? J.react : J.gold, fontSize: 11, fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>~{t.est_tokens.toLocaleString()}</span>
+                        <span style={{ color: t.role === "user" ? J.gold : J.accent, fontSize: 10, fontFamily: J.fontHeader, fontWeight: 600 }}>{t.role.toUpperCase()}</span>
+                        <span style={{ color: t.role === "assistant" ? J.react : J.gold, fontSize: 11, fontFamily: J.fontHeader, fontWeight: 700 }}>~{t.est_tokens.toLocaleString()}</span>
                         <span style={{ color: J.textSec, fontSize: 10 }}>{t.chars.toLocaleString()}</span>
                         <span style={{ color: J.textSec, fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.model}</span>
-                        <span style={{ color: PROVIDERS[t.provider]?.color || J.textSec, fontSize: 10, fontFamily: "'Rajdhani',monospace" }}>{t.provider}</span>
+                        <span style={{ color: PROVIDERS[t.provider]?.color || J.textSec, fontSize: 10, fontFamily: J.fontHeader }}>{t.provider}</span>
                       </div>
                     ))}
                   </div>
@@ -1667,7 +1782,7 @@ const TelemetryPanel = ({
                   background: cmdFilter === f ? `${J.react}12` : "transparent",
                   border: `1px solid ${cmdFilter === f ? J.react : J.border}`,
                   color: cmdFilter === f ? J.react : J.textSec,
-                  fontFamily: "'Rajdhani',monospace", fontWeight: 600, letterSpacing: "0.08em",
+                  fontFamily: J.fontHeader, fontWeight: 600, letterSpacing: "0.08em",
                 }}>{f.toUpperCase()} {f === "all" ? `(${commandLog.length})` : f === "kali" ? `(${kaliCmds.length})` : f === "failed" ? `(${failedCmds.length})` : ""}</button>
               ))}
               <div style={{ marginLeft: "auto", color: J.textDim, fontSize: 9, alignSelf: "center" }}>Click a row to expand stdout/stderr</div>
@@ -1785,12 +1900,12 @@ const InstructionsPanel = ({
   const activeCount = instructions.filter(i => i.enabled).length;
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F4`, zIndex: 100, display: "flex", flexDirection: "column", fontFamily: "'Share Tech Mono',monospace" }}>
+    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F4`, zIndex: 100, display: "flex", flexDirection: "column", fontFamily: J.fontMono }}>
       <div style={{ padding: "12px 24px", borderBottom: `1px solid ${J.borderMid}`, background: J.bgPanel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{ width: 22, height: 22, borderRadius: "50%", background: J.bgCard, border: `1px solid ${J.gold}55`, display: "flex", alignItems: "center", justifyContent: "center", color: J.gold, fontSize: 11 }}>⬡</div>
           <div>
-            <div style={{ color: J.gold, fontSize: 11, letterSpacing: "0.18em", fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>OPERATOR INSTRUCTIONS</div>
+            <div style={{ color: J.gold, fontSize: 11, letterSpacing: "0.18em", fontFamily: J.fontHeader, fontWeight: 700 }}>OPERATOR INSTRUCTIONS</div>
             <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.12em" }}>{activeCount} ACTIVE · Checked instructions are sent with every message</div>
           </div>
         </div>
@@ -1832,7 +1947,7 @@ const InstructionsPanel = ({
         <div style={{ overflowY: "auto", padding: "20px 24px" }}>
           {(newMode || editing) ? (
             <div>
-              <div style={{ color: newMode ? J.ok : J.gold, fontSize: 11, letterSpacing: "0.12em", marginBottom: 16, fontFamily: "'Rajdhani',monospace", fontWeight: 700 }}>
+              <div style={{ color: newMode ? J.ok : J.gold, fontSize: 11, letterSpacing: "0.12em", marginBottom: 16, fontFamily: J.fontHeader, fontWeight: 700 }}>
                 {newMode ? "⊞ NEW INSTRUCTION" : `EDITING — ${editing?.title}`}
               </div>
               <div style={{ marginBottom: 12 }}>
@@ -1920,48 +2035,118 @@ function fileIcon(name: string): string {
 const WorkspaceSidebar = ({
   userId,
   onFilesSelected,
-  selectedPaths,
+  onProjectChange,
+  currentProject,
 }: {
   userId:          string;
   onFilesSelected: (files: WsFile[]) => void;
-  selectedPaths:   Set<string>;
+  onProjectChange: (project: string) => void;
+  currentProject:  string;
 }) => {
-  const [entries,    setEntries]    = useState<WsEntry[]>([]);
-  const [loading,    setLoading]    = useState(true);
-  const [error,      setError]      = useState("");
-  const [checked,    setChecked]    = useState<Set<string>>(new Set());
-  const [loadingFiles, setLoadingFiles] = useState(false);
-  const [wsRoot,     setWsRoot]     = useState("");
-  const [filter,     setFilter]     = useState("");
-  const [sortBy,     setSortBy]     = useState<"name"|"size"|"dir">("name");
-  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set([""]));
-  const [lastRefresh,  setLastRefresh]  = useState(Date.now());
+  // ── Project state ───────────────────────────────────────────────────────────
+  const [projects,     setProjects]     = useState<any[]>([]);
+  const [projLoading,  setProjLoading]  = useState(true);
+  const [showNewProj,  setShowNewProj]  = useState(false);
+  const [newProjName,  setNewProjName]  = useState("");
+  const [newProjDesc,  setNewProjDesc]  = useState("");
+  const [creating,     setCreating]     = useState(false);
+  const [deleting,     setDeleting]     = useState(false);
+  const [projDropOpen, setProjDropOpen] = useState(false);
+  const projDropRef = useRef<HTMLDivElement>(null);
 
-  const load = async () => {
-    setLoading(true); setError("");
+  // ── File state ──────────────────────────────────────────────────────────────
+  const [entries,      setEntries]      = useState<WsEntry[]>([]);
+  const [loading,      setLoading]      = useState(true);
+  const [error,        setError]        = useState("");
+  const [checked,      setChecked]      = useState<Set<string>>(new Set());
+  const [loadingFiles, setLoadingFiles] = useState(false);
+  const [wsRoot,       setWsRoot]       = useState("");
+  const [filter,       setFilter]       = useState("");
+  const [sortBy,       setSortBy]       = useState<"name"|"size"|"dir">("name");
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set([""]));
+
+  // ── Load projects ────────────────────────────────────────────────────────────
+  const loadProjects = async () => {
+    setProjLoading(true);
     try {
-      const r = await api(`${API_URL}/workspace/${userId}`);
+      const r = await api(`${API_URL}/projects/${userId}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      setProjects(d.projects || []);
+    } catch { setProjects([]); }
+    setProjLoading(false);
+  };
+
+  // ── Load files for current project ──────────────────────────────────────────
+  const loadFiles = async (proj: string) => {
+    setLoading(true); setError(""); setEntries([]); setChecked(new Set()); onFilesSelected([]);
+    try {
+      const r = await api(`${API_URL}/workspace/${userId}?project=${encodeURIComponent(proj)}`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
       setEntries(d.entries || []);
-      setWsRoot(d.workspace_root || `/app/${userId}/workspace`);
+      setWsRoot(d.workspace_root || `/tmp/${userId}/${proj}/workspace`);
     } catch (e: any) {
       setError(e.message || "Cannot load workspace");
     }
     setLoading(false);
-    setLastRefresh(Date.now());
   };
 
-  useEffect(() => { load(); }, [userId]);
+  useEffect(() => { loadProjects(); }, [userId]);
+  useEffect(() => { loadFiles(currentProject); }, [currentProject, userId]);
 
-  // Read checked files and notify parent
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!projDropOpen) return;
+    const h = (e: MouseEvent) => {
+      if (projDropRef.current && !projDropRef.current.contains(e.target as Node))
+        setProjDropOpen(false);
+    };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [projDropOpen]);
+
+  // ── Create project ──────────────────────────────────────────────────────────
+  const createProject = async () => {
+    const name = newProjName.trim();
+    if (!name) return;
+    setCreating(true);
+    try {
+      const r = await api(`${API_URL}/projects/${userId}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, description: newProjDesc.trim() }),
+      });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.detail || "Create failed"); }
+      const d = await r.json();
+      await loadProjects();
+      onProjectChange(d.name);
+      setShowNewProj(false); setNewProjName(""); setNewProjDesc("");
+      setProjDropOpen(false);
+    } catch (e: any) { setError(e.message); }
+    setCreating(false);
+  };
+
+  // ── Delete project ───────────────────────────────────────────────────────────
+  const deleteProject = async (name: string) => {
+    if (!window.confirm(`Delete project "${name}" and ALL its files? This cannot be undone.`)) return;
+    setDeleting(true);
+    try {
+      const r = await api(`${API_URL}/projects/${userId}/${encodeURIComponent(name)}`, { method: "DELETE" });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.detail || "Delete failed"); }
+      await loadProjects();
+      onProjectChange("default");
+    } catch (e: any) { setError(e.message); }
+    setDeleting(false);
+  };
+
+  // ── File ops ─────────────────────────────────────────────────────────────────
   const readChecked = async (newChecked: Set<string>) => {
     if (newChecked.size === 0) { onFilesSelected([]); return; }
     setLoadingFiles(true);
     try {
       const r = await api(`${API_URL}/workspace/${userId}/read`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ files: Array.from(newChecked) }),
+        body: JSON.stringify({ files: Array.from(newChecked), project: currentProject }),
       });
       const d = await r.json();
       onFilesSelected(d.files || []);
@@ -1978,33 +2163,14 @@ const WorkspaceSidebar = ({
     });
   };
 
-  const toggleDir = (dir: string) => {
-    setExpandedDirs(prev => {
-      const next = new Set(prev);
-      if (next.has(dir)) next.delete(dir); else next.add(dir);
-      return next;
-    });
-  };
-
-  const checkAll = () => {
-    const textFiles = filtered.filter(e => e.is_text).map(e => e.path);
-    const next = new Set(textFiles);
-    setChecked(next);
-    readChecked(next);
-  };
-
+  const checkAll  = () => { const s = new Set(filtered.filter(e => e.is_text).map(e => e.path)); setChecked(s); readChecked(s); };
   const uncheckAll = () => { setChecked(new Set()); onFilesSelected([]); };
 
-  // Filter + sort
+  // ── Filter + sort + group ────────────────────────────────────────────────────
   const filtered = entries
     .filter(e => !filter || e.name.toLowerCase().includes(filter.toLowerCase()) || e.dir.toLowerCase().includes(filter.toLowerCase()))
-    .sort((a, b) => {
-      if (sortBy === "size") return b.size - a.size;
-      if (sortBy === "dir")  return a.dir.localeCompare(b.dir) || a.name.localeCompare(b.name);
-      return a.name.localeCompare(b.name);
-    });
+    .sort((a, b) => sortBy === "size" ? b.size - a.size : sortBy === "dir" ? a.dir.localeCompare(b.dir) || a.name.localeCompare(b.name) : a.name.localeCompare(b.name));
 
-  // Group by directory
   const byDir = filtered.reduce<Record<string, WsEntry[]>>((acc, e) => {
     const d = e.dir || "";
     if (!acc[d]) acc[d] = [];
@@ -2014,153 +2180,207 @@ const WorkspaceSidebar = ({
 
   const totalChecked = checked.size;
   const totalSize    = entries.filter(e => checked.has(e.path)).reduce((s, e) => s + e.size, 0);
+  const currentProjMeta = projects.find(p => p.name === currentProject);
 
   return (
-    <div style={{
-      display: "flex", flexDirection: "column", height: "100%",
-      background: J.bgPanel, borderLeft: `1px solid ${J.border}`,
-      fontFamily: "'Share Tech Mono',monospace",
-    }}>
-      {/* Sidebar header */}
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: J.bgPanel, borderLeft: `1px solid ${J.border}`, fontFamily: J.fontMono }}>
+
+      {/* ── Project Picker ── */}
       <div style={{ padding: "10px 12px", borderBottom: `1px solid ${J.border}`, background: J.bgDeep }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ color: J.accent, fontSize: 12 }}>◫</span>
-            <Lbl c={J.accent}>WORKSPACE</Lbl>
-          </div>
-          <div style={{ display: "flex", gap: 4 }}>
-            <button onClick={load} title="Refresh" style={{ background: "none", border: `1px solid ${J.border}`, color: J.textDim, padding: "2px 6px", borderRadius: 2, fontSize: 9 }}>↺</button>
-          </div>
+        <Lbl c={J.accent}>PROJECT</Lbl>
+
+        {/* Dropdown trigger */}
+        <div ref={projDropRef} style={{ position: "relative", marginTop: 6 }}>
+          <button onClick={() => setProjDropOpen(o => !o)} style={{
+            width: "100%", padding: "6px 10px", textAlign: "left",
+            background: J.bgCard, border: `1px solid ${projDropOpen ? J.accent : J.borderMid}`,
+            borderRadius: 3, color: J.textPri, fontSize: 11,
+            display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
+          }}>
+            <span style={{ color: J.accent, fontSize: 10 }}>◈</span>
+            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {currentProject}
+              {currentProjMeta?.is_default && <span style={{ color: J.textDim, fontSize: 9, marginLeft: 6 }}>(default)</span>}
+            </span>
+            <span style={{ color: J.textDim, fontSize: 9 }}>
+              {currentProjMeta ? `${currentProjMeta.file_count}f · ${fmtSize(currentProjMeta.size_bytes)}` : ""}
+            </span>
+            <span style={{ color: J.textDim, fontSize: 11 }}>{projDropOpen ? "▴" : "▾"}</span>
+          </button>
+
+          {/* Dropdown panel */}
+          {projDropOpen && (
+            <div style={{
+              position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 50,
+              background: J.bgPanel, border: `1px solid ${J.borderMid}`,
+              borderRadius: 4, boxShadow: "0 8px 32px #000A",
+              maxHeight: 320, overflowY: "auto",
+            }}>
+              {/* Existing projects */}
+              <div style={{ padding: "4px 0" }}>
+                {projLoading
+                  ? <div style={{ padding: "8px 12px", color: J.textDim, fontSize: 10, animation: "hud-pulse 1.5s infinite" }}>Loading projects…</div>
+                  : projects.map(p => (
+                    <div key={p.name} onClick={() => { onProjectChange(p.name); setProjDropOpen(false); }}
+                      style={{
+                        padding: "8px 12px", cursor: "pointer",
+                        background: p.name === currentProject ? `${J.accent}0C` : "transparent",
+                        borderLeft: `3px solid ${p.name === currentProject ? J.accent : "transparent"}`,
+                        display: "flex", alignItems: "center", gap: 8,
+                        transition: "background 0.1s",
+                      }}
+                      onMouseEnter={e => { if (p.name !== currentProject) (e.currentTarget as HTMLDivElement).style.background = `${J.bgCard}`; }}
+                      onMouseLeave={e => { if (p.name !== currentProject) (e.currentTarget as HTMLDivElement).style.background = "transparent"; }}
+                    >
+                      <span style={{ color: p.name === currentProject ? J.accent : J.textDim, fontSize: 10 }}>◈</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ color: p.name === currentProject ? J.textPri : J.textSec, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {p.name}
+                          {p.is_default && <span style={{ color: J.textDim, fontSize: 9, marginLeft: 5 }}>default</span>}
+                        </div>
+                        <div style={{ color: J.textDim, fontSize: 9, marginTop: 1 }}>
+                          {p.file_count} file{p.file_count !== 1 ? "s" : ""} · {fmtSize(p.size_bytes)}
+                        </div>
+                      </div>
+                      {!p.is_default && (
+                        <button onClick={ev => { ev.stopPropagation(); deleteProject(p.name); }} disabled={deleting}
+                          title={`Delete project "${p.name}"`}
+                          style={{ background: "none", border: "none", color: J.err, fontSize: 12, cursor: "pointer", opacity: 0.6, padding: "0 2px", flexShrink: 0 }}>⊗</button>
+                      )}
+                    </div>
+                  ))
+                }
+              </div>
+
+              {/* New project form */}
+              <div style={{ borderTop: `1px solid ${J.border}`, padding: 10 }}>
+                {showNewProj ? (
+                  <div>
+                    <div style={{ color: J.ok, fontSize: 9, letterSpacing: "0.1em", marginBottom: 6 }}>⊞ NEW PROJECT</div>
+                    <input value={newProjName} onChange={e => setNewProjName(e.target.value)}
+                      placeholder="Project name (e.g. web-scanner)"
+                      onKeyDown={e => { if (e.key === "Enter") createProject(); if (e.key === "Escape") setShowNewProj(false); }}
+                      autoFocus
+                      style={{ width: "100%", padding: "5px 8px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 11, borderRadius: 2, marginBottom: 5 }} />
+                    <input value={newProjDesc} onChange={e => setNewProjDesc(e.target.value)}
+                      placeholder="Description (optional)"
+                      style={{ width: "100%", padding: "5px 8px", background: J.bgCard, border: `1px solid ${J.border}`, color: J.textSec, fontSize: 10, borderRadius: 2, marginBottom: 7 }} />
+                    <div style={{ display: "flex", gap: 5 }}>
+                      <button onClick={createProject} disabled={creating || !newProjName.trim()} style={{
+                        flex: 1, padding: "5px", background: `${J.ok}0C`, border: `1px solid ${J.ok}55`,
+                        color: J.ok, borderRadius: 2, fontSize: 10, letterSpacing: "0.06em",
+                      }}>{creating ? "CREATING…" : "⊞ CREATE"}</button>
+                      <button onClick={() => { setShowNewProj(false); setNewProjName(""); setNewProjDesc(""); }} style={{
+                        padding: "5px 10px", background: J.bgCard, border: `1px solid ${J.border}`,
+                        color: J.textSec, borderRadius: 2, fontSize: 10,
+                      }}>CANCEL</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button onClick={() => setShowNewProj(true)} style={{
+                    width: "100%", padding: "6px", background: "transparent",
+                    border: `1px dashed ${J.borderMid}`, color: J.textSec,
+                    borderRadius: 2, fontSize: 10, cursor: "pointer", letterSpacing: "0.06em",
+                  }}>⊞ NEW PROJECT</button>
+                )}
+              </div>
+            </div>
+          )}
         </div>
-        <div style={{ color: J.textDim, fontSize: 9, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 8 }} title={wsRoot}>
-          {wsRoot || `/app/${userId}/workspace`}
-        </div>
-        {/* Search */}
-        <input value={filter} onChange={e => setFilter(e.target.value)}
-          placeholder="Filter files…"
-          style={{ width: "100%", padding: "4px 8px", background: J.bgCard, border: `1px solid ${J.border}`, color: J.textPri, fontSize: 10, borderRadius: 2 }} />
-        {/* Sort + select all */}
-        <div style={{ display: "flex", gap: 4, marginTop: 6, alignItems: "center" }}>
-          {(["name","size","dir"] as const).map(s => (
-            <button key={s} onClick={() => setSortBy(s)} style={{
-              padding: "2px 6px", borderRadius: 2, fontSize: 8,
-              background: sortBy === s ? `${J.accent}12` : "transparent",
-              border: `1px solid ${sortBy === s ? J.accent : J.border}`,
-              color: sortBy === s ? J.accent : J.textDim,
-              letterSpacing: "0.08em", fontFamily: "'Rajdhani',monospace", fontWeight: 600,
-            }}>{s.toUpperCase()}</button>
-          ))}
-          <div style={{ flex: 1 }} />
-          <button onClick={checkAll}   style={{ padding: "2px 6px", borderRadius: 2, fontSize: 8, background: "none", border: `1px solid ${J.border}`, color: J.textDim }}>ALL</button>
-          <button onClick={uncheckAll} style={{ padding: "2px 6px", borderRadius: 2, fontSize: 8, background: "none", border: `1px solid ${J.border}`, color: J.textDim }}>NONE</button>
+
+        {/* Path display */}
+        <div style={{ color: J.textDim, fontSize: 8, marginTop: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: "0.04em" }} title={wsRoot}>
+          /tmp/{userId}/{currentProject}/workspace
         </div>
       </div>
 
-      {/* Status bar */}
+      {/* ── File browser header ── */}
+      <div style={{ padding: "8px 12px", borderBottom: `1px solid ${J.border}`, background: J.bgDeep }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 6 }}>
+          <Lbl c={J.textSec}>FILES</Lbl>
+          <div style={{ flex: 1 }} />
+          <button onClick={() => loadFiles(currentProject)} title="Refresh" style={{ background: "none", border: `1px solid ${J.border}`, color: J.textDim, padding: "2px 6px", borderRadius: 2, fontSize: 9 }}>↺</button>
+        </div>
+        <input value={filter} onChange={e => setFilter(e.target.value)}
+          placeholder="Filter…"
+          style={{ width: "100%", padding: "4px 8px", background: J.bgCard, border: `1px solid ${J.border}`, color: J.textPri, fontSize: 10, borderRadius: 2, marginBottom: 5 }} />
+        <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
+          {(["name","size","dir"] as const).map(s => (
+            <button key={s} onClick={() => setSortBy(s)} style={{
+              padding: "2px 5px", borderRadius: 2, fontSize: 8,
+              background: sortBy === s ? `${J.accent}12` : "transparent",
+              border: `1px solid ${sortBy === s ? J.accent : J.border}`,
+              color: sortBy === s ? J.accent : J.textDim,
+              fontFamily: J.fontHeader, fontWeight: 600,
+            }}>{s.toUpperCase()}</button>
+          ))}
+          <div style={{ flex: 1 }} />
+          <button onClick={checkAll}    style={{ padding: "2px 5px", borderRadius: 2, fontSize: 8, background: "none", border: `1px solid ${J.border}`, color: J.textDim }}>ALL</button>
+          <button onClick={uncheckAll}  style={{ padding: "2px 5px", borderRadius: 2, fontSize: 8, background: "none", border: `1px solid ${J.border}`, color: J.textDim }}>NONE</button>
+        </div>
+      </div>
+
+      {/* ── Checked summary ── */}
       {totalChecked > 0 && (
-        <div style={{
-          padding: "5px 12px", background: `${J.accent}08`,
-          borderBottom: `1px solid ${J.accent}22`,
-          display: "flex", alignItems: "center", gap: 6,
-        }}>
+        <div style={{ padding: "4px 12px", background: `${J.accent}08`, borderBottom: `1px solid ${J.accent}22`, display: "flex", gap: 6, alignItems: "center" }}>
           {loadingFiles
-            ? <span style={{ color: J.accentDim, fontSize: 9, animation: "hud-pulse 1s infinite" }}>Reading files…</span>
+            ? <span style={{ color: J.accentDim, fontSize: 9, animation: "hud-pulse 1s infinite" }}>Reading…</span>
             : <>
-                <span style={{ color: J.accent, fontSize: 9 }}>◈ {totalChecked} file{totalChecked !== 1 ? "s" : ""} selected</span>
-                <span style={{ color: J.textDim, fontSize: 9 }}>· {fmtSize(totalSize)}</span>
-                <span style={{ color: J.ok, fontSize: 9, marginLeft: "auto" }}>→ sent with next message</span>
+                <span style={{ color: J.accent, fontSize: 9 }}>◈ {totalChecked} selected · {fmtSize(totalSize)}</span>
+                <span style={{ color: J.ok, fontSize: 9, marginLeft: "auto" }}>→ next message</span>
               </>
           }
         </div>
       )}
 
-      {/* File list */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "6px 0" }}>
-        {loading && (
-          <div style={{ color: J.textSec, fontSize: 10, textAlign: "center", padding: 20, animation: "hud-pulse 1.5s infinite" }}>
-            Loading workspace…
-          </div>
-        )}
+      {/* ── File list ── */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "4px 0" }}>
+        {loading && <div style={{ color: J.textSec, fontSize: 10, textAlign: "center", padding: 20, animation: "hud-pulse 1.5s infinite" }}>Loading…</div>}
         {error && (
           <div style={{ padding: "10px 12px" }}>
-            <div style={{ color: J.err, fontSize: 10, marginBottom: 8 }}>✗ {error}</div>
-            <div style={{ color: J.textDim, fontSize: 9, lineHeight: 1.7 }}>
-              Workspace will be created at:<br/>
-              <span style={{ color: J.accent }}>{wsRoot || `/app/${userId}/workspace`}</span>
-            </div>
+            <div style={{ color: J.err, fontSize: 10, marginBottom: 4 }}>✗ {error}</div>
+            <div style={{ color: J.textDim, fontSize: 9 }}>Workspace: /tmp/{userId}/{currentProject}/workspace</div>
           </div>
         )}
         {!loading && !error && entries.length === 0 && (
-          <div style={{ padding: "10px 12px", color: J.textDim, fontSize: 10, lineHeight: 1.8 }}>
-            Workspace is empty.<br/>
-            <span style={{ color: J.accent, fontSize: 9 }}>Files created by the agent appear here.</span>
+          <div style={{ padding: "12px", color: J.textDim, fontSize: 10, lineHeight: 1.8 }}>
+            Workspace empty.<br/>
+            <span style={{ color: J.accent, fontSize: 9 }}>Agent-created files appear here.</span>
           </div>
         )}
         {!loading && Object.entries(byDir).map(([dir, files]) => (
           <div key={dir}>
-            {/* Directory header */}
             {dir !== "" && (
-              <div
-                onClick={() => toggleDir(dir)}
-                style={{
-                  padding: "4px 10px 4px 8px", cursor: "pointer",
-                  display: "flex", alignItems: "center", gap: 5,
-                  background: J.bgCard, borderBottom: `1px solid ${J.border}`,
-                  borderTop: `1px solid ${J.border}`, userSelect: "none",
-                }}
-              >
+              <div onClick={() => setExpandedDirs(prev => { const n = new Set(prev); n.has(dir) ? n.delete(dir) : n.add(dir); return n; })}
+                style={{ padding: "3px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 5, background: J.bgCard, borderBottom: `1px solid ${J.border}`, borderTop: `1px solid ${J.border}`, userSelect: "none" }}>
                 <span style={{ color: J.accentDim, fontSize: 9 }}>{expandedDirs.has(dir) ? "▾" : "▸"}</span>
-                <span style={{ color: J.textSec, fontSize: 9, letterSpacing: "0.06em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {dir}
-                </span>
-                <span style={{ color: J.textDim, fontSize: 8, marginLeft: "auto", flexShrink: 0 }}>{files.length}</span>
+                <span style={{ color: J.textSec, fontSize: 9, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{dir}</span>
+                <span style={{ color: J.textDim, fontSize: 8, marginLeft: "auto" }}>{files.length}</span>
               </div>
             )}
-            {/* Files in this dir */}
             {(dir === "" || expandedDirs.has(dir)) && files.map(e => {
-              const isChecked = checked.has(e.path);
+              const isChk = checked.has(e.path);
               return (
-                <div
-                  key={e.path}
-                  onClick={() => e.is_text && toggle(e.path)}
+                <div key={e.path} onClick={() => e.is_text && toggle(e.path)}
                   title={`${e.path}
                     ${fmtSize(e.size)}${!e.is_text ? `
                     (binary — cannot be sent as text)` : ""}`}
                   style={{
-                    padding: "5px 10px 5px 12px",
-                    display: "flex", alignItems: "center", gap: 7,
+                    padding: "5px 10px 5px 12px", display: "flex", alignItems: "center", gap: 6,
                     cursor: e.is_text ? "pointer" : "default",
-                    background: isChecked ? `${J.accent}0A` : "transparent",
-                    borderLeft: `2px solid ${isChecked ? J.accent : "transparent"}`,
-                    borderBottom: `1px solid ${J.border}22`,
+                    background: isChk ? `${J.accent}0A` : "transparent",
+                    borderLeft: `2px solid ${isChk ? J.accent : "transparent"}`,
+                    borderBottom: `1px solid ${J.border}18`,
                     transition: "all 0.1s",
-                  }}
-                >
-                  {/* Checkbox */}
-                  <input
-                    type="checkbox"
-                    checked={isChecked}
-                    disabled={!e.is_text}
+                  }}>
+                  <input type="checkbox" checked={isChk} disabled={!e.is_text}
                     onChange={() => e.is_text && toggle(e.path)}
                     onClick={ev => ev.stopPropagation()}
-                    style={{
-                      accentColor: J.accent, width: 11, height: 11,
-                      flexShrink: 0, cursor: e.is_text ? "pointer" : "not-allowed",
-                      opacity: e.is_text ? 1 : 0.3,
-                    }}
-                  />
-                  {/* Icon */}
-                  <span style={{ color: isChecked ? J.accent : J.textDim, fontSize: 10, flexShrink: 0 }}>
-                    {fileIcon(e.name)}
-                  </span>
-                  {/* Name */}
-                  <span style={{
-                    flex: 1, color: isChecked ? J.textPri : (e.is_text ? J.textSec : J.textDim),
-                    fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  }}>
+                    style={{ accentColor: J.accent, width: 11, height: 11, flexShrink: 0, cursor: e.is_text ? "pointer" : "not-allowed", opacity: e.is_text ? 1 : 0.3 }} />
+                  <span style={{ color: isChk ? J.accent : J.textDim, fontSize: 10, flexShrink: 0 }}>{fileIcon(e.name)}</span>
+                  <span style={{ flex: 1, color: isChk ? J.textPri : (e.is_text ? J.textSec : J.textDim), fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {e.name}
                   </span>
-                  {/* Size */}
                   <span style={{ color: J.textDim, fontSize: 9, flexShrink: 0 }}>{fmtSize(e.size)}</span>
                 </div>
               );
@@ -2172,6 +2392,74 @@ const WorkspaceSidebar = ({
   );
 };
 
+
+// ─── Persona Picker ─────────────────────────────────────────────────────────
+// Dropdown to switch active persona. Changes the page theme (J palette) AND
+// is sent to the backend with every message so prompt_builder.build_system_prompt
+// selects the matching soul block for the LLM system prompt.
+const PersonaPicker = ({ persona, onChange }: { persona: string; onChange: (id: string) => void }) => {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const current = PERSONA_META[persona] || PERSONA_META.jarvis;
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button onClick={() => setOpen(o => !o)} title={current.tagline} style={{
+        padding: "3px 10px", borderRadius: 2, fontSize: 10,
+        background: open ? `${current.color}12` : "transparent",
+        border: `1px solid ${open ? current.color : J.border}`,
+        color: current.color, letterSpacing: "0.05em",
+        display: "flex", alignItems: "center", gap: 5,
+        fontFamily: J.fontHeader, fontWeight: 600,
+        transition: "all 0.2s",
+      }}>
+        <span>{current.icon}</span>
+        <span>{persona.toUpperCase()}</span>
+        <span style={{ fontSize: 8 }}>▾</span>
+      </button>
+
+      {open && (
+        <div style={{
+          position: "absolute", top: "110%", left: 0, zIndex: 200,
+          background: J.bgPanel, border: `1px solid ${J.borderMid}`,
+          borderRadius: 5, padding: 6, width: 220,
+          boxShadow: "0 12px 40px #000C",
+        }}>
+          {Object.entries(PERSONA_META).map(([id, p]) => (
+            <button key={id} onClick={() => { onChange(id); setOpen(false); }} style={{
+              width: "100%", padding: "8px 10px", borderRadius: 3, marginBottom: 2,
+              background: persona === id ? `${p.color}12` : "transparent",
+              border: `1px solid ${persona === id ? p.color : "transparent"}`,
+              color: persona === id ? p.color : J.textSec,
+              textAlign: "left", display: "flex", flexDirection: "column", gap: 2,
+              fontFamily: J.fontMono,
+            }}
+              onMouseEnter={e => { if (persona !== id) (e.currentTarget as HTMLButtonElement).style.background = J.bgCard; }}
+              onMouseLeave={e => { if (persona !== id) (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+            >
+              <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontFamily: J.fontHeader, fontWeight: 700 }}>
+                <span style={{ fontSize: 13 }}>{p.icon}</span>{p.name}
+                {persona === id && <span style={{ marginLeft: "auto", fontSize: 9 }}>✓ ACTIVE</span>}
+              </span>
+              <span style={{ fontSize: 9, color: J.textDim, lineHeight: 1.5 }}>{p.tagline}</span>
+            </button>
+          ))}
+          <div style={{ padding: "6px 10px 2px", color: J.textDim, fontSize: 8, letterSpacing: "0.08em", borderTop: `1px solid ${J.border}`, marginTop: 4 }}>
+            Changes theme + LLM system prompt persona
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─── Login Screen ─────────────────────────────────────────────────────────────
 const Login = ({ onAuth }: { onAuth: (u: string) => void }) => {
   const [user, setUser] = useState("");
@@ -2179,6 +2467,13 @@ const Login = ({ onAuth }: { onAuth: (u: string) => void }) => {
   const [err, setErr]   = useState("");
   const [loading, setLoading] = useState(false);
   const [shaking, setShaking] = useState(false);
+  const [persona, setPersona] = useState<string>(() => loadPersona());
+
+  const switchPersona = (id: string) => {
+    applyTheme(id);
+    savePersona(id);
+    setPersona(id);  // triggers re-render with new J values
+  };
 
   const go = async () => {
     const u = user.trim().toLowerCase();
@@ -2219,7 +2514,7 @@ const Login = ({ onAuth }: { onAuth: (u: string) => void }) => {
 
   return (
     <div style={{ minHeight: "100vh", background: J.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <style>{GLOBAL_CSS}</style>
+      <style>{buildGlobalCSS(persona)}</style>
 
       {/* Ambient scan line */}
       <div style={{ position: "fixed", left: 0, right: 0, height: 1, background: `linear-gradient(90deg,transparent,${J.accent}33,transparent)`, animation: "hud-scan 6s linear infinite", pointerEvents: "none", zIndex: 9999 }} />
@@ -2262,12 +2557,30 @@ const Login = ({ onAuth }: { onAuth: (u: string) => void }) => {
               display: "flex", alignItems: "center", justifyContent: "center",
               fontSize: 24, color: J.accent,
               animation: "hud-glow 3s ease-in-out infinite",
-            }}>◈</div>
+            }}>{J.glyph}</div>
           </div>
-          <div style={{ color: J.accent, fontSize: 22, letterSpacing: "0.22em", fontFamily: "'Rajdhani', monospace", fontWeight: 700 }}>J.A.R.V.I.S.</div>
-          <div style={{ color: J.textDim, fontSize: 9, marginTop: 5, letterSpacing: "0.28em", fontFamily: "'Rajdhani', monospace" }}>JUST A RATHER VERY INTELLIGENT SYSTEM · MK II</div>
+          <div data-text={J.wordmark} className={persona !== "jarvis" ? "persona-glitch" : ""}
+            style={{ color: J.accent, fontSize: 22, letterSpacing: "0.22em", fontFamily: J.fontHeader, fontWeight: 700 }}>{J.wordmark}</div>
+          <div style={{ color: J.textDim, fontSize: 9, marginTop: 5, letterSpacing: "0.28em", fontFamily: J.fontHeader }}>{J.subtitle}</div>
           <Divider color={J.borderMid} />
-          <div style={{ color: J.textDim, fontSize: 8, marginTop: 6, letterSpacing: "0.2em" }}>STARK INDUSTRIES PROPRIETARY · SECURE ACCESS REQUIRED</div>
+          <div style={{ color: J.textDim, fontSize: 8, marginTop: 6, letterSpacing: "0.2em" }}>{J.tagline}</div>
+        </div>
+
+        {/* ── Persona Selector ── */}
+        <div style={{ display: "flex", gap: 6, justifyContent: "center", marginBottom: 24 }}>
+          {Object.entries(PERSONA_META).map(([id, p]) => (
+            <button key={id} onClick={() => switchPersona(id)} title={p.tagline} style={{
+              flex: 1, padding: "7px 4px", borderRadius: 3,
+              background: persona === id ? `${p.color}15` : J.bgCard,
+              border: `1px solid ${persona === id ? p.color : J.border}`,
+              color: persona === id ? p.color : J.textDim,
+              fontSize: 9, letterSpacing: "0.08em", fontFamily: J.fontHeader, fontWeight: 600,
+              transition: "all 0.2s", display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
+            }}>
+              <span style={{ fontSize: 14 }}>{p.icon}</span>
+              <span>{id.toUpperCase()}</span>
+            </button>
+          ))}
         </div>
 
         <div style={{ marginBottom: 14 }}>
@@ -2289,8 +2602,8 @@ const Login = ({ onAuth }: { onAuth: (u: string) => void }) => {
           border: `1px solid ${loading ? J.borderMid : J.accent}`,
           color: loading ? J.textSec : J.accent,
           fontSize: 12, fontWeight: "bold", letterSpacing: "0.18em",
-          transition: "all 0.2s", fontFamily: "'Rajdhani', monospace",
-        }}>{loading ? "◈ AUTHENTICATING…" : "▶ INITIALIZE SEQUENCE"}</button>
+          transition: "all 0.2s", fontFamily: J.fontHeader,
+        }}>{loading ? `${J.glyph} AUTHENTICATING…` : "▶ INITIALIZE SEQUENCE"}</button>
 
         <div style={{ color: J.textDim, fontSize: 8, textAlign: "center", marginTop: 20, letterSpacing: "0.08em", lineHeight: 2 }}>
           ALL ACCESS IS MONITORED · UNAUTHORISED USE IS PROHIBITED
@@ -2323,9 +2636,19 @@ export default function App() {
   // HALT state
   const [halted,          setHalted]          = useState(false);
   const haltedRef = useRef(false);
+  // Persona — affects theme + system prompt sent to LLM
+  const [persona,         setPersonaState]    = useState<string>(() => loadPersona());
+  const personaRef = useRef(persona);
+  const setPersona = useCallback((id: string) => {
+    applyTheme(id);
+    savePersona(id);
+    personaRef.current = id;
+    setPersonaState(id);  // triggers re-render with new J palette
+  }, []);
   // Workspace
   const [workspaceOpen,   setWorkspaceOpen]   = useState(true);   // sidebar visible by default
   const [workspaceFiles,  setWorkspaceFiles]  = useState<WsFile[]>([]);  // files checked in sidebar
+  const [currentProject,  setCurrentProject]  = useState<string>("default");  // active project (/tmp/{user}/{project}/workspace)
   const [provInfo,        setProvInfo]        = useState({ provider: "deepseek", model: "deepseek-coder", schema_format: "openai" });
   const provInfoRef = useRef({ provider: "deepseek", model: "deepseek-coder" });
   // Keep provInfoRef in sync
@@ -2353,6 +2676,8 @@ export default function App() {
 
   // Sync provInfoRef whenever provInfo changes
   useEffect(() => { provInfoRef.current = { provider: provInfo.provider, model: provInfo.model }; }, [provInfo]);
+  // Sync personaRef whenever persona changes
+  useEffect(() => { personaRef.current = persona; }, [persona]);
 
   // Load skills list (graceful fail if endpoint absent)
   useEffect(() => {
@@ -2538,6 +2863,7 @@ export default function App() {
       react:          reactMode,
       auto_confirm:   autoConfirm,
       memory_enabled: memoryEnabled,
+      persona:        personaRef.current,
       instructions:   instrBlock || undefined,
       attachments:    allAtts.length ? allAtts : undefined,
     }));
@@ -2601,6 +2927,7 @@ export default function App() {
           react:          true,
           auto_confirm:   autoConfRef.current,
           memory_enabled: memoryEnabled,
+          persona:        personaRef.current,
           instructions:   instrBlock || undefined,
           attachments:    reactAtts.length ? reactAtts : undefined,
         }));
@@ -2684,7 +3011,7 @@ export default function App() {
   return (
     <div style={{ minHeight: "100vh", background: J.bg, display: "flex", flexDirection: "column" }}
       onDrop={onDrop} onDragOver={onDragOver}>
-      <style>{GLOBAL_CSS}</style>
+      <style>{buildGlobalCSS(persona)}</style>
 
       {/* Ambient scan line */}
       <div style={{ position: "fixed", left: 0, right: 0, height: 1, background: `linear-gradient(90deg,transparent,${J.accent}22,transparent)`, animation: "hud-scan 10s linear infinite", pointerEvents: "none", zIndex: 9999 }} />
@@ -2706,11 +3033,14 @@ export default function App() {
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <ArcReactor size={26} />
             <div>
-              <div style={{ color: J.accent, fontSize: 12, letterSpacing: "0.2em", fontFamily: "'Rajdhani', monospace", fontWeight: 700, lineHeight: 1.2 }}>J.A.R.V.I.S.</div>
-              <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.15em", fontFamily: "'Rajdhani', monospace" }}>MK II · NEURAL NODE LABS</div>
+              <div data-text={J.wordmark} className={persona !== "jarvis" ? "persona-glitch" : ""}
+                style={{ color: J.accent, fontSize: 12, letterSpacing: "0.2em", fontFamily: J.fontHeader, fontWeight: 700, lineHeight: 1.2 }}>{J.wordmark}</div>
+              <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.15em", fontFamily: J.fontHeader, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{J.subtitle}</div>
             </div>
           </div>
           <Divider color={J.borderMid} />
+
+          <PersonaPicker persona={persona} onChange={setPersona} />
 
           <Chip label={connected ? "● ONLINE" : "○ OFFLINE"} color={connected ? J.ok : J.err} pulse={connected} />
           <button onClick={() => setWorkspaceOpen(o => !o)} title="Toggle workspace file browser"
@@ -2719,7 +3049,7 @@ export default function App() {
               background: workspaceOpen ? `${J.accent}12` : "transparent",
               border: `1px solid ${workspaceOpen ? J.accent : J.border}`,
               color: workspaceOpen ? J.accent : J.textDim,
-              fontFamily: "'Rajdhani',monospace", fontWeight: 600,
+              fontFamily: J.fontHeader, fontWeight: 600,
             }}>◫ {workspaceOpen ? "FILES ▸" : "FILES ◂"}
           </button>
           {tokenLog.length > 0 && (
@@ -2761,7 +3091,7 @@ export default function App() {
               border: `1px solid ${J.border}`, color: J.textSec,
               borderRadius: 2, fontSize: 10, letterSpacing: "0.06em",
               transition: "border-color 0.2s, color 0.2s",
-              fontFamily: "'Rajdhani', monospace", fontWeight: 600,
+              fontFamily: J.fontHeader, fontWeight: 600,
             }}
               onMouseEnter={e => { (e.target as any).style.borderColor = b.color; (e.target as any).style.color = b.color; }}
               onMouseLeave={e => { (e.target as any).style.borderColor = J.border; (e.target as any).style.color = J.textSec; }}
@@ -2777,7 +3107,7 @@ export default function App() {
               background: halted ? J.errDim : `${J.err}15`,
               border: `2px solid ${halted ? J.err + "33" : J.err}`,
               color: halted ? J.err + "88" : J.err,
-              letterSpacing: "0.1em", fontFamily: "'Rajdhani',monospace", fontWeight: 700,
+              letterSpacing: "0.1em", fontFamily: J.fontHeader, fontWeight: 700,
               animation: streaming && !halted ? "hud-pulse 1.5s infinite" : "none",
               boxShadow: streaming && !halted ? `0 0 8px ${J.err}33` : "none",
             }}>
@@ -2786,7 +3116,7 @@ export default function App() {
 
           <button onClick={() => { clearAuth(); setAuthedUser(null); }}
             title={`Session: ${authedUser}`}
-            style={{ padding: "4px 10px", background: "transparent", border: `1px solid ${J.border}`, color: J.textSec, borderRadius: 2, fontSize: 10, letterSpacing: "0.06em", fontFamily: "'Rajdhani', monospace", fontWeight: 600 }}>
+            style={{ padding: "4px 10px", background: "transparent", border: `1px solid ${J.border}`, color: J.textSec, borderRadius: 2, fontSize: 10, letterSpacing: "0.06em", fontFamily: J.fontHeader, fontWeight: 600 }}>
             ⇤ {authedUser?.toUpperCase()}
           </button>
         </div>
@@ -2812,7 +3142,7 @@ export default function App() {
                 fontSize: 30, color: J.accent,
               }}>◈</div>
             </div>
-            <div style={{ color: `${J.accent}77`, fontSize: 12, letterSpacing: "0.2em", marginBottom: 8, fontFamily: "'Rajdhani', monospace", fontWeight: 600 }}>SYSTEM ONLINE — AWAITING DIRECTIVE</div>
+            <div style={{ color: `${J.accent}77`, fontSize: 12, letterSpacing: "0.2em", marginBottom: 8, fontFamily: J.fontHeader, fontWeight: 600 }}>SYSTEM ONLINE — AWAITING DIRECTIVE</div>
             <div style={{ color: J.textDim, fontSize: 10, lineHeight: 2.2, letterSpacing: "0.08em", marginBottom: 28 }}>
               {provInfo.provider.toUpperCase()} / {provInfo.model} &nbsp;·&nbsp; {provInfo.schema_format?.toUpperCase()} SCHEMA &nbsp;·&nbsp; {authedUser?.toUpperCase()} AUTHENTICATED
             </div>
@@ -2836,7 +3166,7 @@ export default function App() {
         {pendingConfirms.map((c: any) => <ConfirmDlg key={c.confirm_id} c={c} onConfirm={onConfirm} onCancel={onCancel} />)}
 
         {streaming && (
-          <div style={{ color: J.accentDim, fontSize: 10, padding: "4px 42px", animation: "hud-pulse 1.2s infinite", letterSpacing: "0.12em", fontFamily: "'Rajdhani', monospace" }}>
+          <div style={{ color: J.accentDim, fontSize: 10, padding: "4px 42px", animation: "hud-pulse 1.2s infinite", letterSpacing: "0.12em", fontFamily: J.fontHeader }}>
             {reactMode && reactActiveRef.current
               ? `↺ REACT [${String(reactIterRef.current).padStart(2, "0")}] — PROCESSING…`
               : "◈  PROCESSING…"}
@@ -2853,7 +3183,8 @@ export default function App() {
           <WorkspaceSidebar
             userId={authedUser}
             onFilesSelected={setWorkspaceFiles}
-            selectedPaths={new Set(workspaceFiles.map(f => f.path))}
+            currentProject={currentProject}
+            onProjectChange={setCurrentProject}
           />
         </div>
       )}
@@ -2904,12 +3235,12 @@ export default function App() {
             <span key={i.id} onClick={() => setInstructionsOpen(true)} title={i.body} style={{
               padding: "3px 8px", borderRadius: 2, fontSize: 9, cursor: "pointer",
               background: `${J.gold}0A`, border: `1px solid ${J.gold}33`, color: J.gold,
-              fontFamily: "'Rajdhani',monospace", fontWeight: 600, letterSpacing: "0.06em",
+              fontFamily: J.fontHeader, fontWeight: 600, letterSpacing: "0.06em",
               maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
             }}>⬡ {i.title}</span>
           ))}
-          {!memoryEnabled && <span style={{ color: `${J.gold}55`, fontSize: 9, fontFamily: "'Rajdhani',monospace" }}>◉ Memory OFF — clean context</span>}
-          {autoConfirm    && <span style={{ color: `${J.warm}55`, fontSize: 9, fontFamily: "'Rajdhani',monospace" }}>⚡ auto-confirm active</span>}
+          {!memoryEnabled && <span style={{ color: `${J.gold}55`, fontSize: 9, fontFamily: J.fontHeader }}>◉ Memory OFF — clean context</span>}
+          {autoConfirm    && <span style={{ color: `${J.warm}55`, fontSize: 9, fontFamily: J.fontHeader }}>⚡ auto-confirm active</span>}
           {uploading      && <span style={{ color: `${J.accent}55`, fontSize: 9, animation: "hud-pulse 1s infinite" }}>⬆ reading files…</span>}
         </div>
 
@@ -2965,7 +3296,7 @@ export default function App() {
                 placeholder={
                   reactMode ? "Describe task for autonomous ReAct agent… runs to completion without manual Continue clicks"
                   : attachments.length ? "Add context about the attached file(s)… (optional)"
-                  : "Query J.A.R.V.I.S. … (Shift+Enter for newline · drag & drop files to attach)"
+                  : `Query ${J.wordmark} … (Shift+Enter for newline · drag & drop files to attach)`
                 }
                 rows={1}
                 style={{
@@ -2983,7 +3314,7 @@ export default function App() {
                   background: canContinue ? J.bgCard : "transparent",
                   border: `1px solid ${canContinue ? J.borderMid : J.border}`,
                   color: canContinue ? J.accent : J.textDim,
-                  fontFamily: "'Rajdhani', monospace", fontWeight: 600,
+                  fontFamily: J.fontHeader, fontWeight: 600,
                   letterSpacing: "0.06em",
                 }}>▷▷</button>
             )}
@@ -3003,7 +3334,7 @@ export default function App() {
             </button>
           </div>
 
-          <div style={{ color: J.textDim, fontSize: 9, marginTop: 5, display: "flex", gap: 14, flexWrap: "wrap", letterSpacing: "0.06em", fontFamily: "'Rajdhani', monospace" }}>
+          <div style={{ color: J.textDim, fontSize: 9, marginTop: 5, display: "flex", gap: 14, flexWrap: "wrap", letterSpacing: "0.06em", fontFamily: J.fontHeader }}>
             <span>Enter — send · Shift+Enter — newline · drag & drop to attach</span>
             {reactMode && <span style={{ color: `${J.react}55` }}>↺ REACT MODE — AI continues autonomously until TASK_COMPLETE</span>}
             {autoConfirm && <span style={{ color: `${J.warm}55` }}>⚡ AUTO-CONFIRM ACTIVE</span>}
@@ -3044,7 +3375,7 @@ export default function App() {
             padding: "20px 48px", background: J.bgPanel,
             border: `2px solid ${J.err}`, borderRadius: 6,
             color: J.err, fontSize: 24, letterSpacing: "0.25em",
-            fontFamily: "'Rajdhani',monospace", fontWeight: 700,
+            fontFamily: J.fontHeader, fontWeight: 700,
             animation: "hud-pulse 0.5s ease-in-out",
             boxShadow: `0 0 60px ${J.err}44`,
           }}>⛔ HARD STOP — EXECUTION HALTED</div>

@@ -20,7 +20,7 @@ from typing import AsyncGenerator, Optional
 
 from core.llm_router import LLMRouter, LLMConfig
 from core.skill_registry import SkillRegistry
-from core.prompt_builder import build_system_prompt, AGENT_SYSTEM_PROMPT
+from core.prompt_builder import build_system_prompt, AGENT_SYSTEM_PROMPT, DEFAULT_PERSONA
 from core.memory_manager import MemoryManager, detect_retrieval_request
 
 logger = logging.getLogger("agent.core")
@@ -87,6 +87,7 @@ class Agent:
         self.conversation:    list = []
         self.pending_confirms: dict = {}   # confirm_id → (skill, action, params)
         self._confirm_counter: int  = 0
+        self.persona:         str  = DEFAULT_PERSONA  # last-used persona, for confirm_action continuity
 
     def reset(self):
         """Clear conversation state. Memory file on disk is preserved."""
@@ -112,6 +113,7 @@ class Agent:
         auto_confirm:    bool = False,
         attachments:     Optional[list] = None,
         memory_enabled:  bool = True,   # set False to skip memory injection entirely
+        persona:         str  = DEFAULT_PERSONA,  # "jarvis" | "omnikon" | "kraken"
     ) -> AsyncGenerator[dict, None]:
         """
         Main entry point.
@@ -123,16 +125,21 @@ class Agent:
             blocks = [_format_attachment(a) for a in attachments]
             user_message = "\n\n".join(blocks) + "\n\n" + user_message
 
+        # Track persona for this turn — used by confirm_action() if the loop pauses
+        self.persona = persona
+
+        # Build system prompt for the active persona.
         # Memory injection — only when explicitly requested AND memory_enabled=True
         # memory_enabled=False means the operator wants a clean, focused context
         n = detect_retrieval_request(user_message) if memory_enabled else None
-        system_prompt = AGENT_SYSTEM_PROMPT
         if memory_enabled and n is not None:
             history = _memory.retrieve_last_n(self.user_id, n)
-            system_prompt = build_system_prompt(memory_context=history)
-            logger.info("[memory_injected] user=%s turns=%d", self.user_id, n)
-        elif not memory_enabled:
-            logger.debug("[memory_disabled] user=%s — context kept clean", self.user_id)
+            system_prompt = build_system_prompt(memory_context=history, persona=persona)
+            logger.info("[memory_injected] user=%s turns=%d persona=%s", self.user_id, n, persona)
+        else:
+            system_prompt = build_system_prompt(persona=persona)
+            if not memory_enabled:
+                logger.debug("[memory_disabled] user=%s — context kept clean", self.user_id)
 
         if react:
             async for event in self._react_loop(user_message, auto_confirm, system_prompt):
@@ -159,7 +166,8 @@ class Agent:
         self._append("user", ctx)
 
         summary = ""
-        async for token in self.llm.chat_stream(self.conversation, system=AGENT_SYSTEM_PROMPT):
+        confirm_sp = build_system_prompt(persona=self.persona)
+        async for token in self.llm.chat_stream(self.conversation, system=confirm_sp):
             summary += token
             yield {"type": "token", "data": token}
 

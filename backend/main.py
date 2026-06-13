@@ -34,7 +34,7 @@ from fastapi.staticfiles import StaticFiles
 # ── Internal imports ───────────────────────────────────────────────────────────
 from core.llm_router import LLMRouter, LLMConfig, get_model_max_tokens
 from core.skill_registry import SkillRegistry
-from core.prompt_builder import build_system_prompt, AGENT_SYSTEM_PROMPT
+from core.prompt_builder import build_system_prompt, AGENT_SYSTEM_PROMPT, list_personas, DEFAULT_PERSONA
 from core.memory_manager import MemoryManager, detect_retrieval_request
 from core.agent import Agent
 
@@ -564,6 +564,7 @@ async def chat_websocket(ws: WebSocket, user_id: str):
             instructions    = msg.get("instructions", "")   # Optional operator instruction block
             halt            = msg.get("halt",          False)
             memory_enabled  = msg.get("memory_enabled", True)   # False = skip memory injection
+            persona         = msg.get("persona", DEFAULT_PERSONA)  # "jarvis" | "omnikon" | "kraken"
 
             # ── HALT signal: destroy session so agent stops and forgets context ──
             if halt:
@@ -607,6 +608,7 @@ async def chat_websocket(ws: WebSocket, user_id: str):
                     auto_confirm=auto_confirm,
                     attachments=attachments if attachments else None,
                     memory_enabled=memory_enabled,
+                    persona=persona,
                 ):
                     await ws.send_json(event)
             except Exception as exc:
@@ -1138,9 +1140,13 @@ async def auth_me(request: Request):
 # ══════════════════════════════════════════════════════════════════════════════
 import fnmatch as _fnmatch
 
-WORKSPACE_ROOT = os.getenv("JARVIS_WORKSPACE_ROOT", "/app")
-WS_MAX_FILE_BYTES  = 128_000   # 128KB per file sent to LLM
-WS_MAX_TOTAL_BYTES = 512_000   # 512KB total across checked files
+# Path: /tmp/{user}/{project}/workspace
+# ENV: JARVIS_WORKSPACE_ROOT=/tmp  (override base dir)
+#      JARVIS_DEFAULT_PROJECT=default
+WORKSPACE_ROOT    = os.getenv("JARVIS_WORKSPACE_ROOT",    "/tmp")
+DEFAULT_PROJECT   = os.getenv("JARVIS_DEFAULT_PROJECT",   "default")
+WS_MAX_FILE_BYTES  = 128_000   # 128 KB per file sent to LLM
+WS_MAX_TOTAL_BYTES = 512_000   # 512 KB total across checked files
 WS_SKIP_DIRS  = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
 WS_TEXT_EXTS  = {
     ".py",".js",".ts",".jsx",".tsx",".sh",".bash",".zsh",
@@ -1148,13 +1154,77 @@ WS_TEXT_EXTS  = {
     ".json",".xml",".html",".css",".sql",".go",".rs",".java",
     ".c",".cpp",".h",".env",".conf",".log",".csv",
 }
+PROJECT_META_FILE = ".jarvis_project.json"
 
 
-def _workspace_path(user_id: str) -> str:
-    safe = re.sub(r"[^a-zA-Z0-9_-]", "_", user_id)[:32]
-    path = os.path.join(WORKSPACE_ROOT, safe, "workspace")
+def _safe_name(name: str, maxlen: int = 48) -> str:
+    """Sanitise a user or project name for filesystem use."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", name.strip())[:maxlen] or "default"
+
+
+def _user_root(user_id: str) -> str:
+    """Return /tmp/{user} — created on demand."""
+    path = os.path.join(WORKSPACE_ROOT, _safe_name(user_id))
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def _workspace_path(user_id: str, project: str = DEFAULT_PROJECT) -> str:
+    """Return /tmp/{user}/{project}/workspace — created on demand."""
+    safe_proj = _safe_name(project) if project else DEFAULT_PROJECT
+    path = os.path.join(_user_root(user_id), safe_proj, "workspace")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _project_root(user_id: str, project: str) -> str:
+    """Return /tmp/{user}/{project} — created on demand."""
+    path = os.path.join(_user_root(user_id), _safe_name(project))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _list_projects(user_id: str) -> list[dict]:
+    """
+    List all projects for a user.
+    A project is any subdirectory of /tmp/{user}/ that is not hidden.
+    Returns list of {name, workspace, created, file_count, size_bytes}.
+    """
+    user_dir = _user_root(user_id)
+    projects = []
+    try:
+        for entry in sorted(os.scandir(user_dir), key=lambda e: e.name):
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            ws = os.path.join(entry.path, "workspace")
+            file_count = 0
+            size_bytes = 0
+            if os.path.isdir(ws):
+                for dirpath, dirs, files in os.walk(ws):
+                    dirs[:] = [d for d in dirs if d not in WS_SKIP_DIRS]
+                    for f in files:
+                        file_count += 1
+                        try:
+                            size_bytes += os.path.getsize(os.path.join(dirpath, f))
+                        except OSError:
+                            pass
+            stat = entry.stat()
+            projects.append({
+                "name":        entry.name,
+                "workspace":   ws,
+                "created":     datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc).isoformat(),
+                "modified":    datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                "file_count":  file_count,
+                "size_bytes":  size_bytes,
+                "is_default":  entry.name == DEFAULT_PROJECT,
+            })
+    except PermissionError:
+        pass
+    # Ensure default project always exists
+    if not any(p["name"] == DEFAULT_PROJECT for p in projects):
+        _workspace_path(user_id, DEFAULT_PROJECT)
+        projects = _list_projects(user_id)  # reload after creation
+    return projects
 
 
 def _is_text_file(name: str) -> bool:
@@ -1162,26 +1232,22 @@ def _is_text_file(name: str) -> bool:
     return ext.lower() in WS_TEXT_EXTS
 
 
-
 @app.get("/api/workspace/{user_id}", tags=["Workspace"])
 async def workspace_list(
     user_id: str,
     path:    str = "",
     depth:   int = 4,
+    project: str = DEFAULT_PROJECT,
 ):
     """
-    List files and directories in the user's workspace.
-    Returns a flat list with relative path, size, type, is_text flag.
+    List files in /tmp/{user_id}/{project}/workspace/.
     Query params:
-      path  — sub-path within the workspace (default: root)
-      depth — max recursion depth (default 4)
+      project — project name (default from JARVIS_DEFAULT_PROJECT env)
+      path    — sub-path within the workspace (default: root)
+      depth   — max recursion depth (default 4)
     """
-    ws_root = _workspace_path(user_id)
-    target  = os.path.normpath(os.path.join(ws_root, path.lstrip("/app"))) if path else ws_root
-
-
-    # Create the directory
-    # target.mkdir(parents=True, exist_ok=True)
+    ws_root = _workspace_path(user_id, project)
+    target  = os.path.normpath(os.path.join(ws_root, path.lstrip("/"))) if path else ws_root
 
     # Security: never escape the workspace root
     if not target.startswith(ws_root):
@@ -1227,6 +1293,7 @@ async def workspace_list(
     return {
         "workspace_root": ws_root,
         "user_id":        user_id,
+        "project":        _safe_name(project) if project else DEFAULT_PROJECT,
         "path":           path or "/",
         "entries":        entries,
         "count":          len(entries),
@@ -1236,14 +1303,13 @@ async def workspace_list(
 @app.post("/api/workspace/{user_id}/read", tags=["Workspace"])
 async def workspace_read_files(user_id: str, request: Request):
     """
-    Read content of selected workspace files.
-    Body: { "files": ["relative/path/to/file.py", ...] }
-    Returns list of {path, name, content, size, truncated, is_text}
-    Total content capped at WS_MAX_TOTAL_BYTES.
+    Read selected workspace files.
+    Body: { "files": ["rel/path.py", ...], "project": "myproject" }
     """
-    body = await request.json()
-    files     = body.get("files", [])
-    ws_root   = _workspace_path(user_id)
+    body    = await request.json()
+    files   = body.get("files", [])
+    project = body.get("project", DEFAULT_PROJECT)
+    ws_root = _workspace_path(user_id, project)
     results   = []
     total     = 0
 
@@ -1302,9 +1368,10 @@ async def workspace_mkdir(user_id: str, request: Request):
     """Create a directory inside the user's workspace."""
     body     = await request.json()
     rel_path = body.get("path", "").strip().lstrip("/")
+    project  = body.get("project", DEFAULT_PROJECT)
     if not rel_path:
         raise HTTPException(status_code=400, detail="path is required")
-    ws_root  = _workspace_path(user_id)
+    ws_root  = _workspace_path(user_id, project)
     abs_path = os.path.normpath(os.path.join(ws_root, rel_path))
     if not abs_path.startswith(ws_root):
         raise HTTPException(status_code=403, detail="Path outside workspace")
@@ -1317,9 +1384,10 @@ async def workspace_delete_file(user_id: str, request: Request):
     """Delete a file from the user's workspace (with confirmation guard)."""
     body     = await request.json()
     rel_path = body.get("path", "").strip()
+    project  = body.get("project", DEFAULT_PROJECT)
     if not rel_path:
         raise HTTPException(status_code=400, detail="path is required")
-    ws_root  = _workspace_path(user_id)
+    ws_root  = _workspace_path(user_id, project)
     abs_path = os.path.normpath(os.path.join(ws_root, rel_path))
     if not abs_path.startswith(ws_root):
         raise HTTPException(status_code=403, detail="Path outside workspace")
@@ -1328,6 +1396,163 @@ async def workspace_delete_file(user_id: str, request: Request):
     os.remove(abs_path)
     logger.info("[workspace_delete] user=%s path=%s", user_id, rel_path)
     return {"deleted": True, "path": rel_path}
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CBD COMPONENT — Project Manager
+# Path schema: /tmp/{user}/{project}/workspace/
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/projects/{user_id}", tags=["Workspace"])
+async def list_projects(user_id: str):
+    """
+    List all projects for a user.
+    Each project is a directory at /tmp/{user_id}/{project}/.
+    Returns: [{ name, workspace, created, modified, file_count, size_bytes, is_default }]
+    """
+    projects = _list_projects(user_id)
+    logger.info("[list_projects] user=%s count=%d", user_id, len(projects))
+    return {
+        "user_id":         user_id,
+        "projects":        projects,
+        "count":           len(projects),
+        "default_project": DEFAULT_PROJECT,
+        "workspace_root":  WORKSPACE_ROOT,
+    }
+
+
+@app.post("/api/projects/{user_id}", tags=["Workspace"])
+async def create_project(user_id: str, request: Request):
+    """
+    Create a new project for the user.
+    Body: { "name": "my-project", "description"?: "..." }
+    Creates /tmp/{user_id}/{project}/workspace/ and a .jarvis_project.json metadata file.
+    """
+    body    = await request.json()
+    name    = body.get("name", "").strip()
+    desc    = body.get("description", "")
+    if not name:
+        raise HTTPException(status_code=400, detail="Project name is required")
+
+    safe_name = _safe_name(name)
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Invalid project name")
+
+    proj_root = _project_root(user_id, safe_name)
+    ws_path   = _workspace_path(user_id, safe_name)
+
+    # Write metadata
+    meta = {
+        "name":        safe_name,
+        "display_name": name,
+        "description": desc,
+        "created_by":  user_id,
+        "created_at":  datetime.now(timezone.utc).isoformat(),
+        "workspace":   ws_path,
+    }
+    meta_path = os.path.join(proj_root, PROJECT_META_FILE)
+    try:
+        with open(meta_path, "w") as f:
+            json.dump(meta, f, indent=2)
+    except Exception as exc:
+        logger.warning("[create_project.meta_write_fail] %s", exc)
+
+    logger.info("[create_project] user=%s name=%s path=%s", user_id, safe_name, ws_path)
+    return {
+        "created":      True,
+        "name":         safe_name,
+        "display_name": name,
+        "workspace":    ws_path,
+        "project_root": proj_root,
+        "metadata":     meta,
+    }
+
+
+@app.delete("/api/projects/{user_id}/{project_name}", tags=["Workspace"])
+async def delete_project(user_id: str, project_name: str):
+    """
+    Delete a project and ALL its files. Irreversible.
+    Cannot delete the default project.
+    """
+    import shutil as _shutil
+    safe_name = _safe_name(project_name)
+    if safe_name == DEFAULT_PROJECT:
+        raise HTTPException(status_code=400, detail=f"Cannot delete the default project '{DEFAULT_PROJECT}'")
+
+    proj_root = os.path.join(_user_root(user_id), safe_name)
+    if not os.path.isdir(proj_root):
+        raise HTTPException(status_code=404, detail=f"Project '{safe_name}' not found")
+
+    try:
+        _shutil.rmtree(proj_root)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {exc}")
+
+    logger.info("[delete_project] user=%s project=%s", user_id, safe_name)
+    return {"deleted": True, "name": safe_name}
+
+
+@app.get("/api/projects/{user_id}/{project_name}", tags=["Workspace"])
+async def get_project(user_id: str, project_name: str):
+    """Get metadata for a specific project."""
+    safe_name = _safe_name(project_name)
+    proj_root = os.path.join(_user_root(user_id), safe_name)
+    ws_path   = os.path.join(proj_root, "workspace")
+
+    if not os.path.isdir(proj_root):
+        raise HTTPException(status_code=404, detail=f"Project '{safe_name}' not found")
+
+    meta_path = os.path.join(proj_root, PROJECT_META_FILE)
+    meta: dict = {}
+    if os.path.isfile(meta_path):
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+        except Exception:
+            pass
+
+    return {
+        "name":         safe_name,
+        "workspace":    ws_path,
+        "project_root": proj_root,
+        "exists":       True,
+        "metadata":     meta,
+    }
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CBD COMPONENT — Persona Registry Endpoint
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/personas", tags=["System"])
+async def get_personas():
+    """
+    List available personas for the UI persona selector.
+    Each persona has its own soul block in prompt_builder.py and a mirrored
+    manifesto file at personas/{id}.md.
+    """
+    return {
+        "personas":        list_personas(),
+        "default_persona": DEFAULT_PERSONA,
+    }
+
+
+@app.get("/api/personas/{persona_id}/manifesto", tags=["System"])
+async def get_persona_manifesto(persona_id: str):
+    """Return the manifesto markdown for a given persona id."""
+    from core.prompt_builder import PERSONAS, PERSONAS_DIR
+    p = PERSONAS.get(persona_id)
+    if not p:
+        raise HTTPException(status_code=404, detail=f"Unknown persona '{persona_id}'")
+    path = os.path.join(PERSONAS_DIR, p["manifest"])
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except FileNotFoundError:
+        content = p["soul"]
+    return {"id": persona_id, "name": p["name"], "tagline": p["tagline"], "manifesto": content}
 
 
 @app.get("/{full_path:path}", tags=["System"])
@@ -1374,7 +1599,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host=os.getenv("HOST", "0.0.0.0"),
-        port=int(os.getenv("PORT", "8001")),
+        port=int(os.getenv("PORT", "8000")),
         reload=os.getenv("DEV", "false").lower() == "true",
         log_level="info",
     )
