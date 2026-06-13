@@ -58,8 +58,7 @@ def _load_skills_manifest() -> str:
 
 _SKILLS_MANIFEST_SECTION = _load_skills_manifest()
 # ── Jarvis Experienced ─────────────────────────────────
-_JARVIS_EXP_SECTION =
-"""
+_JARVIS_EXP_SECTION = """
 # Jarvis Experienced Notes
 
 ## File Writing Protocol (CRITICAL)
