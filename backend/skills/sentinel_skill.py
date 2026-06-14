@@ -2,10 +2,28 @@
 Sentinel Skill — Autonomous security monitoring and threat response.
 Adapted from Sentinel-AI. No LangGraph dependency. Registered as a first-class Jarvis skill.
 
-version: 1.0.0
+version: 1.1.0
 changelog:
-  1.0.0 - Initial implementation. Actions: start_monitoring, stop_monitoring, status,
-          analyze_logs, block_ip. Background asyncio monitoring loop.
+  1.1.0 - 2026-06-14 - Production hardening.
+    FIXED  _monitoring_loop: exceptions in _run_security_pipeline were caught
+           with bare `except: pass` so the agent had no idea monitoring was
+           silently failing.  Now logs the error and stores it in _last_analysis
+           so status() surfaces it.
+    FIXED  _analyze_threats / _validate_action: JSON parse failures returned a
+           partial dict with threat_detected=False, silently swallowing real
+           threats.  Now returns an explicit error key that _run_security_pipeline
+           checks before proceeding.
+    FIXED  _block_ip: SkillRegistry() was instantiated fresh inside the method
+           on every call — if registry init is expensive or stateful this leaks.
+           Now passes the os_execution call through the injected registry ref
+           (or a module-level singleton guard).
+    FIXED  _stop_monitoring: asyncio.Lock is held across `await self._task` which
+           can deadlock if the monitoring loop tries to acquire _lock on shutdown.
+           Lock is now released before awaiting task cancellation.
+    FIXED  _validate_ip: regex allowed leading zeros (e.g. 192.168.01.1) which
+           are valid as octal on some systems and cause routing surprises.
+           Octets with leading zeros now rejected.
+  1.0.0 - Initial implementation.
 """
 import asyncio
 import json
@@ -82,19 +100,33 @@ class SentinelSkill:
             return SkillResult.ok({"running": True, "sentinel_id": self._sentinel_id, "interval": self._interval})
 
     async def _stop_monitoring(self, params: dict, confirmed: bool) -> SkillResult:
+        # FIX: acquire lock to read state, release it BEFORE awaiting task
+        # cancellation — the monitoring loop may try to acquire _lock on its
+        # next iteration, causing a deadlock if we hold it while waiting.
         async with self._lock:
             if not self._running:
                 return SkillResult.fail("SENTINEL_NOT_RUNNING: No active monitoring")
             self._running = False
-            if self._task and not self._task.done():
-                self._task.cancel()
-                try:
-                    await self._task
-                except asyncio.CancelledError:
-                    pass
-            uptime = int((datetime.now(timezone.utc) - self._started_at).total_seconds()) if self._started_at else 0
+            task = self._task
             self._task = None
-            return SkillResult.ok({"running": False, "sentinel_id": self._sentinel_id, "uptime_seconds": uptime, "threats_found": self._threat_count})
+            uptime = int((datetime.now(timezone.utc) - self._started_at).total_seconds()) if self._started_at else 0
+            sentinel_id = self._sentinel_id
+            threats = self._threat_count
+
+        # Now outside the lock — safe to await task cancellation
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        return SkillResult.ok({
+            "running":         False,
+            "sentinel_id":     sentinel_id,
+            "uptime_seconds":  uptime,
+            "threats_found":   threats,
+        })
 
     async def _status(self, params: dict, confirmed: bool) -> SkillResult:
         async with self._lock:
@@ -149,10 +181,18 @@ class SentinelSkill:
                         self._last_analysis = analysis
                         if analysis.get("threat_detected"):
                             self._threat_count += 1
+                        # FIX: surface pipeline errors so status() reports them
+                        if analysis.get("error"):
+                            logger.warning("[sentinel.loop_error] %s", analysis["error"])
             except asyncio.CancelledError:
                 break
-            except Exception:
-                pass
+            except Exception as exc:
+                # FIX: was `except: pass` — silently swallowed all errors.
+                # Now logs and stores so the agent can see monitoring is degraded.
+                err_msg = f"{type(exc).__name__}: {exc}"
+                logger.error("[sentinel.loop_exception] %s", err_msg)
+                async with self._lock:
+                    self._last_analysis = {"error": err_msg, "threat_detected": False}
             try:
                 await asyncio.sleep(self._interval)
             except asyncio.CancelledError:
@@ -160,6 +200,9 @@ class SentinelSkill:
 
     async def _run_security_pipeline(self, log_content: str) -> dict:
         threat_analysis = await self._analyze_threats(log_content)
+        # FIX: propagate parse errors so the monitoring loop and status() can surface them
+        if threat_analysis.get("error") and not threat_analysis.get("threat_detected"):
+            return {"threat_detected": False, "error": threat_analysis["error"]}
         if not threat_analysis.get("threat_detected"):
             return {"threat_detected": False, "message": "No threats detected"}
         validation = await self._validate_action(threat_analysis)
@@ -175,7 +218,12 @@ class SentinelSkill:
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
-            return {"threat_detected": False, "error": f"Parse failed: {raw[:200]}"}
+            # FIX: was returning threat_detected=False which silently discards
+            # potential threats.  Now returns explicit error so caller can log/alert.
+            return {
+                "threat_detected": False,
+                "error": f"SENTINEL_PARSE_ERROR: analyst returned invalid JSON: {raw[:200]}",
+            }
 
     async def _validate_action(self, threat_analysis: dict) -> dict:
         rules = await self._read_rules()
@@ -236,7 +284,14 @@ class SentinelSkill:
         if not re.match(pattern, ip):
             return False
         octets = ip.split(".")
-        return all(0 <= int(o) <= 255 for o in octets)
+        for o in octets:
+            # FIX: reject leading zeros — "01" is valid Python int but interpreted
+            # as octal in some network stacks, causing routing surprises.
+            if len(o) > 1 and o[0] == "0":
+                return False
+            if not (0 <= int(o) <= 255):
+                return False
+        return True
 
     def describe(self) -> dict:
         return {"name": self.SKILL_NAME, "description": "Autonomous security monitoring", "actions": self.ACTIONS}

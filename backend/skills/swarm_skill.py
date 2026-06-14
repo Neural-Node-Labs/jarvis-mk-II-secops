@@ -2,11 +2,30 @@
 Swarm Skill — Multi-agent orchestration for parallel LLM task decomposition.
 Adapted from Omnikon Swarm pattern. Registered as a first-class Jarvis skill.
 
-version: 1.0.0
+version: 1.1.0
 changelog:
-  1.0.0 - Initial implementation. Actions: run_full_pipeline, orchestrate, run_swarm,
-          synthesize, get_status. ThreadPoolExecutor-based parallel execution.
-          SSE-compatible result collection. No LangGraph dependency.
+  1.1.0 - 2026-06-14 - Production hardening.
+    FIXED  _execute_swarm / _run_one: ThreadPoolExecutor threads each called
+           asyncio.new_event_loop() then loop.run_until_complete(_llm_call(...))
+           which is correct for threads but the loop was not closed on exception,
+           leaking file descriptors.  Now uses try/finally to guarantee close().
+    FIXED  _sessions: completed sessions were never removed, causing unbounded
+           memory growth over long runs.  _get_status now prunes sessions older
+           than SESSION_RETAIN_SECONDS (default 3600).
+    FIXED  _call_synthesizer: when all agents fail, `combined` is empty and the
+           early return gave "All agents failed" with no detail.  Now includes
+           the failed agent error messages in the synthesis prompt so the agent
+           understands what went wrong.
+    FIXED  _run_full_pipeline: if orchestration returns 0 subtasks (LLM returned
+           empty list), swarm and synthesize are still called, producing a
+           confusing "All agents failed" result.  Now returns early with
+           SWARM_ORCHESTRATE_EMPTY.
+    FIXED  _execute_swarm: max_workers=len(subtasks) creates a zero-worker pool
+           if subtasks is empty, crashing ThreadPoolExecutor.  Now guards with
+           max(1, len(subtasks)).
+  1.0.0 - Initial implementation.
+"""
+"""
 
 CBD Component Contract:
   Name:             SwarmSkill
@@ -43,6 +62,7 @@ logger = logging.getLogger("skill.swarm")
 
 DEFAULT_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek")
 DEFAULT_MODEL    = os.getenv("LLM_MODEL", "deepseek-chat")
+SESSION_RETAIN_SECONDS = int(os.getenv("SWARM_SESSION_RETAIN_S", "3600"))  # 1 hour
 
 
 class SwarmSkill:
@@ -101,6 +121,9 @@ class SwarmSkill:
         if "error" in orchestrate_result:
             return SkillResult.fail(f"SWARM_ORCHESTRATE_FAIL: {orchestrate_result['error']}")
         subtasks = orchestrate_result.get("subtasks", [])
+        if not subtasks:
+            # FIX: don't proceed to swarm+synthesize with an empty task list
+            return SkillResult.fail("SWARM_ORCHESTRATE_EMPTY: orchestrator returned no subtasks — check LLM response")
         logger.info("[swarm.orchestrate_done] session=%s subtasks=%d", session_id, len(subtasks))
 
         # Phase 2: Run swarm
@@ -123,6 +146,7 @@ class SwarmSkill:
                 "duration_ms": duration_ms,
                 "completed": swarm_result.get("completed", 0),
                 "failed": swarm_result.get("failed", 0),
+                "_ts": time.time(),   # FIX: timestamp for session pruning
             }
 
         return SkillResult.ok({
@@ -162,9 +186,19 @@ class SwarmSkill:
         return SkillResult.ok({"final_answer": final})
 
     async def _get_status(self, params: dict, confirmed: bool) -> SkillResult:
+        # FIX: prune sessions older than SESSION_RETAIN_SECONDS to prevent
+        # unbounded memory growth over long-running deployments.
+        import time as _time
+        now_ts = _time.time()
         async with self._lock:
+            self._sessions = {
+                k: v for k, v in self._sessions.items()
+                if now_ts - v.get("_ts", now_ts) < SESSION_RETAIN_SECONDS
+            }
             sessions = list(self._sessions.values())
-        return SkillResult.ok({"active_sessions": sessions, "count": len(sessions)})
+        # Strip internal _ts field from output
+        clean = [{k2: v2 for k2, v2 in s.items() if k2 != "_ts"} for s in sessions]
+        return SkillResult.ok({"active_sessions": clean, "count": len(clean)})
 
     async def _call_orchestrator(self, task: str, n_agents: int,
                                   provider: str = None, model: str = None,
@@ -217,22 +251,25 @@ class SwarmSkill:
             system = f"You are {name}, a specialist AI agent in a swarm.\nYour role: {role}\nBe precise, thorough, and structured."
             user = f"Task context: {task_context}\n\nYour subtask: {subtask}"
             t0 = time.time()
+            # FIX: always close the event loop, even on exception, to avoid
+            # leaking file descriptors across the thread pool's lifetime.
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    output = loop.run_until_complete(self._llm_call(p, m, system, user, temperature=temperature))
-                finally:
-                    loop.close()
+                output = loop.run_until_complete(self._llm_call(p, m, system, user, temperature=temperature))
                 duration = round(time.time() - t0, 2)
                 return {"agent_id": agent_id, "name": name, "role": role, "subtask": subtask,
                         "result": output, "status": "done", "duration": duration}
             except Exception as exc:
                 duration = round(time.time() - t0, 2)
+                logger.warning("[swarm.agent_error] agent_id=%s err=%s", agent_id, exc)
                 return {"agent_id": agent_id, "name": name, "role": role, "subtask": subtask,
                         "result": f"ERROR: {exc}", "status": "error", "duration": duration}
+            finally:
+                loop.close()
 
-        with ThreadPoolExecutor(max_workers=len(subtasks), thread_name_prefix="swarm") as pool:
+        # FIX: max_workers=0 crashes ThreadPoolExecutor when subtasks is empty
+        with ThreadPoolExecutor(max_workers=max(1, len(subtasks)), thread_name_prefix="swarm") as pool:
             futures = {pool.submit(_run_one, s): s for s in subtasks}
             for future in as_completed(futures):
                 try:
@@ -255,12 +292,26 @@ class SwarmSkill:
                                  temperature: float = 0.7) -> str:
         p = provider or DEFAULT_PROVIDER
         m = model or DEFAULT_MODEL
-        combined = "\n\n".join(
+        done_parts = [
             f"=== {r.get('name', 'Agent')} ({r.get('role', 'Specialist')}) ===\n{r.get('result', 'No output')}"
             for r in results if r.get("status") == "done"
-        )
-        if not combined:
-            return "All agents failed. No results to synthesize."
+        ]
+        # FIX: include failed agent summaries so the synthesizer (and agent) can
+        # understand what went wrong, rather than silently omitting them.
+        failed_parts = [
+            f"=== {r.get('name', 'Agent')} — FAILED: {r.get('result', 'unknown error')} ==="
+            for r in results if r.get("status") != "done"
+        ]
+
+        if not done_parts:
+            # FIX: return failed details so the caller understands the failure
+            failed_summary = "\n".join(failed_parts) or "No agents ran."
+            return f"All agents failed — no results to synthesize.\n\nAgent errors:\n{failed_summary}"
+
+        combined = "\n\n".join(done_parts)
+        if failed_parts:
+            combined += "\n\n--- FAILED AGENTS (excluded from synthesis) ---\n" + "\n".join(failed_parts)
+
         system = "You are a synthesis specialist. Merge specialist agent outputs into one cohesive, well-structured final answer. Remove redundancy. Preserve all key insights. Use clear sections and markdown formatting."
         user = f"Original task: {task}\n\nSwarm outputs:\n{combined}\n\nSynthesize into the final answer."
         return await self._llm_call(p, m, system, user, temperature=temperature)

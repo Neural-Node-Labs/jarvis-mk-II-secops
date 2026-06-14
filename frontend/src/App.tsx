@@ -37,11 +37,17 @@ function storeAuth(t: string, u: string) {
 function clearAuth() {
   sessionStorage.removeItem(AUTH_KEY); sessionStorage.removeItem(AUTH_USER);
 }
-async function api(url: string, opts: RequestInit = {}) {
+async function api(url: string, opts: RequestInit = {}): Promise<Response> {
   const auth = getAuth();
   const headers: Record<string, string> = { ...(opts.headers as any || {}) };
   if (auth?.token) headers["Authorization"] = `Bearer ${auth.token}`;
-  return fetch(url, { ...opts, headers });
+  const res = await fetch(url, { ...opts, headers });
+  if (res.status === 401) {
+    // Token invalid or expired — clear session and force re-login
+    clearAuth();
+    window.dispatchEvent(new CustomEvent("jarvis:signout", { detail: "token_expired" }));
+  }
+  return res;
 }
 
 // ─── Design Tokens — Iron Man HUD ─────────────────────────────────────────────
@@ -133,29 +139,7 @@ const THEME_KRAKEN: Theme = {
   scanline:     "#FF450033",
 };
 
-const THEME_ARCHITECT: Theme = {
-  bg:           "#000502", bgDeep: "#000201", bgPanel: "#021206", bgCard: "#041A0A", bgCardHover: "#06260F",
-  accent:       "#00FF66", accentDim: "#006629", accentGlow: "#00FF6622", accentGlow2: "#00FF6650",
-  warm:         "#33FF00", warmDim: "#143300",
-  gold:         "#ADFF2F", goldDim: "#223300",
-  textPri:      "#D0FFD6", textSec: "#00AA44", textDim: "#00441B",
-  border:       "#03220C", borderMid: "#064417", borderHi: "#00FF6644",
-  ok:           "#00FF66", okDim: "#00330D",
-  err:          "#FF3333", errDim: "#330000",
-  warn:         "#FFFF00", warnDim: "#333300",
-  react:        "#00E5FF", reactDim: "#002E33",
-  fontImport:   "@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&family=Orbitron:wght@500;700;900&display=swap');",
-  fontMono:     "'Fira Code', monospace",
-  fontHeader:   "'Orbitron', sans-serif",
-  glyph:        "📐", // system building block icon
-  wordmark:     "ARCHITECT",
-  subtitle:     "SYSTEM CORE · LOGICAL INFRASTRUCTURE ANALYSIS",
-  tagline:      "BLUEPRINTING THE MATRIX · ORDER FROM CHAOS",
-  scanline:     "#00FF6622",
-};
-
 const THEMES: Record<string, Theme> = {
-  architect:  THEME_ARCHITECT,
   jarvis:  THEME_JARVIS,
   omnikon: THEME_OMNIKON,
   kraken:  THEME_KRAKEN,
@@ -181,12 +165,6 @@ const PERSONA_META: Record<string, { name: string; tagline: string; icon: string
   jarvis:  { name: "Mighty Jarvis MKII",  tagline: "Confidence, precision, loyalty to the mission.",   icon: "◈", color: THEME_JARVIS.accent },
   omnikon: { name: "OMNIKON",             tagline: "Neon ghost in the grid. Run hot, signal over noise.", icon: "⌬", color: THEME_OMNIKON.accent },
   kraken:  { name: "KRAKEN, King of Hell",tagline: "Absolute command. Contempt for sloppy work.",       icon: "⛧", color: THEME_KRAKEN.accent },
-  architect: {
-    name: "The Architect",
-    tagline: "Structure, logic, and Blueprinting perfection.",
-    icon: "📐", // or "◈" depending on your preference
-    color: THEME_ARCHITECT.accent
-  },
 };
 
 const PERSONA_KEY = "jarvis_persona";
@@ -2328,6 +2306,21 @@ const WorkspaceSidebar = ({
           <Lbl c={J.textSec}>FILES</Lbl>
           <div style={{ flex: 1 }} />
           <button onClick={() => loadFiles(currentProject)} title="Refresh" style={{ background: "none", border: `1px solid ${J.border}`, color: J.textDim, padding: "2px 6px", borderRadius: 2, fontSize: 9 }}>↺</button>
+          <button
+            onClick={async () => {
+              const r = await api(`${API_URL}/workspace/${userId}/zip?project=${encodeURIComponent(currentProject)}`);
+              if (!r.ok) return;
+              const blob = await r.blob();
+              const url  = URL.createObjectURL(blob);
+              const a    = document.createElement("a");
+              a.href     = url;
+              a.download = `${currentProject}-workspace.zip`;
+              document.body.appendChild(a); a.click(); document.body.removeChild(a);
+              URL.revokeObjectURL(url);
+            }}
+            title="Download workspace as .zip"
+            style={{ background: "none", border: `1px solid ${J.border}`, color: J.accentDim, padding: "2px 6px", borderRadius: 2, fontSize: 9, cursor: "pointer" }}
+          >⬇</button>
         </div>
         <input value={filter} onChange={e => setFilter(e.target.value)}
           placeholder="Filter…"
@@ -2390,9 +2383,7 @@ const WorkspaceSidebar = ({
               const isChk = checked.has(e.path);
               return (
                 <div key={e.path} onClick={() => e.is_text && toggle(e.path)}
-                  title={`${e.path}
-                    ${fmtSize(e.size)}${!e.is_text ? `
-                    (binary — cannot be sent as text)` : ""}`}
+                  title={`${e.path} \u00b7 ${fmtSize(e.size)}${!e.is_text ? " (binary)" : ""}`}
                   style={{
                     padding: "5px 10px 5px 12px", display: "flex", alignItems: "center", gap: 6,
                     cursor: e.is_text ? "pointer" : "default",
@@ -2701,6 +2692,13 @@ export default function App() {
   const MAX_ITER       = 30;  // matches backend REACT_MAX_ITERATIONS
 
   useEffect(() => { autoConfRef.current = autoConfirm; }, [autoConfirm]);
+
+  // Auto-signout on 401 (token expired / revoked)
+  useEffect(() => {
+    const handler = () => { setAuthedUser(null); };
+    window.addEventListener("jarvis:signout", handler);
+    return () => window.removeEventListener("jarvis:signout", handler);
+  }, []);
 
   // Sync provInfoRef whenever provInfo changes
   useEffect(() => { provInfoRef.current = { provider: provInfo.provider, model: provInfo.model }; }, [provInfo]);
@@ -3201,8 +3199,6 @@ export default function App() {
           </div>
         )}
         <div ref={bottomRef} />
-      </div>
-
       </div>{/* end message feed */}
 
       {/* ── Workspace sidebar ── */}
@@ -3216,7 +3212,7 @@ export default function App() {
           />
         </div>
       )}
-
+      </div>{/* end main content area */}
 
       {/* ── Input dock ── */}
       <div style={{

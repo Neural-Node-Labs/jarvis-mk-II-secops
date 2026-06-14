@@ -2,8 +2,21 @@
 Folder Reader Skill — Read entire folder trees with content summarisation.
 Useful for feeding project structure + key files to the agent at once.
 
-version: 1.0.0
+version: 1.1.0
 changelog:
+  1.1.0 - 2026-06-14 - Production hardening.
+    FIXED  _read_tree: depth calculation used str.replace which breaks when the
+           root path appears elsewhere inside dirpath (e.g. /app/app/sub).
+           Now uses os.path.relpath(...).split(os.sep) for a correct count.
+    FIXED  _read_tree: silent `except: pass` on file read errors now logs a
+           warning and appends an error entry so the agent knows a file was
+           skipped and why, instead of silently receiving less content.
+    FIXED  _read_tree: total_bytes budget is checked BEFORE reading, not after,
+           so the cap actually holds.  Previously the last file could push
+           total_bytes well past MAX_TOTAL_BYTES.
+    FIXED  _summarise: called params["include_content"] = False which mutates
+           the caller's dict in-place (dangerous with shared param dicts).
+           Now passes a shallow copy.
   1.0.0 - 2026-06-10 - Initial. Actions: read_tree, summarise.
 """
 import os
@@ -45,13 +58,20 @@ class FolderReaderSkill:
         if not os.path.isdir(root):
             return SkillResult.fail(f"FOLDER_NOT_DIR: '{root}'")
 
-        tree      = []
-        files_out = []
+        # FIX: normalise root so relpath depth calculation is consistent
+        root = os.path.normpath(os.path.abspath(root))
+
+        tree        = []
+        files_out   = []
+        skipped     = []
         total_bytes = 0
 
         for dirpath, dirs, files in os.walk(root):
-            # Depth gate
-            depth = dirpath.replace(root, "").count(os.sep)
+            # FIX: use relpath + split for a correct depth that doesn't break
+            # when root appears as a substring of a deeper path component.
+            rel = os.path.relpath(dirpath, root)
+            depth = 0 if rel == "." else len(rel.split(os.sep))
+
             if depth > max_depth:
                 dirs.clear()
                 continue
@@ -73,7 +93,11 @@ class FolderReaderSkill:
                 fsize = os.path.getsize(fpath)
                 tree.append(f"{indent}  📄 {fname} ({fsize} bytes)")
 
-                if include_files and ext in TEXT_EXTS and total_bytes < MAX_TOTAL_BYTES:
+                if include_files and ext in TEXT_EXTS:
+                    # FIX: check budget BEFORE reading so the cap is actually respected
+                    if total_bytes >= MAX_TOTAL_BYTES:
+                        skipped.append({"path": os.path.join(rel_dir, fname), "reason": "total_bytes_budget_exceeded"})
+                        continue
                     try:
                         with open(fpath, "r", encoding="utf-8", errors="replace") as f:
                             content = f.read(MAX_FILE_BYTES)
@@ -84,21 +108,24 @@ class FolderReaderSkill:
                             "size":      fsize,
                             "truncated": truncated,
                         })
-                        total_bytes += len(content)
-                    except Exception:
-                        pass
+                        total_bytes += len(content.encode("utf-8", errors="replace"))
+                    except Exception as exc:
+                        # FIX: log and surface instead of silently swallowing
+                        logger.warning("[folder_reader.read_error] %s: %s", fpath, exc)
+                        skipped.append({"path": os.path.join(rel_dir, fname), "reason": str(exc)})
 
-        logger.info("[folder_reader.read_tree] root=%s files=%d total_bytes=%d",
-                    root, len(files_out), total_bytes)
+        logger.info("[folder_reader.read_tree] root=%s files=%d skipped=%d total_bytes=%d",
+                    root, len(files_out), len(skipped), total_bytes)
         return SkillResult.ok({
             "root":        root,
             "tree":        "\n".join(tree),
             "files":       files_out,
             "file_count":  len(files_out),
             "total_bytes": total_bytes,
+            "skipped":     skipped,          # NEW: agent can see what was dropped and why
         })
 
     async def _summarise(self, params: dict, confirmed: bool) -> SkillResult:
         """Return just the directory tree without file contents."""
-        params["include_content"] = False
-        return await self._read_tree(params, confirmed)
+        # FIX: pass a copy so we don't mutate the caller's params dict
+        return await self._read_tree({**params, "include_content": False}, confirmed)

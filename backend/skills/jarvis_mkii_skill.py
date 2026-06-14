@@ -3,12 +3,29 @@ JarvisMKII Skill — Multi-threaded parallel task execution.
 Registers as a first-class skill in the SkillRegistry so the agent can invoke it
 via TOOL_CALL exactly like any other skill.
 
-version: 1.0.0
+version: 1.1.0
+"""
 changelog:
-  1.0.0 - 2026-06-10 - Initial implementation. CBD-compliant component.
-                        Actions: run_tasks, list_active, abort_task.
-                        Parallel execution via asyncio.gather with per-task isolation.
-                        Timeout enforcement. Partial result support.
+  1.1.0 - 2026-06-14 - Production hardening.
+    FIXED  _run_one_task / _execute_run_tasks: asyncio.gather was called with
+           return_exceptions=False, meaning a single unhandled task exception
+           cancels all other tasks and the caller gets no partial results.
+           Changed to return_exceptions=True with per-item exception unwrapping
+           so partial results are always returned.
+    FIXED  _run_one_task: registry cleanup in the finally block used
+           _active_tasks.pop / _abort_flags.pop without the lock, causing a
+           data race with _execute_abort_task.  Now uses _registry_lock.
+    FIXED  task_id generation: 8-char UUID prefixes have ~1/16M collision
+           probability but with high task volume this is non-trivial.  Now uses
+           full UUID and truncates only for display.
+    FIXED  _execute_run_tasks: tasks that raise BaseException (e.g. KeyboardInterrupt
+           re-raised through gather) now produce a structured error result dict
+           rather than propagating.
+    FIXED  _execute_abort_task: event.set() called without checking if the task
+           actually finished between the registry lookup and the set call.  Now
+           checks _active_tasks under lock before setting.
+  1.0.0 - 2026-06-10 - Initial implementation.
+"""
 
 CBD Component Contract:
   Name:             JarvisMKIISkill
@@ -84,7 +101,8 @@ async def _run_one_task(task_def: dict, agent_factory) -> dict:
       model?        : str
       provider?     : str
     """
-    task_id      = task_def.get("task_id") or str(uuid.uuid4())[:8]
+    task_id      = task_def.get("task_id") or str(uuid.uuid4())
+    task_id_short = task_id[:8]  # display only
     message      = task_def.get("message", "").strip()
     react        = task_def.get("react", True)
     auto_confirm = task_def.get("auto_confirm", False)
@@ -108,6 +126,7 @@ async def _run_one_task(task_def: dict, agent_factory) -> dict:
     with _registry_lock:
         _active_tasks[task_id] = {
             "task_id":    task_id,
+            "task_id_short": task_id_short,
             "status":     "running",
             "started_at": started_at.isoformat(),
             "message":    message[:100],
@@ -115,7 +134,7 @@ async def _run_one_task(task_def: dict, agent_factory) -> dict:
         }
         _abort_flags[task_id] = abort_event
 
-    logger.info("[task_started] id=%s user=%s react=%s timeout=%ds", task_id, user_id, react, timeout_s)
+    logger.info("[task_started] id=%s user=%s react=%s timeout=%ds", task_id_short, user_id, react, timeout_s)
 
     output_tokens: list[str] = []
 
@@ -125,7 +144,7 @@ async def _run_one_task(task_def: dict, agent_factory) -> dict:
         async def _collect_with_abort():
             async for event in agent.chat_stream(message, react=react, auto_confirm=auto_confirm):
                 if abort_event.is_set():
-                    logger.info("[task_abort_mid_stream] id=%s", task_id)
+                    logger.info("[task_abort_mid_stream] id=%s", task_id_short)
                     break
                 if event.get("type") == "token":
                     output_tokens.append(event.get("data", ""))
@@ -137,13 +156,13 @@ async def _run_one_task(task_def: dict, agent_factory) -> dict:
         duration = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
 
         logger.info("[task_%s] id=%s duration_ms=%d chars=%d",
-                    status, task_id, duration, len(full_out))
+                    status, task_id_short, duration, len(full_out))
         return {"task_id": task_id, "status": status, "output": full_out,
                 "error": None, "duration_ms": duration}
 
     except asyncio.TimeoutError:
         duration = timeout_s * 1000
-        logger.warning("[task_timeout] id=%s after=%ds", task_id, timeout_s)
+        logger.warning("[task_timeout] id=%s after=%ds", task_id_short, timeout_s)
         return {
             "task_id":     task_id,
             "status":      "timeout",
@@ -154,7 +173,7 @@ async def _run_one_task(task_def: dict, agent_factory) -> dict:
 
     except Exception as exc:
         duration = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
-        logger.error("[task_failed] id=%s err=%s\n%s", task_id, exc, traceback.format_exc())
+        logger.error("[task_failed] id=%s err=%s\n%s", task_id_short, exc, traceback.format_exc())
         return {
             "task_id":     task_id,
             "status":      "failed",
@@ -164,6 +183,7 @@ async def _run_one_task(task_def: dict, agent_factory) -> dict:
         }
 
     finally:
+        # FIX: cleanup under the registry lock to prevent race with abort_task
         with _registry_lock:
             _active_tasks.pop(task_id, None)
             _abort_flags.pop(task_id, None)
@@ -194,10 +214,26 @@ async def _execute_run_tasks(params: dict, agent_factory) -> _Result:
     logger.info("[all_tasks_submitted] count=%d", len(tasks))
     started = datetime.now(timezone.utc)
 
-    results = await asyncio.gather(
+    # FIX: return_exceptions=True — one task crashing no longer cancels the rest.
+    # Exceptions are unwrapped per-item below and converted to structured error dicts.
+    raw_results = await asyncio.gather(
         *[_run_one_task(t, agent_factory) for t in tasks],
-        return_exceptions=False,
+        return_exceptions=True,
     )
+
+    results = []
+    for t, r in zip(tasks, raw_results):
+        if isinstance(r, BaseException):
+            logger.error("[task_gather_exception] id=%s err=%s", t.get("task_id", "?"), r)
+            results.append({
+                "task_id":     t.get("task_id", "unknown"),
+                "status":      "failed",
+                "output":      "",
+                "error":       f"MKII_GATHER_EXCEPTION: {type(r).__name__}: {r}",
+                "duration_ms": 0,
+            })
+        else:
+            results.append(r)
 
     duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
 
@@ -238,9 +274,12 @@ def _execute_abort_task(params: dict) -> _Result:
         return _Result(False, error="MKII_NO_TASK_ID: task_id is required")
 
     with _registry_lock:
+        # FIX: check both dicts under the lock — the task may have just finished
+        # and cleaned up between our lookup and the set() call.
         event = _abort_flags.get(task_id)
+        still_active = task_id in _active_tasks
 
-    if event is None:
+    if event is None or not still_active:
         logger.warning("[abort_not_found] id=%s", task_id)
         return _Result(False, error=f"MKII_TASK_NOT_FOUND: no active task with id '{task_id}'")
 

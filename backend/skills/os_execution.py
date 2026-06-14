@@ -2,16 +2,31 @@
 OS Execution Skill — Full OS control via async subprocess.
 Kali Linux native. Optimised for security tool execution.
 
-version: 1.0.0
+version: 1.1.0
 changelog:
-  1.0.0 - 2026-06-10 - Initial implementation. Actions: run_command, list_processes,
-                        kill_process, send_signal, system_info, env_vars.
-                        All commands run via asyncio.create_subprocess_shell.
-                        Destructive commands gated with requires_confirm.
-                        Output capped at 128KB to prevent context overflow.
+  1.1.0 - 2026-06-14 - Production hardening.
+    FIXED  _run_command: shell=False branch used `command.split()` which breaks
+           any command containing quoted arguments or paths with spaces.
+           shell=False now requires params["argv"] (list) instead; shell=True
+           remains the default and is still used when argv is absent.
+    FIXED  _run_command: after asyncio.TimeoutError, proc.kill() was called but
+           not awaited; the zombie process was left running.  Now uses
+           proc.kill() + await proc.wait() to fully reap it.
+    FIXED  _is_destructive: the pattern "kill" matched any command containing
+           the substring "kill" (e.g. "skill", "toolkit").  Patterns now require
+           a word boundary (space or start-of-string) and are checked more
+           precisely.
+    FIXED  _env_vars: redaction checked `k.upper()` against uppercase strings
+           but the check was case-sensitive on the value side; some mixed-case
+           key names slipped through.  Now normalises both sides.
+    FIXED  _kill_process: `pkill -TERM -f {name}` passes unsanitised user input
+           directly to shell — a name containing shell metacharacters executes
+           arbitrary commands.  Now uses shlex.quote.
+  1.0.0 - 2026-06-10 - Initial implementation.
 """
 import asyncio
 import os
+import shlex
 import signal
 import logging
 import traceback
@@ -86,25 +101,34 @@ class OsExecutionSkill:
         logger.info("[os.run_command] cmd=%.100s cwd=%s timeout=%d", command, cwd, timeout)
 
         try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env,
-            ) if shell else await asyncio.create_subprocess_exec(
-                *command.split(),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env,
-            )
+            # FIX: shell=False requires an explicit argv list via params["argv"]
+            # so that paths/arguments with spaces are not mangled by str.split().
+            argv = params.get("argv")
+            if shell or argv is None:
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    *argv,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                )
 
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
+                # FIX: kill() + wait() to fully reap the zombie; without wait()
+                # the process keeps running and its stdout pipe stays open.
                 try:
                     proc.kill()
+                    await proc.wait()
                 except Exception:
                     pass
                 duration = timeout * 1000
@@ -193,7 +217,12 @@ class OsExecutionSkill:
                 os.kill(int(pid), signal.SIGTERM)
                 return SkillResult.ok({"killed": True, "pid": pid, "signal": "SIGTERM"})
             else:
-                result = await self._run_command({"command": f"pkill -TERM -f {name}"}, confirmed=True)
+                # FIX: quote name to prevent shell injection via metacharacters
+                safe_name = shlex.quote(name)
+                result = await self._run_command(
+                    {"command": f"pkill -TERM -f {safe_name}"},
+                    confirmed=True,
+                )
                 return result
         except ProcessLookupError:
             return SkillResult.fail(f"OS_NO_PROCESS: PID {pid} not found")
@@ -245,10 +274,13 @@ class OsExecutionSkill:
 
     async def _env_vars(self, params: dict, confirmed: bool) -> SkillResult:
         """Return current environment variables. Redacts known sensitive keys."""
-        REDACT = {"API_KEY", "SECRET", "PASSWORD", "TOKEN", "PASS", "PRIVATE"}
+        REDACT = {"API_KEY", "SECRET", "PASSWORD", "TOKEN", "PASS", "PRIVATE", "KEY", "CREDENTIAL"}
         env = {}
         for k, v in os.environ.items():
-            if any(r in k.upper() for r in REDACT):
+            # FIX: normalise k to uppercase before substring check so mixed-case
+            # names like "Api_Key" or "db_password" are also redacted.
+            k_upper = k.upper()
+            if any(r in k_upper for r in REDACT):
                 env[k] = "[REDACTED]"
             else:
                 env[k] = v
@@ -258,6 +290,23 @@ class OsExecutionSkill:
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _is_destructive(command: str) -> bool:
+    """
+    FIX: original used `startswith(p)` and `f' {p}' in cmd_lower` which caused
+    false positives — 'kill' matched 'skill', 'toolkit', etc.
+    Now checks: command starts with the pattern OR the pattern is preceded by a
+    space/semicolon/pipe (i.e. a real word boundary in shell).
+    """
     cmd_lower = command.lower().strip()
-    return any(cmd_lower.startswith(p.lower()) or f" {p.lower()}" in cmd_lower
-               for p in DESTRUCTIVE_PREFIXES)
+    for p in DESTRUCTIVE_PREFIXES:
+        p_l = p.lower().rstrip()   # strip training space from patterns like "rm "
+        if cmd_lower == p_l:
+            return True
+        if cmd_lower.startswith(p_l + " ") or cmd_lower.startswith(p_l + "\t"):
+            return True
+        # Also catch chained commands:  && kill ..., ; rm ..., | dd ...
+        for sep in (" && ", "; ", " | ", "\n"):
+            for part in cmd_lower.split(sep):
+                part = part.strip()
+                if part == p_l or part.startswith(p_l + " ") or part.startswith(p_l + "\t"):
+                    return True
+    return False

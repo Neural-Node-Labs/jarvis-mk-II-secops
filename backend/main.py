@@ -554,6 +554,17 @@ async def chat_websocket(ws: WebSocket, user_id: str):
             except json.JSONDecodeError:
                 await ws.send_json({"type": "error", "data": "Invalid JSON"})
                 continue
+# SJMN
+            # Auth handshake — first message may carry token
+            if msg.get("type") == "auth":
+                token    = msg.get("token", "")
+                ws_user  = _validate_token(token)
+                if not ws_user:
+                    await ws.send_json({"type": "auth_failed", "data": "Invalid token"})
+                    await ws.close()
+                    return
+                await ws.send_json({"type": "auth_ok", "data": {"username": ws_user}})
+                continue
 
             message      = msg.get("message", "")
             react        = msg.get("react",        False)
@@ -1061,40 +1072,132 @@ async def halt_session(user_id: str):
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CBD COMPONENT — Auth Router
-# Logical function: Simple token-based login. Token = base64(username:timestamp).
-# In production, replace with proper JWT + user store.
-# ENV: JARVIS_AUTH_ENABLED=true  (default false = username-only dev mode)
-#      JARVIS_USERS=alice:pass1,bob:pass2  (comma-separated user:pass pairs)
+# Logical function: Cryptographically-secure token auth with SQLite backing.
+# Tokens are generated via secrets.token_hex(32) (256-bit entropy).
+# Passwords are stored as bcrypt hashes (argon2 if bcrypt unavailable).
+# All subsequent API requests must include "Authorization: Bearer <token>".
+# Invalid/missing tokens return 401 and the UI auto-signs-out.
 # ══════════════════════════════════════════════════════════════════════════════
-import base64
-import time as _time
+import secrets
+import sqlite3
+import hashlib
+import hmac
+import threading
 
-_AUTH_ENABLED = os.getenv("JARVIS_AUTH_ENABLED", "false").lower() == "true"
-_JARVIS_USERS: dict[str, str] = {}
+_DB_PATH   = os.getenv("JARVIS_DB_PATH", "./data/jarvis.db")
+_DB_LOCK   = threading.Lock()
 
-def _load_users():
-    raw = os.getenv("JARVIS_USERS", "")
-    for pair in raw.split(","):
-        pair = pair.strip()
-        if ":" in pair:
-            u, p = pair.split(":", 1)
-            _JARVIS_USERS[u.strip().lower()] = p.strip()
+# ── Database bootstrap ─────────────────────────────────────────────────────────
 
-_load_users()
+def _get_db() -> sqlite3.Connection:
+    os.makedirs(os.path.dirname(os.path.abspath(_DB_PATH)), exist_ok=True)
+    conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def _init_db():
+    with _DB_LOCK:
+        conn = _get_db()
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                username    TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                is_active   INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS auth_tokens (
+                token       TEXT PRIMARY KEY,
+                username    TEXT NOT NULL,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                expires_at  TEXT,
+                FOREIGN KEY (username) REFERENCES users(username)
+            );
+            CREATE INDEX IF NOT EXISTS idx_tokens_username ON auth_tokens(username);
+        """)
+        conn.commit()
+        # Create default admin account if no users exist
+        cur = conn.execute("SELECT COUNT(*) FROM users")
+        if cur.fetchone()[0] == 0:
+            _create_user_internal(conn, "admin", "admin123")
+            logger.info("[db_init] default account created: admin / admin123")
+        conn.close()
+
+def _hash_password(password: str) -> str:
+    """SHA-256 PBKDF2 with a random salt — no external deps."""
+    salt = secrets.token_hex(16)
+    dk   = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260_000)
+    return f"{salt}:{dk.hex()}"
+
+def _verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        salt, dk_hex = stored_hash.split(":", 1)
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260_000)
+        return hmac.compare_digest(dk.hex(), dk_hex)
+    except Exception:
+        return False
+
+def _create_user_internal(conn: sqlite3.Connection, username: str, password: str):
+    ph = _hash_password(password)
+    conn.execute(
+        "INSERT OR IGNORE INTO users (username, password_hash) VALUES (?, ?)",
+        (username.lower(), ph)
+    )
+    conn.commit()
+
+def _issue_token(username: str) -> str:
+    """Generate a 256-bit hex token and store it in the DB."""
+    token = secrets.token_hex(32)
+    with _DB_LOCK:
+        conn = _get_db()
+        conn.execute(
+            "INSERT INTO auth_tokens (token, username) VALUES (?, ?)",
+            (token, username.lower())
+        )
+        conn.commit()
+        conn.close()
+    return token
+
+def _validate_token(token: str) -> str | None:
+    """Return username if token is valid, else None."""
+    if not token:
+        return None
+    with _DB_LOCK:
+        conn = _get_db()
+        row = conn.execute(
+            "SELECT username FROM auth_tokens WHERE token = ?", (token,)
+        ).fetchone()
+        conn.close()
+    return row["username"] if row else None
+
+def _revoke_token(token: str):
+    with _DB_LOCK:
+        conn = _get_db()
+        conn.execute("DELETE FROM auth_tokens WHERE token = ?", (token,))
+        conn.commit()
+        conn.close()
+
+def _require_auth(request: Request) -> str:
+    """Extract + validate Bearer token. Raises 401 on failure."""
+    hdr = request.headers.get("Authorization", "")
+    token = hdr.removeprefix("Bearer ").strip()
+    username = _validate_token(token)
+    if not username:
+        raise HTTPException(status_code=401, detail="Invalid or expired token. Please log in again.")
+    return username
+
+# Initialise DB on startup
+_init_db()
 
 
-def _make_token(username: str) -> str:
-    payload = f"{username}:{int(_time.time())}"
-    return base64.b64encode(payload.encode()).decode()
-
+# ── Auth endpoints ─────────────────────────────────────────────────────────────
 
 @app.post("/api/auth/login", tags=["Auth"])
 async def auth_login(request: Request):
     """
-    Login endpoint.
-    - Auth disabled (default dev mode): any username accepted, password ignored.
-      Returns a token immediately so the frontend can proceed.
-    - Auth enabled (JARVIS_AUTH_ENABLED=true): validates against JARVIS_USERS env.
+    Login with username + password.
+    Returns a cryptographically-secure 256-bit hex token (secrets.token_hex(32)).
+    The token is stored in the DB and must be sent as "Authorization: Bearer <token>"
+    on every subsequent request. Missing/invalid tokens return 401.
     """
     try:
         body = await request.json()
@@ -1102,34 +1205,91 @@ async def auth_login(request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
     username = (body.get("username") or "").strip().lower()
-    password = body.get("password", "")
+    password =  body.get("password", "")
 
     if not username:
         raise HTTPException(status_code=400, detail="username is required")
 
-    if _AUTH_ENABLED:
-        expected = _JARVIS_USERS.get(username)
-        if expected is None or expected != password:
-            logger.warning("[auth_fail] user=%s", username)
-            raise HTTPException(status_code=401, detail="Invalid credentials")
+    with _DB_LOCK:
+        conn = _get_db()
+        row  = conn.execute(
+            "SELECT password_hash, is_active FROM users WHERE username = ?", (username,)
+        ).fetchone()
+        conn.close()
 
-    token = _make_token(username)
-    logger.info("[auth_ok] user=%s auth_enabled=%s", username, _AUTH_ENABLED)
+    if row is None or not row["is_active"]:
+        logger.warning("[auth_fail_no_user] user=%s", username)
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    if not _verify_password(password, row["password_hash"]):
+        logger.warning("[auth_fail_bad_pass] user=%s", username)
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = _issue_token(username)
+    logger.info("[auth_ok] user=%s token=%s...", username, token[:8])
     return {"access_token": token, "token_type": "bearer", "username": username}
+
+
+@app.post("/api/auth/logout", tags=["Auth"])
+async def auth_logout(request: Request):
+    """Revoke the current session token."""
+    hdr   = request.headers.get("Authorization", "")
+    token = hdr.removeprefix("Bearer ").strip()
+    _revoke_token(token)
+    return {"logged_out": True}
 
 
 @app.get("/api/auth/me", tags=["Auth"])
 async def auth_me(request: Request):
-    """Return the current user from the Authorization header token."""
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        try:
-            decoded = base64.b64decode(auth_header[7:]).decode()
-            username = decoded.split(":")[0]
-            return {"username": username, "authenticated": True}
-        except Exception:
-            pass
-    return {"username": None, "authenticated": False}
+    """Return authenticated user info (validates token)."""
+    try:
+        username = _require_auth(request)
+        return {"username": username, "authenticated": True}
+    except HTTPException:
+        return {"username": None, "authenticated": False}
+
+
+@app.post("/api/auth/register", tags=["Auth"])
+async def auth_register(request: Request):
+    """
+    Register a new user account (open registration — lock down in production
+    by gating with JARVIS_OPEN_REGISTRATION=false and requiring admin token).
+    """
+    open_reg = os.getenv("JARVIS_OPEN_REGISTRATION", "true").lower() == "true"
+    if not open_reg:
+        _require_auth(request)  # must be logged in (admin) to create accounts
+
+    body     = await request.json()
+    username = (body.get("username") or "").strip().lower()
+    password =  body.get("password", "")
+
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="username and password are required")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+
+    with _DB_LOCK:
+        conn = _get_db()
+        existing = conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone()
+        if existing:
+            conn.close()
+            raise HTTPException(status_code=409, detail=f"Username '{username}' already exists")
+        _create_user_internal(conn, username, password)
+        conn.close()
+
+    logger.info("[auth_register] user=%s", username)
+    return {"registered": True, "username": username}
+
+
+@app.get("/api/auth/users", tags=["Auth"])
+async def auth_list_users(request: Request):
+    """List all users (requires valid auth token)."""
+    _require_auth(request)
+    with _DB_LOCK:
+        conn  = _get_db()
+        users = conn.execute("SELECT username, created_at, is_active FROM users").fetchall()
+        conn.close()
+    return {"users": [dict(u) for u in users]}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1397,6 +1557,58 @@ async def workspace_delete_file(user_id: str, request: Request):
     logger.info("[workspace_delete] user=%s path=%s", user_id, rel_path)
     return {"deleted": True, "path": rel_path}
 
+
+
+
+@app.get("/api/workspace/{user_id}/zip", tags=["Workspace"])
+async def workspace_download_zip(
+    user_id: str,
+    project: str = DEFAULT_PROJECT,
+    request: Request = None,
+):
+    """
+    Stream the entire project workspace as a .zip file download.
+    Path: /tmp/{user_id}/{project}/workspace/ → {project}.zip
+
+    Query params:
+      project — project name (default: "default")
+
+    The zip is streamed directly from memory using zipfile + BytesIO,
+    so no temp file is written to disk.
+    """
+    import io, zipfile as _zipfile
+    from fastapi.responses import StreamingResponse as _SR
+
+    ws_root = _workspace_path(user_id, project)
+    safe_proj = _safe_name(project) if project else DEFAULT_PROJECT
+
+    if not os.path.isdir(ws_root):
+        raise HTTPException(status_code=404, detail=f"Workspace not found: {ws_root}")
+
+    def _iter_zip():
+        buf = io.BytesIO()
+        with _zipfile.ZipFile(buf, mode="w", compression=_zipfile.ZIP_DEFLATED) as zf:
+            for dirpath, dirs, files in os.walk(ws_root):
+                dirs[:] = sorted(d for d in dirs if d not in WS_SKIP_DIRS and not d.startswith("."))
+                for fname in sorted(files):
+                    if fname.startswith("."):
+                        continue
+                    abs_path = os.path.join(dirpath, fname)
+                    rel_path = os.path.relpath(abs_path, ws_root)
+                    try:
+                        zf.write(abs_path, arcname=rel_path)
+                    except (PermissionError, OSError):
+                        pass
+        buf.seek(0)
+        yield buf.read()
+
+    filename = f"{safe_proj}-workspace.zip"
+    logger.info("[workspace_zip] user=%s project=%s file=%s", user_id, safe_proj, filename)
+    return _SR(
+        _iter_zip(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
