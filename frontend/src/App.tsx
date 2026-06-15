@@ -2494,6 +2494,12 @@ const Login = ({ onAuth }: { onAuth: (u: string) => void }) => {
     setPersona(id);  // triggers re-render with new J values
   };
 
+  const [mode, setMode] = useState<"login"|"register">("login");
+  const [regUser, setRegUser] = useState("");
+  const [regPass, setRegPass] = useState("");
+  const [regPass2, setRegPass2] = useState("");
+  const [regLoading, setRegLoading] = useState(false);
+
   const go = async () => {
     const u = user.trim().toLowerCase();
     if (!u) { setErr("Operator ID is required."); return; }
@@ -2503,26 +2509,59 @@ const Login = ({ onAuth }: { onAuth: (u: string) => void }) => {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: u, password: pass }),
       });
-      if (res.status === 405 || res.status === 404) {
-        // Auth endpoint not configured — dev mode: accept any username
-        storeAuth(`dev-${u}-${Date.now()}`, u);
-        onAuth(u);
-        return;
-      }
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (res.ok && data.access_token) {
         storeAuth(data.access_token, data.username || u);
         onAuth(data.username || u);
+      } else if (res.status === 401) {
+        setErr(data.detail || "Invalid credentials. Default: admin / admin123");
+        setShaking(true); setTimeout(() => setShaking(false), 500);
+      } else if (res.status === 405 || res.status === 404) {
+        storeAuth(`dev-${u}-${Date.now()}`, u);
+        onAuth(u);
       } else {
-        setErr(data.detail || "Access denied.");
+        setErr(data.detail || `Server error ${res.status}`);
         setShaking(true); setTimeout(() => setShaking(false), 500);
       }
     } catch {
-      // Backend unreachable or CORS — fall back to local dev token
       storeAuth(`offline-${u}-${Date.now()}`, u);
       onAuth(u);
     }
     setLoading(false);
+  };
+
+  const register = async () => {
+    const u = regUser.trim().toLowerCase();
+    if (!u || !regPass) { setErr("Username and password required."); return; }
+    if (regPass !== regPass2) { setErr("Passwords do not match."); return; }
+    if (regPass.length < 6) { setErr("Password must be at least 6 characters."); return; }
+    setRegLoading(true); setErr("");
+    try {
+      const res = await fetch(`${API_URL}/auth/register`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: u, password: regPass }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setUser(u); setPass(regPass);
+        setMode("login");
+        setErr("");
+        // auto-login after register
+        const res2 = await fetch(`${API_URL}/auth/login`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: u, password: regPass }),
+        });
+        const data2 = await res2.json().catch(() => ({}));
+        if (res2.ok && data2.access_token) {
+          storeAuth(data2.access_token, data2.username || u);
+          onAuth(data2.username || u);
+        }
+      } else {
+        setErr(data.detail || `Registration failed: ${res.status}`);
+        setShaking(true); setTimeout(() => setShaking(false), 500);
+      }
+    } catch (e: any) { setErr(`Error: ${e.message}`); }
+    setRegLoading(false);
   };
 
   const inp: React.CSSProperties = {
@@ -2613,16 +2652,60 @@ const Login = ({ onAuth }: { onAuth: (u: string) => void }) => {
             onKeyDown={e => e.key === "Enter" && go()} style={{ ...inp, marginTop: 6 }} />
         </div>
 
-        {err && <div style={{ color: J.err, fontSize: 11, marginBottom: 14, padding: "7px 12px", background: J.errDim, border: `1px solid ${J.err}33`, borderRadius: 2 }}>✕ {err}</div>}
+        {err && (
+          <div style={{ color: J.err, fontSize: 11, marginBottom: 14, padding: "7px 12px", background: J.errDim, border: `1px solid ${J.err}33`, borderRadius: 2 }}>
+            ✕ {err}
+            {err.includes("admin123") && (
+              <div style={{ color: J.textSec, fontSize: 10, marginTop: 6 }}>
+                💡 Tip: First boot default is <span style={{ color: J.accent }}>admin</span> / <span style={{ color: J.accent }}>admin123</span>
+                {" — or "}
+                <button onClick={() => { setErr(""); setMode("register"); }} style={{ background: "none", border: "none", color: J.accent, cursor: "pointer", textDecoration: "underline", fontSize: 10 }}>create a new account</button>
+              </div>
+            )}
+          </div>
+        )}
 
-        <button onClick={go} disabled={loading} style={{
-          width: "100%", padding: "11px", borderRadius: 3,
-          background: loading ? J.bgCard : `${J.accent}0C`,
-          border: `1px solid ${loading ? J.borderMid : J.accent}`,
-          color: loading ? J.textSec : J.accent,
-          fontSize: 12, fontWeight: "bold", letterSpacing: "0.18em",
-          transition: "all 0.2s", fontFamily: J.fontHeader,
-        }}>{loading ? `${J.glyph} AUTHENTICATING…` : "▶ INITIALIZE SEQUENCE"}</button>
+        {mode === "login" ? (
+          <>
+            <button onClick={go} disabled={loading} style={{
+              width: "100%", padding: "11px", borderRadius: 3,
+              background: loading ? J.bgCard : `${J.accent}0C`,
+              border: `1px solid ${loading ? J.borderMid : J.accent}`,
+              color: loading ? J.textSec : J.accent,
+              fontSize: 12, fontWeight: "bold", letterSpacing: "0.18em",
+              transition: "all 0.2s", fontFamily: J.fontHeader,
+            }}>{loading ? `${J.glyph} AUTHENTICATING…` : "▶ INITIALIZE SEQUENCE"}</button>
+            <div style={{ textAlign: "center", marginTop: 12 }}>
+              <button onClick={() => { setMode("register"); setErr(""); }} style={{
+                background: "none", border: "none", color: J.textSec, cursor: "pointer", fontSize: 10,
+              }}>No account? Register →</button>
+            </div>
+          </>
+        ) : (
+          <div>
+            <div style={{ color: J.accent, fontSize: 10, letterSpacing: "0.12em", marginBottom: 12, fontFamily: J.fontHeader }}>◈ CREATE OPERATOR ACCOUNT</div>
+            <div style={{ marginBottom: 10 }}>
+              <Lbl>Username</Lbl>
+              <input value={regUser} onChange={e => setRegUser(e.target.value)} style={{ ...inp, marginTop: 5 }} placeholder="Choose a username" />
+            </div>
+            <div style={{ marginBottom: 10 }}>
+              <Lbl>Password</Lbl>
+              <input type="password" value={regPass} onChange={e => setRegPass(e.target.value)} style={{ ...inp, marginTop: 5 }} placeholder="Min 6 characters" />
+            </div>
+            <div style={{ marginBottom: 14 }}>
+              <Lbl>Confirm Password</Lbl>
+              <input type="password" value={regPass2} onChange={e => setRegPass2(e.target.value)} onKeyDown={e => e.key === "Enter" && register()} style={{ ...inp, marginTop: 5 }} />
+            </div>
+            <button onClick={register} disabled={regLoading} style={{
+              width: "100%", padding: "10px", borderRadius: 3,
+              background: `${J.ok}0C`, border: `1px solid ${J.ok}`,
+              color: J.ok, fontSize: 12, letterSpacing: "0.15em", fontFamily: J.fontHeader,
+            }}>{regLoading ? "CREATING…" : "⊞ CREATE ACCOUNT"}</button>
+            <div style={{ textAlign: "center", marginTop: 10 }}>
+              <button onClick={() => { setMode("login"); setErr(""); }} style={{ background: "none", border: "none", color: J.textSec, cursor: "pointer", fontSize: 10 }}>← Back to login</button>
+            </div>
+          </div>
+        )}
 
         <div style={{ color: J.textDim, fontSize: 8, textAlign: "center", marginTop: 20, letterSpacing: "0.08em", lineHeight: 2 }}>
           ALL ACCESS IS MONITORED · UNAUTHORISED USE IS PROHIBITED
@@ -2668,6 +2751,9 @@ export default function App() {
   const [workspaceOpen,   setWorkspaceOpen]   = useState(true);   // sidebar visible by default
   const [workspaceFiles,  setWorkspaceFiles]  = useState<WsFile[]>([]);  // files checked in sidebar
   const [currentProject,  setCurrentProject]  = useState<string>("default");  // active project (/tmp/{user}/{project}/workspace)
+  const currentProjectRef = useRef<string>("default");
+  // Keep ref in sync so react loop (inside useCallback closure) always reads latest
+  useEffect(() => { currentProjectRef.current = currentProject; }, [currentProject]);
   const [provInfo,        setProvInfo]        = useState({ provider: "deepseek", model: "deepseek-coder", schema_format: "openai" });
   const provInfoRef = useRef({ provider: "deepseek", model: "deepseek-coder" });
   // Keep provInfoRef in sync
@@ -2890,10 +2976,11 @@ export default function App() {
       auto_confirm:   autoConfirm,
       memory_enabled: memoryEnabled,
       persona:        personaRef.current,
+      project:        currentProject,
       instructions:   instrBlock || undefined,
       attachments:    allAtts.length ? allAtts : undefined,
     }));
-  }, [input, streaming, attachments, reactMode, autoConfirm]);
+  }, [input, streaming, attachments, reactMode, autoConfirm, memoryEnabled, instructions, currentProject]);
 
   // ── Manual continue (for non-react mode only) ─────────────────────────────
   const sendContinue = useCallback(() => { if (!streaming) send("continue"); }, [send, streaming]);
@@ -2954,6 +3041,7 @@ export default function App() {
           auto_confirm:   autoConfRef.current,
           memory_enabled: memoryEnabled,
           persona:        personaRef.current,
+          project:        currentProjectRef.current,
           instructions:   instrBlock || undefined,
           attachments:    reactAtts.length ? reactAtts : undefined,
         }));
@@ -3170,7 +3258,11 @@ export default function App() {
             </div>
             <div style={{ color: `${J.accent}77`, fontSize: 12, letterSpacing: "0.2em", marginBottom: 8, fontFamily: J.fontHeader, fontWeight: 600 }}>SYSTEM ONLINE — AWAITING DIRECTIVE</div>
             <div style={{ color: J.textDim, fontSize: 10, lineHeight: 2.2, letterSpacing: "0.08em", marginBottom: 28 }}>
-              {provInfo.provider.toUpperCase()} / {provInfo.model} &nbsp;·&nbsp; {provInfo.schema_format?.toUpperCase()} SCHEMA &nbsp;·&nbsp; {authedUser?.toUpperCase()} AUTHENTICATED
+              {provInfo.provider.toUpperCase()} / {provInfo.model} &nbsp;·&nbsp; {authedUser?.toUpperCase()} AUTHENTICATED
+              <br />
+              <span style={{ color: J.accent, opacity: 0.55 }}>
+                ◫ PROJECT: {currentProject} &nbsp;·&nbsp; /tmp/{authedUser}/{currentProject}/workspace
+              </span>
             </div>
             <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
               {["List files in home directory", "Show running processes", "Build a REST API using CBD methodology", "Run nmap on local network", "Retrieve last 10 conversations"].map(s => (
@@ -3266,6 +3358,19 @@ export default function App() {
           {!memoryEnabled && <span style={{ color: `${J.gold}55`, fontSize: 9, fontFamily: J.fontHeader }}>◉ Memory OFF — clean context</span>}
           {autoConfirm    && <span style={{ color: `${J.warm}55`, fontSize: 9, fontFamily: J.fontHeader }}>⚡ auto-confirm active</span>}
           {uploading      && <span style={{ color: `${J.accent}55`, fontSize: 9, animation: "hud-pulse 1s infinite" }}>⬆ reading files…</span>}
+          {/* Active workspace badge — always visible so operator knows where agent writes */}
+          <span
+            onClick={() => setWorkspaceOpen(o => !o)}
+            title={`/tmp/${authedUser}/${currentProject}/workspace — click to ${workspaceOpen ? "hide" : "show"} file browser`}
+            style={{
+              marginLeft: "auto", padding: "2px 8px", borderRadius: 2, cursor: "pointer",
+              background: `${J.accent}08`, border: `1px solid ${J.accent}22`,
+              color: J.accentDim, fontSize: 9, letterSpacing: "0.05em",
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 280,
+              fontFamily: J.fontMono,
+            }}>
+            ◫ /tmp/{authedUser}/{currentProject}/workspace
+          </span>
         </div>
 
         {/* Input row */}

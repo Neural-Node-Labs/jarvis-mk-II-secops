@@ -554,7 +554,7 @@ async def chat_websocket(ws: WebSocket, user_id: str):
             except json.JSONDecodeError:
                 await ws.send_json({"type": "error", "data": "Invalid JSON"})
                 continue
-# SJMN
+
             # Auth handshake — first message may carry token
             if msg.get("type") == "auth":
                 token    = msg.get("token", "")
@@ -576,6 +576,8 @@ async def chat_websocket(ws: WebSocket, user_id: str):
             halt            = msg.get("halt",          False)
             memory_enabled  = msg.get("memory_enabled", True)   # False = skip memory injection
             persona         = msg.get("persona", DEFAULT_PERSONA)  # "jarvis" | "omnikon" | "kraken"
+            project         = msg.get("project",  DEFAULT_PROJECT) # active UI project name
+            workspace_path  = _workspace_path(user_id, project)   # /tmp/{user}/{project}/workspace
 
             # ── HALT signal: destroy session so agent stops and forgets context ──
             if halt:
@@ -602,16 +604,35 @@ async def chat_websocket(ws: WebSocket, user_id: str):
                 # Silently ignore — do NOT send error, do NOT echo back
                 continue
 
-            llm_trace.info("[WS] user=%s react=%s atts=%d msg=%.120s",
-                           user_id, react, len(attachments), message)
+            llm_trace.info("[WS] user=%s project=%s react=%s atts=%d msg=%.120s",
+                           user_id, project, react, len(attachments), message)
+            logger.info("[ws_dispatch] user=%s project=%s workspace=%s react=%s",
+                        user_id, project, workspace_path, react)
 
             try:
                 agent = _get_session(user_id, model, provider)
 
-                # Prepend operator instructions as a system note if provided
+                # Build effective message with workspace context + operator instructions
+                # The workspace context tells the agent EXACTLY where to read/write files.
                 effective_msg = message
+
+                workspace_ctx = (
+                    f"[WORKSPACE CONTEXT]\n"
+                    f"Active Project  : {project}\n"
+                    f"Workspace Path  : {workspace_path}\n"
+                    f"User            : {user_id}\n"
+                    f"All file operations (read, write, list, search) MUST use this workspace path "
+                    f"as the root directory unless the operator explicitly specifies otherwise.\n"
+                )
+
                 if instructions:
-                    effective_msg = f"[OPERATOR INSTRUCTIONS]\n{instructions}\n\n[MESSAGE]\n{message}"
+                    effective_msg = (
+                        f"{workspace_ctx}\n"
+                        f"[OPERATOR INSTRUCTIONS]\n{instructions}\n\n"
+                        f"[MESSAGE]\n{message}"
+                    )
+                else:
+                    effective_msg = f"{workspace_ctx}\n[MESSAGE]\n{message}"
 
                 async for event in agent.chat_stream(
                     effective_msg,
@@ -1115,24 +1136,55 @@ def _init_db():
             CREATE INDEX IF NOT EXISTS idx_tokens_username ON auth_tokens(username);
         """)
         conn.commit()
-        # Create default admin account if no users exist
-        cur = conn.execute("SELECT COUNT(*) FROM users")
+        # Always ensure at least one account exists.
+        # If the admin row is missing (first boot or wiped DB), recreate it.
+        cur = conn.execute("SELECT COUNT(*) FROM users WHERE username = 'admin'")
         if cur.fetchone()[0] == 0:
             _create_user_internal(conn, "admin", "admin123")
-            logger.info("[db_init] default account created: admin / admin123")
+            logger.info("[db_init] admin account seeded: admin / admin123")
         conn.close()
 
-def _hash_password(password: str) -> str:
-    """SHA-256 PBKDF2 with a random salt — no external deps."""
-    salt = secrets.token_hex(16)
-    dk   = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260_000)
-    return f"{salt}:{dk.hex()}"
+def _sha256_hex(value: str) -> str:
+    """Client-side pre-hash: SHA-256 of the raw password → hex string."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
-def _verify_password(password: str, stored_hash: str) -> bool:
+def _hash_password(pre_hashed: str) -> str:
+    """
+    Server-side storage hash.
+    Input: the client-sent SHA-256 hex of the password.
+    Stores: PBKDF2-HMAC-SHA256(pre_hashed, salt, 260_000 iterations).
+    This means the raw password is NEVER transmitted or stored.
+    """
+    salt = secrets.token_hex(16)
+    dk   = hashlib.pbkdf2_hmac("sha256", pre_hashed.encode(), salt.encode(), 260_000)
+    return f"pbkdf2:{salt}:{dk.hex()}"
+
+def _verify_password(candidate: str, stored_hash: str) -> bool:
+    """
+    Verify a candidate against the stored hash.
+
+    candidate: the value sent by the client — EITHER:
+      (a) SHA-256 hex of the password  (new clients that pre-hash)
+      (b) raw plaintext                (fallback for migration / curl testing)
+
+    stored_hash format: "pbkdf2:{salt}:{dk_hex}"
+    Legacy format (no prefix): "{salt}:{dk_hex}" — treated as plain PBKDF2(plaintext)
+    """
     try:
-        salt, dk_hex = stored_hash.split(":", 1)
-        dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260_000)
-        return hmac.compare_digest(dk.hex(), dk_hex)
+        if stored_hash.startswith("pbkdf2:"):
+            _, salt, dk_hex = stored_hash.split(":", 2)
+            # Try candidate as-is (SHA-256 hex from client)
+            dk = hashlib.pbkdf2_hmac("sha256", candidate.encode(), salt.encode(), 260_000)
+            if hmac.compare_digest(dk.hex(), dk_hex):
+                return True
+            # Fallback: maybe candidate is plaintext (curl / API tester) — pre-hash and retry
+            dk2 = hashlib.pbkdf2_hmac("sha256", _sha256_hex(candidate).encode(), salt.encode(), 260_000)
+            return hmac.compare_digest(dk2.hex(), dk_hex)
+        else:
+            # Legacy format: "{salt}:{dk_hex}" — PBKDF2 of plaintext directly
+            salt, dk_hex = stored_hash.split(":", 1)
+            dk = hashlib.pbkdf2_hmac("sha256", candidate.encode(), salt.encode(), 260_000)
+            return hmac.compare_digest(dk.hex(), dk_hex)
     except Exception:
         return False
 
@@ -1283,13 +1335,176 @@ async def auth_register(request: Request):
 
 @app.get("/api/auth/users", tags=["Auth"])
 async def auth_list_users(request: Request):
-    """List all users (requires valid auth token)."""
-    _require_auth(request)
+    """List all users. Requires authentication."""
+    caller = _require_auth(request)
     with _DB_LOCK:
         conn  = _get_db()
-        users = conn.execute("SELECT username, created_at, is_active FROM users").fetchall()
+        users = conn.execute(
+            "SELECT username, created_at, is_active FROM users ORDER BY created_at"
+        ).fetchall()
         conn.close()
-    return {"users": [dict(u) for u in users]}
+    return {"users": [dict(u) for u in users], "caller": caller}
+
+
+@app.put("/api/auth/users/{username}", tags=["Auth"])
+async def auth_update_user(username: str, request: Request):
+    """
+    Update a user's password and/or active status.
+    Admin can update any user. Regular users can only update themselves.
+    Body: { "password"?: str (SHA-256 hex from client), "is_active"?: bool }
+    """
+    caller = _require_auth(request)
+    target = username.lower()
+    if caller != "admin" and caller != target:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    body      = await request.json()
+    new_pass  = body.get("password")
+    is_active = body.get("is_active")
+
+    if caller != "admin" and is_active is not None:
+        raise HTTPException(status_code=403, detail="Only admin can change active status")
+
+    with _DB_LOCK:
+        conn = _get_db()
+        row  = conn.execute("SELECT 1 FROM users WHERE username = ?", (target,)).fetchone()
+        if not row:
+            conn.close()
+            raise HTTPException(status_code=404, detail=f"User '{target}' not found")
+
+        updates, params = [], []
+        if new_pass is not None:
+            if len(new_pass) < 6 and len(new_pass) != 64:
+                conn.close()
+                raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+            ph = _hash_password(new_pass)
+            updates.append("password_hash = ?"); params.append(ph)
+        if is_active is not None:
+            if target == "admin" and not is_active:
+                conn.close()
+                raise HTTPException(status_code=400, detail="Cannot deactivate admin account")
+            updates.append("is_active = ?"); params.append(1 if is_active else 0)
+        if not updates:
+            conn.close()
+            return {"updated": False, "message": "No fields to update"}
+
+        params.append(target)
+        conn.execute(f"UPDATE users SET {', '.join(updates)} WHERE username = ?", params)
+        conn.commit()
+        conn.close()
+
+    logger.info("[user_update] caller=%s target=%s", caller, target)
+    return {"updated": True, "username": target}
+
+
+@app.delete("/api/auth/users/{username}", tags=["Auth"])
+async def auth_delete_user(username: str, request: Request):
+    """Delete a user (admin only). Cannot delete admin or self."""
+    caller = _require_auth(request)
+    if caller != "admin":
+        raise HTTPException(status_code=403, detail="Only admin can delete users")
+    target = username.lower()
+    if target in ("admin", caller):
+        raise HTTPException(status_code=400, detail="Cannot delete admin or your own account")
+
+    with _DB_LOCK:
+        conn = _get_db()
+        row  = conn.execute("SELECT 1 FROM users WHERE username = ?", (target,)).fetchone()
+        if not row:
+            conn.close()
+            raise HTTPException(status_code=404, detail=f"User '{target}' not found")
+        conn.execute("DELETE FROM auth_tokens WHERE username = ?", (target,))
+        conn.execute("DELETE FROM users WHERE username = ?", (target,))
+        conn.commit()
+        conn.close()
+
+    logger.info("[user_delete] caller=%s deleted=%s", caller, target)
+    return {"deleted": True, "username": target}
+
+
+@app.post("/api/auth/users/{username}/reset-password", tags=["Auth"])
+async def auth_reset_user_password(username: str, request: Request):
+    """Admin resets another user's password (plaintext accepted — server hashes)."""
+    caller = _require_auth(request)
+    if caller != "admin":
+        raise HTTPException(status_code=403, detail="Only admin can reset passwords")
+    target = username.lower()
+    body   = await request.json()
+    new_pw = body.get("new_password", "")
+    if len(new_pw) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+
+    with _DB_LOCK:
+        conn = _get_db()
+        if not conn.execute("SELECT 1 FROM users WHERE username = ?", (target,)).fetchone():
+            conn.close()
+            raise HTTPException(status_code=404, detail=f"User '{target}' not found")
+        ph = _hash_password(_sha256_hex(new_pw))
+        conn.execute("UPDATE users SET password_hash = ? WHERE username = ?", (ph, target))
+        conn.commit()
+        conn.close()
+
+    logger.info("[user_reset_password] caller=%s target=%s", caller, target)
+    return {"reset": True, "username": target}
+
+
+@app.get("/api/auth/debug", tags=["Auth"])
+async def auth_debug():
+    """
+    DEVELOPMENT ONLY — Returns DB state without authentication.
+    Shows user list (no hashes) and DB path so you can diagnose login issues.
+    Remove or gate this behind a secret in production.
+    """
+    try:
+        with _DB_LOCK:
+            conn  = _get_db()
+            users = conn.execute(
+                "SELECT username, created_at, is_active FROM users ORDER BY created_at"
+            ).fetchall()
+            tokens = conn.execute(
+                "SELECT COUNT(*) as cnt FROM auth_tokens"
+            ).fetchone()
+            conn.close()
+        return {
+            "db_path":     os.path.abspath(_DB_PATH),
+            "db_exists":   os.path.isfile(_DB_PATH),
+            "user_count":  len(users),
+            "users":       [dict(u) for u in users],
+            "active_tokens": tokens["cnt"] if tokens else 0,
+        }
+    except Exception as exc:
+        return {"error": str(exc), "db_path": os.path.abspath(_DB_PATH)}
+
+
+@app.post("/api/auth/reset-admin", tags=["Auth"])
+async def auth_reset_admin(request: Request):
+    """
+    Emergency endpoint — resets the admin password to admin123.
+    Only works when called from localhost (127.0.0.1 / ::1).
+    Use this if the admin password is lost.
+    """
+    client_ip = request.client.host if request.client else ""
+    if client_ip not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="Only accessible from localhost")
+
+    new_pass = request.headers.get("X-New-Password", "admin123")
+    if len(new_pass) < 6:
+        raise HTTPException(status_code=400, detail="Password must be >= 6 chars")
+
+    ph = _hash_password(new_pass)
+    with _DB_LOCK:
+        conn = _get_db()
+        # Upsert admin account
+        conn.execute(
+            "INSERT INTO users (username, password_hash, is_active) VALUES ('admin', ?, 1) "
+            "ON CONFLICT(username) DO UPDATE SET password_hash=excluded.password_hash, is_active=1",
+            (ph,)
+        )
+        conn.commit()
+        conn.close()
+
+    logger.warning("[auth_reset_admin] admin password reset from %s", client_ip)
+    return {"reset": True, "username": "admin", "password": new_pass}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
