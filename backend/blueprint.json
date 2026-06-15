@@ -1,0 +1,142 @@
+{
+  "_version": "1.0.0",
+  "_changelog": [
+    {
+      "version": "1.0.0",
+      "date": "2026-06-10",
+      "changed_by": "agent",
+      "summary": "Initial blueprint — CBD restructure of Jarvis MKII server. JarvisMKII multi-task skill. Memory/RCA/Experienced/Self-Evolution integration. No Pydantic."
+    }
+  ],
+  "project_id": "jarvis-mkii-server-v4",
+  "methodology": "CBD-Interface-First v2.2",
+  "blueprint_version": "1.0.0",
+  "blueprint_changelog": [
+    {
+      "version": "1.0.0",
+      "date": "2026-06-10",
+      "changed_by": "agent",
+      "summary": "Initial blueprint"
+    }
+  ],
+  "experienced_system": {
+    "enabled": true,
+    "index_path": "experienced/index.md",
+    "entries_path": "experienced/",
+    "mandatory_lookup_before": ["debugging", "environment-setup", "dependency-resolution", "kali-tool-execution"]
+  },
+  "components": [
+    {
+      "identity": { "name": "JarvisMKIIExecutor", "reason": "Fan out multiple tasks to parallel isolated agents", "logical_function": "Orchestration / Parallel Execution" },
+      "interface": {
+        "api": { "endpoint": "/api/mkii/tasks", "method": "POST" },
+        "in_schema": { "tasks": "TaskDef[]", "max_parallel": "int (default 10)" },
+        "out_schema": { "submitted": "int", "completed": "int", "failed": "int", "timed_out": "int", "duration_ms": "int", "results": "TaskResult[]" },
+        "error_schema": { "error_code": "MKII_NO_TASKS | MKII_TOO_MANY_TASKS | MKII_INTERNAL_ERROR", "message": "str" }
+      },
+      "artifacts": [
+        { "file_path": "main.py", "version": "4.0.0", "description": "Component 4 — JarvisMKII executor in main.py" },
+        { "file_path": "jarvis_mkii_skill.py", "version": "1.0.0", "description": "JarvisMKII SkillRegistry-registered skill" }
+      ],
+      "observability": {
+        "trace_points": ["task_submitted", "task_started", "task_complete", "task_failed", "task_timeout", "all_tasks_done"],
+        "failure_map": ["per-task asyncio try-except", "asyncio.TimeoutError caught", "abort via asyncio.Event"]
+      },
+      "experience_hook": { "consumer": true, "producer": true, "lookup_trigger": "always", "write_trigger": "on_novel_resolution" }
+    },
+    {
+      "identity": { "name": "KaliToolExecutor", "reason": "Execute Kali Linux tools asynchronously without blocking the event loop", "logical_function": "Execution / SecOps" },
+      "interface": {
+        "api": { "endpoint": "/api/kali/exec", "method": "POST" },
+        "in_schema": { "command": "str (required)", "cwd": "str (optional)", "timeout": "int (optional)", "env": "dict (optional)" },
+        "out_schema": { "command": "str", "stdout": "str", "stderr": "str", "returncode": "int", "duration_ms": "int", "timed_out": "bool" },
+        "error_schema": { "returncode": "-1 (timeout) | -2 (exec error)", "stderr": "error detail" }
+      },
+      "artifacts": [
+        { "file_path": "main.py", "version": "4.0.0", "description": "Component 5 — _kali_exec() function and /api/kali/* router" }
+      ],
+      "observability": {
+        "trace_points": ["kali_exec_start", "kali_exec_complete", "kali_exec_timeout", "kali_exec_error"],
+        "failure_map": ["asyncio.TimeoutError → proc.kill()", "Exception → returncode -2", "auth check via X-Kali-Key header"]
+      },
+      "experience_hook": { "consumer": true, "producer": false, "lookup_trigger": "on_failure", "write_trigger": "never" }
+    },
+    {
+      "identity": { "name": "SessionRegistry", "reason": "Manage per-user Agent instances with thread-safe creation and destruction", "logical_function": "State Management / Session" },
+      "interface": {
+        "in_schema": { "user_id": "str", "model": "str (optional)", "provider": "str (optional)" },
+        "out_schema": "Agent instance",
+        "error_schema": { "error": "session creation failure detail" }
+      },
+      "artifacts": [
+        { "file_path": "main.py", "version": "4.0.0", "description": "Component 3 — _get_session(), _destroy_session(), _build_llm_config()" }
+      ],
+      "observability": {
+        "trace_points": ["session_created", "session_destroyed", "session_create_failed"],
+        "failure_map": ["threading.Lock on all dict access", "Agent construction failure raises HTTPException"]
+      },
+      "experience_hook": { "consumer": true, "producer": false, "lookup_trigger": "never", "write_trigger": "never" }
+    },
+    {
+      "identity": { "name": "PromptBuilder", "reason": "Centralise all system prompt strings — soul, personality, Kali doctrine, blueprint context, rules", "logical_function": "Configuration / Prompt Assembly" },
+      "interface": {
+        "in_schema": { "memory_context": "str (optional, default empty)" },
+        "out_schema": "str — complete system prompt"
+      },
+      "artifacts": [
+        { "file_path": "prompt_builder.py", "version": "2.0.0", "description": "Component 21 — Soul, Kali doctrine, blueprint context, rules, skill manifest loader" }
+      ],
+      "observability": {
+        "trace_points": ["manifest_loaded", "manifest_fallback"],
+        "failure_map": ["FileNotFoundError on manifest → fallback to _SKILLS_FALLBACK"]
+      },
+      "experience_hook": { "consumer": false, "producer": false, "lookup_trigger": "never", "write_trigger": "never" }
+    },
+    {
+      "identity": { "name": "JarvisMKIISkill", "reason": "First-class SkillRegistry skill that agents invoke via TOOL_CALL for parallel task execution", "logical_function": "Orchestration / Skill" },
+      "interface": {
+        "in_schema": {
+          "run_tasks":   { "tasks": "TaskDef[]", "max_parallel": "int (optional)" },
+          "list_active": {},
+          "abort_task":  { "task_id": "str" }
+        },
+        "out_schema": {
+          "run_tasks":   { "submitted": "int", "completed": "int", "failed": "int", "timed_out": "int", "aborted": "int", "duration_ms": "int", "results": "TaskResult[]" },
+          "list_active": { "active_tasks": "TaskState[]", "count": "int" },
+          "abort_task":  { "aborted": "bool", "task_id": "str" }
+        },
+        "error_schema": { "error_code": "MKII_NO_TASKS | MKII_TOO_MANY_TASKS | MKII_TASK_NOT_FOUND | MKII_EMPTY_MESSAGE | MKII_INTERNAL_ERROR | MKII_UNKNOWN_ACTION", "message": "str" }
+      },
+      "artifacts": [
+        { "file_path": "jarvis_mkii_skill.py", "version": "1.0.0", "description": "Full JarvisMKII skill implementation" }
+      ],
+      "observability": {
+        "trace_points": ["task_started", "task_complete", "task_failed", "task_timeout", "abort_requested", "abort_not_found", "all_tasks_submitted", "all_tasks_done"],
+        "failure_map": ["per-task try-except in _run_one_task()", "asyncio.TimeoutError per task", "abort via asyncio.Event (not hard-kill)", "partial results always returned"]
+      },
+      "experience_hook": { "consumer": true, "producer": true, "lookup_trigger": "always", "write_trigger": "on_novel_resolution" }
+    }
+  ],
+  "deployment": {
+    "dockerfile": "Dockerfile_ultimate",
+    "base_image": "kalilinux/kali-rolling",
+    "entrypoint": "uvicorn main:app --host 0.0.0.0 --port 8000",
+    "env_vars": {
+      "LLM_PROVIDER":         { "required": false, "default": "deepseek", "description": "LLM provider: deepseek, anthropic, openai, ollama" },
+      "LLM_MODEL":            { "required": false, "default": "deepseek-coder", "description": "Model name" },
+      "DEEPSEEK_API_KEY":     { "required": "if provider=deepseek" },
+      "ANTHROPIC_API_KEY":    { "required": "if provider=anthropic" },
+      "OPENAI_API_KEY":       { "required": "if provider=openai" },
+      "JARVIS_MAX_PARALLEL":  { "required": false, "default": "10", "description": "Max concurrent JarvisMKII tasks" },
+      "JARVIS_TASK_TIMEOUT":  { "required": false, "default": "300", "description": "Seconds before a task is killed" },
+      "KALI_TOOL_TIMEOUT":    { "required": false, "default": "120", "description": "Seconds before a Kali subprocess is killed" },
+      "KALI_EXEC_API_KEY":    { "required": false, "default": "", "description": "Auth key for /api/kali/exec. Empty = open (dev only)" },
+      "CORS_ORIGINS":         { "required": false, "default": "*" },
+      "FRONTEND_DIR":         { "required": false, "default": "/app/frontend/dist" },
+      "HOST":                 { "required": false, "default": "0.0.0.0" },
+      "PORT":                 { "required": false, "default": "8000" },
+      "DEV":                  { "required": false, "default": "false", "description": "Enable uvicorn --reload" }
+    },
+    "rollback_on_failure": true
+  }
+}

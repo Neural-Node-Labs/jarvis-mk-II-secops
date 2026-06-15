@@ -21,7 +21,22 @@ docker exec -u root -it <container_name> chown -R <user>:<group> /path/to/folder
 docker exec -u root -it agent-backend chmod -R 777 /app/frontend/
 
 docker cp agent-backend:/app ./agent-app-docker/
+docker exec -it <container_name_or_id> ls -la /path/to/directory
 
+
+
+
+docker exec -it jarvis-app ls -la /tmp/tony/scrum/workspace
+docker cp jarvis-app:/tmp/tony/scrum/workspace/frontend/tsconfig.json c:/temp/scrum/
+docker exec -it jarvis-app ls -la /tmp/tony/scrum/workspace/frontend/tsconfig.json
+
+
+docker cp jarvis-app:/tmp/tony/scrum c:/temp/tony/scrum
+
+
+
+
+docker exec -it <jarvis-app> ls -la /tmp
 
 
 Max Token Issued: 4096

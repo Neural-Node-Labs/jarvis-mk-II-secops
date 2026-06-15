@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Task Scheduler — J.A.R.V.I.S.</title>
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #030609; color: #B8D8F0; font-family: 'Share Tech Mono', monospace; min-height: 100vh; }
+    ::-webkit-scrollbar { width: 3px; height: 3px; }
+    ::-webkit-scrollbar-track { background: #030609; }
+    ::-webkit-scrollbar-thumb { background: #1A3A55; border-radius: 2px; }
+    ::selection { background: #00C8FF22; color: #00C8FF; }
+    input, textarea, select { outline: none; font-family: inherit; }
+    input:focus, textarea:focus, select:focus { outline: 1px solid #006A88; }
+    button { cursor: pointer; font-family: inherit; }
+    button:active { opacity: 0.75; }
+
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+    @keyframes pulse { 0%,100%{opacity:0.45} 50%{opacity:1} }
+    @keyframes glow { 0%,100%{box-shadow:0 0 6px #00C8FF18} 50%{box-shadow:0 0 18px #00C8FF40,0 0 30px #00C8FF18} }
+    @keyframes scan { 0%{top:-2px;opacity:0.9} 100%{top:100vh;opacity:0} }
+    @keyframes fadein { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+
+    .msg { animation: fadein 0.2s ease-out forwards; }
+    .pulse { animation: pulse 2.5s infinite; }
+    .blink { animation: blink 1s infinite; }
+
+    .stat-card {
+      background: #08101A; border: 1px solid #0C1E2E; border-radius: 6px;
+      padding: 10px 12px; position: relative;
+    }
+    .stat-label {
+      font-size: 9px; color: #3A6A8A; letter-spacing: 0.1em;
+      font-family: 'Rajdhani', monospace; font-weight: 600;
+    }
+    .stat-value {
+      font-size: 20px; font-weight: 500; color: #B8D8F0;
+      font-family: 'Rajdhani', monospace; font-weight: 700;
+      line-height: 1.2; margin-top: 2px;
+    }
+    .field { margin-bottom: 12px; }
+    .field-label {
+      display: block; color: #3A6A8A; font-size: 9px; letter-spacing: 0.12em;
+      font-family: 'Rajdhani', monospace; font-weight: 600;
+      margin-bottom: 5px; text-transform: uppercase;
+    }
+    .input {
+      width: 100%; padding: 7px 10px; border-radius: 3px;
+      background: #08101A; border: 1px solid #0C1E2E;
+      color: #B8D8F0; font-size: 11px; transition: border-color 0.2s;
+    }
+    .input:focus { border-color: #006A88; }
+    .type-btn, .mode-btn, .filter-btn {
+      padding: 4px 12px; border-radius: 2px; font-size: 10px;
+      background: transparent; border: 1px solid #0C1E2E; color: #3A6A8A;
+      font-family: 'Rajdhani', monospace; font-weight: 600;
+      letter-spacing: 0.06em; transition: all 0.15s;
+    }
+    .type-btn:hover, .mode-btn:hover, .filter-btn:hover { border-color: #1A3A55; color: #B8D8F0; }
+    .type-btn.active, .mode-btn.active, .filter-btn.active {
+      background: #00C8FF0C; border-color: #00C8FF55; color: #00C8FF;
+    }
+    .task-card {
+      background: #08101A; border: 1px solid #0C1E2E; border-radius: 4px;
+      margin-bottom: 6px; animation: fadein 0.25s ease forwards;
+      transition: border-color 0.2s;
+    }
+    .task-card:hover { border-color: #1A3A55; }
+    .task-header { padding: 10px 14px; cursor: pointer; display: flex; align-items: center; gap: 10px; }
+    .task-body { padding: 0 14px 12px; border-top: 1px solid #0C1E2E; }
+    .status-badge {
+      padding: 1px 7px; border-radius: 2px; font-size: 9px;
+      font-family: 'Rajdhani', monospace; font-weight: 600; letter-spacing: 0.06em;
+    }
+    .action-btn {
+      padding: 3px 8px; border-radius: 2px; font-size: 9px;
+      background: transparent; border: 1px solid #0C1E2E; color: #3A6A8A;
+      font-family: 'Rajdhani', monospace; font-weight: 600;
+      letter-spacing: 0.05em; transition: all 0.15s;
+    }
+    .action-btn:hover { border-color: #1A3A55; color: #B8D8F0; }
+    .action-btn.danger:hover { border-color: #FF4455; color: #FF4455; }
+    .action-btn.pause:hover { border-color: #FFB830; color: #FFB830; }
+    .action-btn.resume:hover { border-color: #00FF88; color: #00FF88; }
+  </style>
+</head>
+<body>
+  <!-- Ambient scan line -->
+  <div style="position:fixed;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,#00C8FF22,transparent);animation:scan 10s linear infinite;pointer-events:none;z-index:9999"></div>
+  <!-- Grid background -->
+  <div style="position:fixed;inset:0;pointer-events:none;background-image:linear-gradient(#01030588 1px,transparent 1px),linear-gradient(90deg,#01030588 1px,transparent 1px);background-size:60px 60px;opacity:0.5"></div>
+
+  <div id="app" style="max-width:1200px;margin:0 auto;padding:20px 24px">
+    <!-- Header -->
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;padding:12px 20px;background:#060C14;border:1px solid #0C1E2E;border-radius:6px;position:relative">
+      <div style="position:absolute;top:-1px;left:-1px;width:10px;height:10px;border-top:1.5px solid #00C8FF;border-left:1.5px solid #00C8FF;opacity:0.7"></div>
+      <div style="position:absolute;top:-1px;right:-1px;width:10px;height:10px;border-top:1.5px solid #00C8FF;border-right:1.5px solid #00C8FF;opacity:0.7"></div>
+      <div style="position:absolute;bottom:-1px;left:-1px;width:10px;height:10px;border-bottom:1.5px solid #00C8FF;border-left:1.5px solid #00C8FF;opacity:0.7"></div>
+      <div style="position:absolute;bottom:-1px;right:-1px;width:10px;height:10px;border-bottom:1.5px solid #00C8FF;border-right:1.5px solid #00C8FF;opacity:0.7"></div>
+
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="width:36px;height:36px;border-radius:50%;background:radial-gradient(circle,#00C8FF22 0%,#08101A 60%);border:1px solid #00C8FF66;box-shadow:0 0 18px #00C8FF40,inset 0 0 12px #00C8FF18;display:flex;align-items:center;justify-content:center;color:#00C8FF;font-size:14px">◈</div>
+        <div>
+          <div style="color:#00C8FF;font-size:13px;letter-spacing:0.2em;font-family:'Rajdhani',monospace;font-weight:700">TASK SCHEDULER</div>
+          <div style="color:#1A3A50;font-size:9px;letter-spacing:0.12em">CRON · ONE-SHOT · QUEUE · JARVIS ACTIONS</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span id="schedulerStatusBadge" style="padding:2px 8px;border-radius:2px;font-size:9px;letter-spacing:0.12em;font-family:'Rajdhani',monospace;font-weight:600">INITIALIZING…</span>
+        <button onclick="toggleScheduler()" id="schedulerToggleBtn" style="padding:4px 12px;background:#08101A;border:1px solid #1A3A55;color:#B8D8F0;border-radius:2px;font-size:10px;letter-spacing:0.06em">▶ START</button>
+      </div>
+    </div>
+
+    <!-- Stats row -->
+    <div id="statsRow" style="display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:16px">
+      <div class="stat-card"><div class="stat-label">Total Tasks</div><div class="stat-value" id="statTotal">—</div></div>
+      <div class="stat-card"><div class="stat-label">Active</div><div class="stat-value" id="statActive" style="color:#00FF88">—</div></div>
+      <div class="stat-card"><div class="stat-label">Running</div><div class="stat-value" id="statRunning" style="color:#00C8FF">—</div></div>
+      <div class="stat-card"><div class="stat-label">Paused</div><div class="stat-value" id="statPaused" style="color:#FFB830">—</div></div>
+      <div class="stat-card"><div class="stat-label">Completed</div><div class="stat-value" id="statCompleted" style="color:#00FF88">—</div></div>
+      <div class="stat-card"><div class="stat-label">Failed</div><div class="stat-value" id="statFailed" style="color:#FF4455">—</div></div>
+    </div>
+
+    <!-- Main layout: left form, right list -->
+    <div style="display:grid;grid-template-columns:380px 1fr;gap:16px">
+      <!-- Left: New Task Form -->
+      <div style="background:#060C14;border:1px solid #0C1E2E;border-radius:6px;padding:16px">
+        <div style="color:#00C8FF;font-size:10px;letter-spacing:0.18em;font-family:'Rajdhani',monospace;font-weight:700;margin-bottom:14px">➕ SCHEDULE NEW TASK</div>
+
+        <div class="field">
+          <label class="field-label">Task Name</label>
+          <input id="taskName" type="text" placeholder="e.g. Nightly port scan" class="input" />
+        </div>
+
+        <div class="field">
+          <label class="field-label">Type</label>
+          <div style="display:flex;gap:4px">
+            <button class="type-btn active" data-type="cron" onclick="selectType('cron')">↺ Cron</button>
+            <button class="type-btn" data-type="oneshot" onclick="selectType('oneshot')">▶ One-Shot</button>
+            <button class="type-btn" data-type="queue" onclick="selectType('queue')">☰ Queue</button>
+          </div>
+        </div>
+
+        <div class="field" id="scheduleField">
+          <label class="field-label">Schedule Expression</label>
+          <input id="scheduleExpr" type="text" placeholder="*/5 * * * *  or  @daily  or  @every_30s" class="input" />
+          <div style="color:#1A3A50;font-size:9px;margin-top:4px">5-field cron, @daily, @hourly, @every_Ns</div>
+        </div>
+
+        <div class="field">
+          <label class="field-label">Command (shell) or Action (Jarvis)</label>
+          <div style="display:flex;gap:4px;margin-bottom:6px">
+            <button class="mode-btn active" data-mode="command" onclick="selectMode('command')">$ Shell</button>
+            <button class="mode-btn" data-mode="action" onclick="selectMode('action')">◇ Jarvis</button>
+          </div>
+          <textarea id="taskCommand" rows="2" placeholder="nmap -sV 10.0.0.1 -oN /tmp/scan.txt" class="input" style="resize:vertical;min-height:44px"></textarea>
+          <div id="actionInput" style="display:none">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px">
+              <div>
+                <label style="color:#3A6A8A;font-size:9px;letter-spacing:0.08em">Skill</label>
+                <input id="actionSkill" type="text" placeholder="filesystem" class="input" style="margin-top:3px" />
+              </div>
+              <div>
+                <label style="color:#3A6A8A;font-size:9px;letter-spacing:0.08em">Action</label>
+                <input id="actionAction" type="text" placeholder="read_file" class="input" style="margin-top:3px" />
+              </div>
+            </div>
+            <div style="margin-top:6px">
+              <label style="color:#3A6A8A;font-size:9px;letter-spacing:0.08em">Params (JSON)</label>
+              <textarea id="actionParams" rows="2" placeholder='{"path": "/etc/hosts"}' class="input" style="resize:vertical;min-height:40px;margin-top:3px"></textarea>
+            </div>
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="field-label">Max Runs (-1 = unlimited)</label>
+          <input id="maxRuns" type="number" value="-1" class="input" style="width:100px" />
+        </div>
+
+        <button onclick="scheduleTask()" id="scheduleBtn" style="width:100%;padding:9px;border-radius:3px;background:#00C8FF0C;border:1px solid #00C8FF;color:#00C8FF;font-size:11px;letter-spacing:0.12em;margin-top:6px">➕ SCHEDULE TASK</button>
+        <div id="scheduleResult" style="margin-top:8px;font-size:10px;min-height:20px"></div>
+      </div>
+
+      <!-- Right: Task List -->
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <!-- Filter bar -->
+        <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
+          <span style="color:#3A6A8A;font-size:9px;letter-spacing:0.1em;margin-right:6px">FILTER:</span>
+          <button class="filter-btn active" data-filter="" onclick="setFilter('')">ALL</button>
+          <button class="filter-btn" data-filter="active" onclick="setFilter('active')">ACTIVE</button>
+          <button class="filter-btn" data-filter="running" onclick="setFilter('running')">RUNNING</button>
+          <button class="filter-btn" data-filter="paused" onclick="setFilter('paused')">PAUSED</button>
+          <button class="filter-btn" data-filter="completed" onclick="setFilter('completed')">COMPLETED</button>
+          <button class="filter-btn" data-filter="failed" onclick="setFilter('failed')">FAILED</button>
+          <button class="filter-btn" data-filter="cancelled" onclick="setFilter('cancelled')">CANCELLED</button>
+          <div style="margin-left:auto;display:flex;gap:4px">
+            <button onclick="refreshTasks()" style="padding:3px 10px;background:#08101A;border:1px solid #0C1E2E;color:#3A6A8A;border-radius:2px;font-size:10px">↺</button>
+          </div>
+        </div>
+
+        <!-- Task list -->
+        <div id="taskList" style="flex:1;overflow-y:auto;min-height:400px">
+          <div style="color:#1A3A50;text-align:center;padding:60px 20px;font-size:11px">Loading tasks…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API = '/api';
+    let currentFilter = '';
+    let selectedType = 'cron';
+    let selectedMode = 'command';
+    let expandedTask = null;
+    let pollTimer = null;
+
+    document.addEventListener('DOMContentLoaded', () => { refresh(); pollTimer = setInterval(refresh, 5000); });
+
+    function selectType(t) {
+      selectedType = t;
+      document.querySelectorAll('.type-btn').forEach(b => b.classList.toggle('active', b.dataset.type === t));
+      document.getElementById('scheduleField').style.display = t === 'oneshot' ? 'none' : 'block';
+    }
+
+    function selectMode(m) {
+      selectedMode = m;
+      document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
+      document.getElementById('taskCommand').style.display = m === 'command' ? 'block' : 'none';
+      document.getElementById('actionInput').style.display = m === 'action' ? 'block' : 'none';
+    }
+
+    async function api(method, path, body) {
+      const opts = { method, headers: { 'Content-Type': 'application/json' } };
+      if (body) opts.body = JSON.stringify(body);
+      const r = await fetch(API + path, opts);
+      return r.json();
+    }
+
+    function escapeHtml(s) {
+      if (!s) return '';
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function getStatusColor(s) {
+      const m = { active:'#00FF88', running:'#00C8FF', paused:'#FFB830', completed:'#00FF88', failed:'#FF4455', cancelled:'#3A6A8A', pending:'#3A6A8A' };
+      return m[s] || '#3A6A8A';
+    }
+
+    function getTypeColor(t) {
+      const m = { cron:'#00C8FF', oneshot:'#FFB830', queue:'#7B68EE' };
+      return m[t] || '#3A6A8A';
+    }
+
+    async function refresh() {
+      await loadStats();
+      await loadTasks();
+    }
+
+    async function loadStats() {
+      try {
+        const d = await api('GET', '/stats');
+        if (!d.success) return;
+        document.getElementById('statTotal').textContent = d.total ?? '—';
+        document.getElementById('statActive').textContent = d.active ?? '—';
+        document.getElementById('statRunning').textContent = d.running ?? '—';
+        document.getElementById('statPaused').textContent = d.paused ?? '—';
+        document.getElementById('statCompleted').textContent = d.completed ?? '—';
+        document.getElementById('statFailed').textContent = d.failed ?? '—';
+
+        const badge = document.getElementById('schedulerStatusBadge');
+        if (d.scheduler_running) {
+          badge.textContent = '● RUNNING ' + fmtUptime(d.scheduler_uptime);
+          badge.style.background = '#00FF880C'; badge.style.border = '1px solid #00FF8833'; badge.style.color = '#00FF88';
+          document.getElementById('schedulerToggleBtn').textContent = '■ STOP';
+        } else {
+          badge.textContent = '○ STOPPED';
+          badge.style.background = '#FF445508'; badge.style.border = '1px solid #FF445533'; badge.style.color = '#FF4455';
+          document.getElementById('schedulerToggleBtn').textContent = '▶ START';
+        }
+      } catch(e) {}
+    }
+
+    function fmtUptime(s) {
+      if (!s) return '0s';
+      const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60;
+      return h ? h+'h '+m+'m' : m ? m+'m '+sec+'s' : sec+'s';
+    }
+
+    async function loadTasks() {
+      try {
+        const params = currentFilter ? '?status='+currentFilter : '';
+        const d = await api('GET', '/tasks'+params);
+        if (!d.success) return;
+        renderTasks(d.tasks || []);
+      } catch(e) {}
+    }
+
+    function renderTasks(tasks) {
+      const el = document.getElementById('taskList');
+      if (!tasks.length) {
+        el.innerHTML = '<div style="color:#1A3A50;text-align:center;padding:60px 20px;font-size:11px">No tasks found.</div>';
+        return;
+      }
+      el.innerHTML = tasks.map(t => {
+        const ex = expandedTask === t.id;
+        const sc = getStatusColor(t.status);
+        const tc = getTypeColor(t.type);
+        const nr = t.next_run_at ? new Date(t.next_run_at*1000).toLocaleString() : '—';
+        const lr = t.last_run_at ? new Date(t.last_run_at*1000).toLocaleString() : 'Never';
+        return `<div class="task-card" style="border-left:3px solid ${sc}">
+          <div class="task-header" onclick="toggleEx('${t.id}')">
+            <span style="color:${tc};font-size:9px;font-family:'Rajdhani',monospace;font-weight:700;min-width:44px">${t.type.toUpperCase()}</span>
+            <span style="flex:1;color:#B8D8F0;font-size:12px">${escapeHtml(t.name)}</span>
+            <span class="status-badge" style="background:${sc}0C;border:1px solid ${sc}33;color:${sc}">${t.status.toUpperCase()}</span>
+            <span style="color:#3A6A8A;font-size:9px">#${t.run_count}</span>
+            <span style="color:#1A3A50;font-size:11px">${ex?'▼':'▶'}</span>
+          </div>
+          ${ex ? `<div class="task-body">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;font-size:10px;line-height:1.8">
+              <div><span style="color:#3A6A8A">ID:</span> <span style="color:#00C8FF;font-size:9px">${t.id.slice(0,8)}…</span></div>
+              <div><span style="color:#3A6A8A">Created:</span> <span style="color:#B8D8F0">${new Date(t.created_at*1000).toLocaleString()}</span></div>
+              <div><span style="color:#3A6A8A">Next Run:</span> <span style="color:#B8D8F0">${nr}</span></div>
+              <div><span style="color:#3A6A8A">Last Run:</span> <span style="color:#B8D8F0">${lr}</span></div>
+              <div><span style="color:#3A6A8A">Schedule:</span> <span style="color:#FFB830">${escapeHtml(t.schedule_expr||'—')}</span></div>
+              <div><span style="color:#3A6A8A">Max Runs:</span> <span style="color:#B8D8F0">${t.max_runs===-1?'Unlimited':t.max_runs}</span></div>
+            </div>
+            ${t.command ? `<div style="margin-top:8px;padding:6px 10px;background:#030609;border:1px solid #0C1E2E;border-radius:3px"><span style="color:#3A6A8A;font-size:9px">COMMAND</span><pre style="color:#B8D8F0;font-size:10px;margin:4px 0 0;white-space:pre-wrap;word-break:break-all">${escapeHtml(t.command)}</pre></div>` : ''}
+            ${t.action && Object.keys(t.action).length ? `<div style="margin-top:6px;padding:6px 10px;background:#030609;border:1px solid #0C1E2E;border-radius:3px"><span style="color:#3A6A8A;font-size:9px">ACTION</span><pre style="color:#B8D8F0;font-size:10px;margin:4px 0 0;white-space:pre-wrap;word-break:break-all">${escapeHtml(JSON.stringify(t.action,null,2))}</pre></div>` : ''}
+            <div style="display:flex;gap:4px;margin-top:10px">
+              ${t.status==='active' ? `<button class="action-btn pause" onclick="event.stopPropagation();doAction('pause','${t.id}')">⏸ PAUSE</button>` : ''}
+              ${t.status==='paused' ? `<button class="action-btn resume" onclick="event.stopPropagation();doAction('resume','${t.id}')">▶ RESUME</button>` : ''}
+              ${!['cancelled','completed'].includes(t.status) ? `<button class="action-btn danger" onclick="event.stopPropagation();doAction('cancel','${t.id}')">✕ CANCEL</button>` : ''}
+              <button class="action-btn danger" onclick="event.stopPropagation();doAction('delete','${t.id}')">🗑 DELETE</button>
+            </div>
+          </div>` : ''}
+        </div>`;
+      }).join('');
+    }
+
+    function toggleEx(id) { expandedTask = expandedTask === id ? null : id; loadTasks(); }
+
+    function setFilter(f) {
+      currentFilter = f;
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === f));
+      loadTasks();
+    }
+
+    function refreshTasks() { refresh(); }
+
+    async function toggleScheduler() {
+      const btn = document.getElementById('schedulerToggleBtn');
+      const isStart = btn.textContent.includes('START');
+      try {
+        await api('POST', isStart ? '/scheduler/start' : '/scheduler/stop');
+        await loadStats();
+      } catch(e) {}
+    }
+
+    async function doAction(action, taskId) {
+      try {
+        const d = await api('POST', '/tasks/'+taskId+'/'+action);
+        if (d.success) { refresh(); }
+      } catch(e) {}
+    }
+
+    async function scheduleTask() {
+      const name = document.getElementById('taskName').value.trim();
+      if (!name) { showRes('Task name is required', 'error'); return; }
+      const command = selectedMode === 'command' ? document.getElementById('taskCommand').value.trim() : '';
+      let action = null;
+      if (selectedMode === 'action') {
+        const skill = document.getElementById('actionSkill').value.trim();
+        const act = document.getElementById('actionAction').value.trim();
+        let params = {};
+        try { params = JSON.parse(document.getElementById('actionParams').value.trim()||'{}'); } catch(e) { showRes('Invalid JSON in params','error'); return; }
+        if (skill && act) action = { skill, action: act, params };
+      }
+      if (!command && !action) { showRes('Provide a command or action','error'); return; }
+      const expr = document.getElementById('scheduleExpr').value.trim()||null;
+      const maxRuns = parseInt(document.getElementById('maxRuns').value)||-1;
+      const btn = document.getElementById('scheduleBtn');
+      btn.disabled = true; btn.textContent = 'SCHEDULING…';
+      try {
+        const d = await api('POST', '/schedule', { name, type: selectedType, schedule_expr: expr, command: command||undefined, action: action||undefined, max_runs: maxRuns });
+        if (d.success) {
+          showRes('✓ Task scheduled: '+d.task_id.slice(0,8)+'…','success');
+          document.getElementById('taskName').value = '';
+          document.getElementById('taskCommand').value = '';
+          document.getElementById('scheduleExpr').value = '';
+          refresh();
+        } else { showRes('✗ '+(d.error||'Unknown'),'error'); }
+      } catch(e) { showRes('✗ Request failed: '+e.message,'error'); }
+      btn.disabled = false; btn.textContent = '➕ SCHEDULE TASK';
+    }
+
+    function showRes(msg, type) {
+      const el = document.getElementById('scheduleResult');
+      el.textContent = msg;
+      el.style.color = type === 'error' ? '#FF4455' : '#00FF88';
+      setTimeout(() => el.textContent = '', 5000);
+    }
+  </script>
+</body>
+</html>

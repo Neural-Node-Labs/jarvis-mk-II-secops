@@ -17,11 +17,16 @@ FROM kalilinux/kali-rolling AS runtime
 
 # ── System packages: added core tools needed for SecOps & System skills ───────
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        kali-defaults \
+        kali-grant-root \
+        nmap \
+        hydra \
+        john \
+        sqlmap \
         nginx \
         supervisor \
         wget \
         # Dependencies for network_recon, port_scanner, and dns_lookup
-        nmap \
         dnsutils \
         whois \
         # Dependencies for cryptographic/SSL tools and compilation if needed
@@ -35,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         npm \
         python3-venv \
         python3 \
+            python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Python dependencies ───────────────────────────────────────────────────────
