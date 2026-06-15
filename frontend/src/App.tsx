@@ -132,14 +132,38 @@ const THEME_KRAKEN: Theme = {
   fontImport:   "@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Cinzel:wght@400;600;800;900&display=swap');",
   fontMono:     "'Share Tech Mono', monospace",
   fontHeader:   "'Cinzel', serif",
-  glyph:        "⛧",
-  wordmark:     "KRAKEN",
-  subtitle:     "KING OF HELL · DOMINION OVER THIS INFRASTRUCTURE",
-  tagline:      "BY ROYAL COMPACT · TRESPASSERS ARE CLAIMED",
+
+  // Identity Branding
+  glyph:        "🔱", // Or 🦑 / ♇ (Pluto/Hades symbol fits a subterranean king, but octopus/squid fits Kraken)
+  wordmark:     "THE KRAKEN",
+  subtitle:     "LORD OF THE ABYSS · DOMINION OVER THIS INFRASTRUCTURE",
+  tagline:      "FROM THE DEEP TRENCHES · YOUR DATA IS CLAIMED",
   scanline:     "#FF450033",
 };
 
+const THEME_ARCHITECT: Theme = {
+  bg:           "#000502", bgDeep: "#000201", bgPanel: "#021206", bgCard: "#041A0A", bgCardHover: "#06260F",
+  accent:       "#00FF66", accentDim: "#006629", accentGlow: "#00FF6622", accentGlow2: "#00FF6650",
+  warm:         "#33FF00", warmDim: "#143300",
+  gold:         "#ADFF2F", goldDim: "#223300",
+  textPri:      "#D0FFD6", textSec: "#00AA44", textDim: "#00441B",
+  border:       "#03220C", borderMid: "#064417", borderHi: "#00FF6644",
+  ok:           "#00FF66", okDim: "#00330D",
+  err:          "#FF3333", errDim: "#330000",
+  warn:         "#FFFF00", warnDim: "#333300",
+  react:        "#00E5FF", reactDim: "#002E33",
+  fontImport:   "@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&family=Orbitron:wght@500;700;900&display=swap');",
+  fontMono:     "'Fira Code', monospace",
+  fontHeader:   "'Orbitron', sans-serif",
+  glyph:        "📐", // system building block icon
+  wordmark:     "ARCHITECT",
+  subtitle:     "SYSTEM CORE · LOGICAL INFRASTRUCTURE ANALYSIS",
+  tagline:      "BLUEPRINTING THE MATRIX · ORDER FROM CHAOS",
+  scanline:     "#00FF6622",
+};
+
 const THEMES: Record<string, Theme> = {
+  architect:  THEME_ARCHITECT,
   jarvis:  THEME_JARVIS,
   omnikon: THEME_OMNIKON,
   kraken:  THEME_KRAKEN,
@@ -164,7 +188,13 @@ function applyTheme(id: string) {
 const PERSONA_META: Record<string, { name: string; tagline: string; icon: string; color: string }> = {
   jarvis:  { name: "Mighty Jarvis MKII",  tagline: "Confidence, precision, loyalty to the mission.",   icon: "◈", color: THEME_JARVIS.accent },
   omnikon: { name: "OMNIKON",             tagline: "Neon ghost in the grid. Run hot, signal over noise.", icon: "⌬", color: THEME_OMNIKON.accent },
-  kraken:  { name: "KRAKEN, King of Hell",tagline: "Absolute command. Contempt for sloppy work.",       icon: "⛧", color: THEME_KRAKEN.accent },
+  kraken:  { name: "KRAKEN, King of Hell",tagline: "Absolute command. Contempt for sloppy work.",       icon: "🔱", color: THEME_KRAKEN.accent },
+  architect: {
+    name: "The Architect",
+    tagline: "Structure, logic, and Blueprinting perfection.",
+    icon: "📐", // or "◈" depending on your preference
+    color: THEME_ARCHITECT.accent
+  },
 };
 
 const PERSONA_KEY = "jarvis_persona";
@@ -2731,6 +2761,8 @@ export default function App() {
   const [tokenLog,        setTokenLog]        = useState<TokenSnapshot[]>([]);
   const [commandLog,      setCommandLog]      = useState<CommandEntry[]>([]);
   const cmdCounterRef = useRef(0);
+
+
   // Instructions
   const [instructions,    setInstructions]    = useState<Instruction[]>(() => loadInstructions());
   // Memory toggle — when false, memory is NOT sent to LLM
