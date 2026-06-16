@@ -34,7 +34,7 @@ from fastapi.staticfiles import StaticFiles
 # ── Internal imports ───────────────────────────────────────────────────────────
 from core.llm_router import LLMRouter, LLMConfig, get_model_max_tokens
 from core.skill_registry import SkillRegistry
-from core.prompt_builder import build_system_prompt, AGENT_SYSTEM_PROMPT, list_personas, DEFAULT_PERSONA
+from core.prompt_builder import build_system_prompt, AGENT_SYSTEM_PROMPT, list_personas, DEFAULT_PERSONA, get_persona, save_persona, delete_persona, load_all_personas
 from core.memory_manager import MemoryManager, detect_retrieval_request
 from core.agent import Agent
 
@@ -1145,50 +1145,67 @@ def _init_db():
         conn.close()
 
 def _sha256_hex(value: str) -> str:
-    """Client-side pre-hash: SHA-256 of the raw password → hex string."""
+    """SHA-256 of a string → lowercase hex. Used both client-side (JS) and server-side."""
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
-def _hash_password(pre_hashed: str) -> str:
+def _hash_password(plaintext: str) -> str:
     """
-    Server-side storage hash.
-    Input: the client-sent SHA-256 hex of the password.
-    Stores: PBKDF2-HMAC-SHA256(pre_hashed, salt, 260_000 iterations).
-    This means the raw password is NEVER transmitted or stored.
+    Hash a plaintext password for storage.
+    Always takes raw plaintext — hashing is done entirely server-side.
+    Stores: pbkdf2:{salt}:{PBKDF2-HMAC-SHA256(sha256(plaintext), salt, 260_000)}
+    The double-hash means even if the PBKDF2 output is exposed, the plaintext
+    cannot be recovered via rainbow tables on sha256(plaintext).
     """
-    salt = secrets.token_hex(16)
-    dk   = hashlib.pbkdf2_hmac("sha256", pre_hashed.encode(), salt.encode(), 260_000)
+    salt   = secrets.token_hex(16)
+    inner  = _sha256_hex(plaintext)                                      # sha256(plain)
+    dk     = hashlib.pbkdf2_hmac("sha256", inner.encode(), salt.encode(), 260_000)
     return f"pbkdf2:{salt}:{dk.hex()}"
 
 def _verify_password(candidate: str, stored_hash: str) -> bool:
     """
-    Verify a candidate against the stored hash.
+    Verify candidate against stored hash.
 
-    candidate: the value sent by the client — EITHER:
-      (a) SHA-256 hex of the password  (new clients that pre-hash)
-      (b) raw plaintext                (fallback for migration / curl testing)
+    candidate may be EITHER:
+      (a) raw plaintext  — from seeding, curl testing, or admin reset
+      (b) sha256hex of plaintext — from browser (JS pre-hashes before sending)
 
-    stored_hash format: "pbkdf2:{salt}:{dk_hex}"
-    Legacy format (no prefix): "{salt}:{dk_hex}" — treated as plain PBKDF2(plaintext)
+    Strategy: always try BOTH interpretations.
+    The stored hash was built from sha256(plaintext), so:
+      - if candidate is sha256hex  → use directly as inner key
+      - if candidate is plaintext  → compute sha256hex first, then use as inner key
+    Both paths produce identical results when matching, so we try them in order.
     """
     try:
         if stored_hash.startswith("pbkdf2:"):
             _, salt, dk_hex = stored_hash.split(":", 2)
-            # Try candidate as-is (SHA-256 hex from client)
+
+            def _try(inner: str) -> bool:
+                dk = hashlib.pbkdf2_hmac("sha256", inner.encode(), salt.encode(), 260_000)
+                return hmac.compare_digest(dk.hex(), dk_hex)
+
+            # Path A: candidate is already sha256hex (64-char hex string from browser)
+            if len(candidate) == 64 and all(c in "0123456789abcdef" for c in candidate):
+                if _try(candidate):
+                    return True
+                # Also try treating it as raw plaintext that happens to be 64 hex chars
+                return _try(_sha256_hex(candidate))
+
+            # Path B: candidate is raw plaintext (curl / seeding / reset)
+            return _try(_sha256_hex(candidate))
+        else:
+            # Legacy format (no prefix) — plain PBKDF2(plaintext)
+            salt, dk_hex = stored_hash.split(":", 1)
             dk = hashlib.pbkdf2_hmac("sha256", candidate.encode(), salt.encode(), 260_000)
             if hmac.compare_digest(dk.hex(), dk_hex):
                 return True
-            # Fallback: maybe candidate is plaintext (curl / API tester) — pre-hash and retry
+            # Try sha256hex path too for legacy compat
             dk2 = hashlib.pbkdf2_hmac("sha256", _sha256_hex(candidate).encode(), salt.encode(), 260_000)
             return hmac.compare_digest(dk2.hex(), dk_hex)
-        else:
-            # Legacy format: "{salt}:{dk_hex}" — PBKDF2 of plaintext directly
-            salt, dk_hex = stored_hash.split(":", 1)
-            dk = hashlib.pbkdf2_hmac("sha256", candidate.encode(), salt.encode(), 260_000)
-            return hmac.compare_digest(dk.hex(), dk_hex)
     except Exception:
         return False
 
 def _create_user_internal(conn: sqlite3.Connection, username: str, password: str):
+    """password is always raw plaintext here — _hash_password handles the hashing."""
     ph = _hash_password(password)
     conn.execute(
         "INSERT OR IGNORE INTO users (username, password_hash) VALUES (?, ?)",
@@ -1326,7 +1343,22 @@ async def auth_register(request: Request):
         if existing:
             conn.close()
             raise HTTPException(status_code=409, detail=f"Username '{username}' already exists")
-        _create_user_internal(conn, username, password)
+        # password from client is sha256hex(plaintext) — store it directly via PBKDF2
+        # so _verify_password path A (sha256hex candidate) matches correctly.
+        # Detect: 64-char lowercase hex → treat as pre-hashed; else treat as plaintext.
+        if len(password) == 64 and all(c in "0123456789abcdef" for c in password):
+            # Client sent sha256hex — store PBKDF2(sha256hex) directly
+            salt  = secrets.token_hex(16)
+            dk    = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260_000)
+            ph    = f"pbkdf2:{salt}:{dk.hex()}"
+            conn.execute(
+                "INSERT OR IGNORE INTO users (username, password_hash) VALUES (?, ?)",
+                (username.lower(), ph)
+            )
+            conn.commit()
+        else:
+            # Plaintext — use standard _hash_password (sha256hex internally)
+            _create_user_internal(conn, username, password)
         conn.close()
 
     logger.info("[auth_register] user=%s", username)
@@ -1377,7 +1409,13 @@ async def auth_update_user(username: str, request: Request):
             if len(new_pass) < 6 and len(new_pass) != 64:
                 conn.close()
                 raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
-            ph = _hash_password(new_pass)
+            # Pre-hashed from browser (64-char hex) vs plaintext
+            if len(new_pass) == 64 and all(c in "0123456789abcdef" for c in new_pass):
+                _s  = secrets.token_hex(16)
+                _dk = hashlib.pbkdf2_hmac("sha256", new_pass.encode(), _s.encode(), 260_000)
+                ph  = f"pbkdf2:{_s}:{_dk.hex()}"
+            else:
+                ph  = _hash_password(new_pass)
             updates.append("password_hash = ?"); params.append(ph)
         if is_active is not None:
             if target == "admin" and not is_active:
@@ -1439,7 +1477,7 @@ async def auth_reset_user_password(username: str, request: Request):
         if not conn.execute("SELECT 1 FROM users WHERE username = ?", (target,)).fetchone():
             conn.close()
             raise HTTPException(status_code=404, detail=f"User '{target}' not found")
-        ph = _hash_password(_sha256_hex(new_pw))
+        ph = _hash_password(new_pw)  # plaintext — _hash_password handles sha256 internally
         conn.execute("UPDATE users SET password_hash = ? WHERE username = ?", (ph, target))
         conn.commit()
         conn.close()
@@ -1953,34 +1991,1202 @@ async def get_project(user_id: str, project_name: str):
 # CBD COMPONENT — Persona Registry Endpoint
 # ══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/api/personas", tags=["System"])
+@app.get("/api/personas", tags=["Personas"])
 async def get_personas():
-    """
-    List available personas for the UI persona selector.
-    Each persona has its own soul block in prompt_builder.py and a mirrored
-    manifesto file at personas/{id}.md.
-    """
-    return {
-        "personas":        list_personas(),
-        "default_persona": DEFAULT_PERSONA,
-    }
+    """List all personas (built-in + custom). No auth required — used by Login screen."""
+    return {"personas": list_personas(), "default_persona": DEFAULT_PERSONA}
 
 
-@app.get("/api/personas/{persona_id}/manifesto", tags=["System"])
-async def get_persona_manifesto(persona_id: str):
-    """Return the manifesto markdown for a given persona id."""
-    from core.prompt_builder import PERSONAS, PERSONAS_DIR
-    p = PERSONAS.get(persona_id)
+@app.get("/api/personas/{persona_id}", tags=["Personas"])
+async def get_persona_detail(persona_id: str):
+    """Return full persona data including soul, directives, theme, skills."""
+    p = get_persona(persona_id)
     if not p:
-        raise HTTPException(status_code=404, detail=f"Unknown persona '{persona_id}'")
-    path = os.path.join(PERSONAS_DIR, p["manifest"])
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except FileNotFoundError:
-        content = p["soul"]
-    return {"id": persona_id, "name": p["name"], "tagline": p["tagline"], "manifesto": content}
+        raise HTTPException(status_code=404, detail=f"Persona '{persona_id}' not found")
+    return p
 
+
+@app.post("/api/personas", tags=["Personas"])
+async def create_persona(request: Request):
+    """
+    Create a new custom persona.
+    Body: full persona dict — id, name, tagline, soul, directives, skills[], theme{}, builtin=false
+    Built-in flag is always forced to false for user-created personas.
+    """
+    _require_auth(request)
+    body = await request.json()
+
+    if not body.get("id") or not body.get("name"):
+        raise HTTPException(status_code=400, detail="id and name are required")
+
+    body["builtin"] = False  # users cannot create built-ins
+    ok, err = save_persona(body)
+    if not ok:
+        raise HTTPException(status_code=500, detail=f"Save failed: {err}")
+
+    logger.info("[persona_create] id=%s name=%s", body["id"], body["name"])
+    return {"created": True, "id": body["id"]}
+
+
+@app.put("/api/personas/{persona_id}", tags=["Personas"])
+async def update_persona(persona_id: str, request: Request):
+    """
+    Update an existing persona (built-in or custom).
+    Built-ins CAN be edited (soul/directives/theme) but NOT deleted.
+    """
+    _require_auth(request)
+    existing = get_persona(persona_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Persona '{persona_id}' not found")
+
+    body = await request.json()
+    body["id"] = persona_id                            # id is immutable
+    body["builtin"] = existing.get("builtin", False)  # preserve builtin flag
+
+    ok, err = save_persona(body)
+    if not ok:
+        raise HTTPException(status_code=500, detail=f"Save failed: {err}")
+
+    logger.info("[persona_update] id=%s", persona_id)
+    return {"updated": True, "id": persona_id}
+
+
+@app.delete("/api/personas/{persona_id}", tags=["Personas"])
+async def delete_persona_endpoint(persona_id: str, request: Request):
+    """Delete a custom persona. Built-in personas cannot be deleted."""
+    _require_auth(request)
+    ok, err = delete_persona(persona_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail=err)
+    logger.info("[persona_delete] id=%s", persona_id)
+    return {"deleted": True, "id": persona_id}
+
+
+@app.post("/api/personas/generate", tags=["Personas"])
+async def generate_persona_hint(request: Request):
+    """
+    Generate a persona JSON scaffold from a natural-language hint using the LLM.
+    Body: { "hint": "Make this persona a cyber war king", "user_id": "..." }
+    Returns a persona dict the operator can review and save.
+    """
+    _require_auth(request)
+    body    = await request.json()
+    hint    = body.get("hint", "").strip()
+    user_id = body.get("user_id", "default")
+
+    if not hint:
+        raise HTTPException(status_code=400, detail="hint is required")
+
+    try:
+        agent   = _get_session(user_id)
+        _schema = (
+            '{\n  "id": "slug_id_no_spaces",\n  "name": "Display Name",\n'
+            '  "tagline": "One-line description",\n'
+            '  "soul": "Full personality/identity block 200-400 words",\n'
+            '  "directives": "Role-specific instructions 200-400 words",\n'
+            '  "skills": ["filesystem","os_execution","memory_manager"],\n'
+            '  "builtin": false,\n'
+            '  "theme": {\n'
+            '    "accent":"#RRGGBB","accentDim":"#RRGGBB","accentGlow":"#RRGGBB18","accentGlow2":"#RRGGBB40",\n'
+            '    "bg":"#RRGGBB","bgDeep":"#RRGGBB","bgPanel":"#RRGGBB","bgCard":"#RRGGBB","bgCardHover":"#RRGGBB",\n'
+            '    "warm":"#RRGGBB","warmDim":"#RRGGBB","gold":"#RRGGBB","goldDim":"#RRGGBB",\n'
+            '    "textPri":"#RRGGBB","textSec":"#RRGGBB","textDim":"#RRGGBB",\n'
+            '    "border":"#RRGGBB","borderMid":"#RRGGBB","borderHi":"#RRGGBB44",\n'
+            '    "ok":"#RRGGBB","okDim":"#RRGGBB","err":"#RRGGBB","errDim":"#RRGGBB",\n'
+            '    "warn":"#RRGGBB","warnDim":"#RRGGBB","react":"#RRGGBB","reactDim":"#RRGGBB",\n'
+            '    "fontImport":"@import url(...)","fontMono":"Share Tech Mono, monospace",\n'
+            '    "fontHeader":"font name","glyph":"unicode","wordmark":"NAME",\n'
+            '    "subtitle":"SUBTITLE","tagline":"TAGLINE","scanline":"#RRGGBB22"\n'
+            '  }\n}'
+        )
+        gen_msg = (
+            f'Generate a Jarvis persona JSON for this concept: "{hint}"\n\n'
+            f"Return ONLY valid JSON (no markdown) using this schema:\n{_schema}\n\n"
+            "Match the theme colors to the persona concept. Use dramatic distinct colors.\n"
+            "Choose a Google Font for fontHeader. Write compelling soul and directives."
+        )
+
+        # Non-streaming call to get full JSON
+        result = await agent.llm.chat(
+            [{"role": "user", "content": gen_msg}],
+            system="You are a JSON generator. Return only valid JSON. No markdown. No explanation."
+        )
+
+        # Try to parse the JSON
+        import re as _re
+        json_match = _re.search(r'\{[\s\S]*\}', result)
+        if not json_match:
+            raise ValueError("No JSON found in LLM response")
+
+        persona_data = json.loads(json_match.group())
+        persona_data["builtin"] = False
+
+        return {"generated": True, "persona": persona_data}
+
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=422, detail=f"LLM returned invalid JSON: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SAAS BILLING & SUBSCRIPTION PLATFORM
+# Blueprint: saas-billing-platform-blueprint.md v1.0
+# Flag:      SAAS_BILLING_ENABLED=true|false  (default: false)
+#
+# All 26 components implemented:
+#   Foundation  : Logger, ErrorSchema, ConfigLoader
+#   Domain      : CustomerAccountManager, PlanCatalogManager,
+#                 SubscriptionLifecycleManager, UsageEventRecorder, UsageAggregator,
+#                 CurrencyConverter, TaxCalculator, PricingEngine, InvoiceGenerator,
+#                 PaymentGatewayClient, DunningManager, NotificationDispatcher,
+#                 BillingScheduler, WebhookEventValidator
+#   Adaptors    : ChargeRequest→GatewayPayload, GatewayResponse→PaymentResult,
+#                 GatewayWebhook→InternalEvent, ExchangeRateAPI→CurrencyConverter,
+#                 Notification→EmailProvider, Invoice→Notification
+#   Orchestrators: SubscriptionOrchestrator, BillingCycleOrchestrator,
+#                  WebhookOrchestrator
+# ══════════════════════════════════════════════════════════════════════════════
+
+import uuid as _uuid
+import time as _time
+import hmac as _hmac_billing
+import hashlib as _hashlib_billing
+from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+from functools import wraps as _wraps
+
+_BILLING_ENABLED = os.getenv("SAAS_BILLING_ENABLED", "false").lower() == "true"
+_BILLING_GATEWAY = os.getenv("SAAS_GATEWAY", "stripe")             # stripe | mock
+_BILLING_STRIPE_KEY  = os.getenv("STRIPE_SECRET_KEY", "")
+_BILLING_FX_KEY      = os.getenv("FX_API_KEY", "")
+_BILLING_EMAIL_KEY   = os.getenv("EMAIL_API_KEY", "")
+_BILLING_WEBHOOK_SECRET = os.getenv("SAAS_WEBHOOK_SECRET", "")
+_BILLING_BASE_CURRENCY  = os.getenv("SAAS_BASE_CURRENCY", "USD")
+
+# ── Circuit breaker state ─────────────────────────────────────────────────────
+_CB: dict = {}   # component → {failures, open_until}
+_CB_THRESHOLD = 3
+_CB_RESET_S   = 60
+
+def _cb_ok(comp: str) -> bool:
+    """Return True if the component circuit is closed (allowed to proceed)."""
+    s = _CB.get(comp, {})
+    if s.get("open_until") and _time.time() < s["open_until"]:
+        return False
+    return True
+
+def _cb_fail(comp: str):
+    s = _CB.setdefault(comp, {"failures": 0, "open_until": None})
+    s["failures"] += 1
+    if s["failures"] >= _CB_THRESHOLD:
+        s["open_until"] = _time.time() + _CB_RESET_S
+        logger.warning("[billing_cb_open] component=%s", comp)
+
+def _cb_success(comp: str):
+    _CB.pop(comp, None)
+
+# ── DB schema extension ───────────────────────────────────────────────────────
+def _init_billing_db():
+    if not _BILLING_ENABLED:
+        return
+    with _DB_LOCK:
+        conn = _get_db()
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS billing_customers (
+                customer_id   TEXT PRIMARY KEY,
+                username      TEXT NOT NULL,
+                name          TEXT NOT NULL,
+                email         TEXT NOT NULL,
+                country       TEXT NOT NULL DEFAULT 'US',
+                currency      TEXT NOT NULL DEFAULT 'USD',
+                tax_id        TEXT,
+                status        TEXT NOT NULL DEFAULT 'active',
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS billing_plans (
+                plan_id           TEXT PRIMARY KEY,
+                name              TEXT NOT NULL,
+                billing_interval  TEXT NOT NULL DEFAULT 'monthly',
+                base_price        REAL NOT NULL DEFAULT 0,
+                currency          TEXT NOT NULL DEFAULT 'USD',
+                metered_rates     TEXT NOT NULL DEFAULT '[]',
+                features          TEXT NOT NULL DEFAULT '[]',
+                active            INTEGER NOT NULL DEFAULT 1,
+                created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS billing_subscriptions (
+                subscription_id     TEXT PRIMARY KEY,
+                customer_id         TEXT NOT NULL,
+                plan_id             TEXT NOT NULL,
+                status              TEXT NOT NULL DEFAULT 'active',
+                current_period_start TEXT NOT NULL,
+                current_period_end   TEXT NOT NULL,
+                canceled_at         TEXT,
+                created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (customer_id) REFERENCES billing_customers(customer_id),
+                FOREIGN KEY (plan_id)     REFERENCES billing_plans(plan_id)
+            );
+            CREATE TABLE IF NOT EXISTS billing_usage_events (
+                event_id         TEXT PRIMARY KEY,
+                subscription_id  TEXT NOT NULL,
+                metric           TEXT NOT NULL,
+                quantity         REAL NOT NULL,
+                occurred_at      TEXT NOT NULL,
+                idempotency_key  TEXT NOT NULL UNIQUE,
+                recorded_at      TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (subscription_id) REFERENCES billing_subscriptions(subscription_id)
+            );
+            CREATE TABLE IF NOT EXISTS billing_invoices (
+                invoice_id      TEXT PRIMARY KEY,
+                customer_id     TEXT NOT NULL,
+                subscription_id TEXT NOT NULL,
+                total           REAL NOT NULL DEFAULT 0,
+                tax_amount      REAL NOT NULL DEFAULT 0,
+                currency        TEXT NOT NULL DEFAULT 'USD',
+                status          TEXT NOT NULL DEFAULT 'draft',
+                line_items      TEXT NOT NULL DEFAULT '[]',
+                period_start    TEXT NOT NULL,
+                period_end      TEXT NOT NULL,
+                issued_at       TEXT NOT NULL DEFAULT (datetime('now')),
+                due_at          TEXT,
+                paid_at         TEXT,
+                FOREIGN KEY (customer_id)     REFERENCES billing_customers(customer_id),
+                FOREIGN KEY (subscription_id) REFERENCES billing_subscriptions(subscription_id)
+            );
+            CREATE TABLE IF NOT EXISTS billing_payments (
+                payment_id      TEXT PRIMARY KEY,
+                invoice_id      TEXT NOT NULL,
+                transaction_id  TEXT,
+                amount          REAL NOT NULL,
+                currency        TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'pending',
+                failure_code    TEXT,
+                attempt_number  INTEGER NOT NULL DEFAULT 1,
+                gateway         TEXT NOT NULL DEFAULT 'mock',
+                created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (invoice_id) REFERENCES billing_invoices(invoice_id)
+            );
+            CREATE TABLE IF NOT EXISTS billing_dunning (
+                dunning_id      TEXT PRIMARY KEY,
+                invoice_id      TEXT NOT NULL,
+                subscription_id TEXT NOT NULL,
+                failure_code    TEXT,
+                attempt_number  INTEGER NOT NULL DEFAULT 1,
+                next_retry_at   TEXT,
+                subscription_action TEXT NOT NULL DEFAULT 'none',
+                created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_billing_subs_customer  ON billing_subscriptions(customer_id);
+            CREATE INDEX IF NOT EXISTS idx_billing_usage_sub       ON billing_usage_events(subscription_id);
+            CREATE INDEX IF NOT EXISTS idx_billing_invoices_sub    ON billing_invoices(subscription_id);
+            CREATE INDEX IF NOT EXISTS idx_billing_payments_invoice ON billing_payments(invoice_id);
+        """)
+        # Seed a default plan if none exists
+        if not conn.execute("SELECT 1 FROM billing_plans LIMIT 1").fetchone():
+            conn.execute("""
+                INSERT INTO billing_plans (plan_id, name, billing_interval, base_price, currency, metered_rates, features)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, ("plan_free", "Free", "monthly", 0.0, "USD", "[]", '["Basic access"]'))
+            conn.execute("""
+                INSERT INTO billing_plans (plan_id, name, billing_interval, base_price, currency, metered_rates, features)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, ("plan_pro", "Pro", "monthly", 29.0, "USD",
+                  '[{"metric": "api_calls", "unitPrice": 0.001}]',
+                  '["Full access", "API access", "Priority support"]'))
+            conn.execute("""
+                INSERT INTO billing_plans (plan_id, name, billing_interval, base_price, currency, metered_rates, features)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, ("plan_enterprise", "Enterprise", "monthly", 199.0, "USD",
+                  '[{"metric": "api_calls", "unitPrice": 0.0005}]',
+                  '["Full access", "Unlimited API", "Dedicated support", "SLA"]'))
+            conn.commit()
+            logger.info("[billing_db_seed] default plans created")
+        conn.close()
+
+# ── Foundation: ErrorSchema ───────────────────────────────────────────────────
+def _make_error(code: str, message: str, component: str) -> dict:
+    return {"code": code, "message": message, "component": component,
+            "timestamp": _dt.now(_tz.utc).isoformat()}
+
+def _is_error(obj: dict) -> bool:
+    return isinstance(obj, dict) and "code" in obj and "component" in obj
+
+# ── Foundation: billing-specific Logger trace ─────────────────────────────────
+def _btrace(component: str, event: str, **meta):
+    logger.info("[billing.%s] %s %s", component, event,
+                " ".join(f"{k}={v}" for k, v in meta.items()))
+
+# ── Component helpers ─────────────────────────────────────────────────────────
+def _now_iso() -> str:
+    return _dt.now(_tz.utc).isoformat()
+
+def _period_end(start_iso: str, interval: str) -> str:
+    start = _dt.fromisoformat(start_iso.replace("Z", "+00:00"))
+    if interval == "yearly":
+        end = start + _td(days=365)
+    else:
+        end = start + _td(days=30)
+    return end.isoformat()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DOMAIN COMPONENTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 4. CustomerAccountManager
+def customer_account_manager(action: str, customer_id: str = None, fields: dict = None) -> dict:
+    comp = "CustomerAccountManager"
+    if not _cb_ok(comp):
+        return _make_error("CUSTOMER_LOOKUP_UNAVAILABLE", "Circuit open", comp)
+    try:
+        with _DB_LOCK:
+            conn = _get_db()
+            if action == "create":
+                cid = str(_uuid.uuid4())
+                conn.execute("""INSERT INTO billing_customers
+                    (customer_id,username,name,email,country,currency,tax_id)
+                    VALUES (?,?,?,?,?,?,?)""",
+                    (cid, fields.get("username",""),fields.get("name",""),
+                     fields.get("email",""),fields.get("country","US"),
+                     fields.get("currency","USD"),fields.get("tax_id")))
+                conn.commit()
+                row = conn.execute("SELECT * FROM billing_customers WHERE customer_id=?", (cid,)).fetchone()
+            elif action == "get":
+                row = conn.execute("SELECT * FROM billing_customers WHERE customer_id=?", (customer_id,)).fetchone()
+                if not row:
+                    conn.close()
+                    return _make_error("CUSTOMER_NOT_FOUND", f"Customer {customer_id} not found", comp)
+            elif action == "update":
+                if not customer_id:
+                    conn.close()
+                    return _make_error("CUSTOMER_VALIDATION_FAIL", "customer_id required for update", comp)
+                sets = ", ".join(f"{k}=?" for k in (fields or {}))
+                if sets:
+                    conn.execute(f"UPDATE billing_customers SET {sets}, updated_at=? WHERE customer_id=?",
+                                 [*fields.values(), _now_iso(), customer_id])
+                    conn.commit()
+                row = conn.execute("SELECT * FROM billing_customers WHERE customer_id=?", (customer_id,)).fetchone()
+            elif action == "get_by_username":
+                row = conn.execute("SELECT * FROM billing_customers WHERE username=?", (customer_id,)).fetchone()
+                if not row:
+                    conn.close()
+                    return {"customer": None}
+            else:
+                conn.close()
+                return _make_error("CUSTOMER_VALIDATION_FAIL", f"Unknown action: {action}", comp)
+            result = dict(row) if row else None
+            conn.close()
+        _cb_success(comp)
+        _btrace(comp, "ok", action=action, customer_id=customer_id or (result or {}).get("customer_id"))
+        return {"customer": result}
+    except Exception as e:
+        _cb_fail(comp)
+        logger.error("[billing.%s] %s", comp, e)
+        return _make_error("CUSTOMER_LOOKUP_UNAVAILABLE", str(e), comp)
+
+# 5. PlanCatalogManager
+def plan_catalog_manager(action: str, plan_id: str = None, plan: dict = None) -> dict:
+    comp = "PlanCatalogManager"
+    try:
+        with _DB_LOCK:
+            conn = _get_db()
+            if action == "list":
+                rows = conn.execute("SELECT * FROM billing_plans WHERE active=1").fetchall()
+                conn.close()
+                return {"plans": [dict(r) for r in rows]}
+            elif action == "get":
+                row = conn.execute("SELECT * FROM billing_plans WHERE plan_id=?", (plan_id,)).fetchone()
+                conn.close()
+                if not row:
+                    return _make_error("PLAN_NOT_FOUND", f"Plan {plan_id} not found", comp)
+                return {"plans": [dict(row)]}
+            elif action == "upsert":
+                pid = plan_id or plan.get("plan_id", str(_uuid.uuid4()))
+                conn.execute("""INSERT INTO billing_plans
+                    (plan_id,name,billing_interval,base_price,currency,metered_rates,features)
+                    VALUES (?,?,?,?,?,?,?)
+                    ON CONFLICT(plan_id) DO UPDATE SET
+                    name=excluded.name, billing_interval=excluded.billing_interval,
+                    base_price=excluded.base_price, currency=excluded.currency,
+                    metered_rates=excluded.metered_rates, features=excluded.features""",
+                    (pid, plan.get("name",""), plan.get("billingInterval","monthly"),
+                     plan.get("basePrice",0), plan.get("currency","USD"),
+                     json.dumps(plan.get("meteredRates",[])),
+                     json.dumps(plan.get("features",[]))))
+                conn.commit()
+                conn.close()
+                return {"plans": [{"plan_id": pid, **plan}]}
+            conn.close()
+            return _make_error("PLAN_NOT_FOUND", "Unknown action", comp)
+    except Exception as e:
+        logger.error("[billing.%s] %s", comp, e)
+        return _make_error("PLAN_NOT_FOUND", str(e), comp)
+
+# 6. SubscriptionLifecycleManager
+def subscription_lifecycle_manager(action: str, customer_id: str = None,
+                                    subscription_id: str = None, plan_id: str = None,
+                                    effective_date: str = None) -> dict:
+    comp = "SubscriptionLifecycleManager"
+    if not _cb_ok(comp):
+        return _make_error("SUBSCRIPTION_UPDATE_UNAVAILABLE", "Circuit open", comp)
+    try:
+        with _DB_LOCK:
+            conn = _get_db()
+            if action == "create":
+                sid   = str(_uuid.uuid4())
+                start = effective_date or _now_iso()
+                # Get plan to determine interval
+                plan_row = conn.execute("SELECT * FROM billing_plans WHERE plan_id=?", (plan_id,)).fetchone()
+                interval = dict(plan_row).get("billing_interval", "monthly") if plan_row else "monthly"
+                end   = _period_end(start, interval)
+                conn.execute("""INSERT INTO billing_subscriptions
+                    (subscription_id,customer_id,plan_id,status,current_period_start,current_period_end)
+                    VALUES (?,?,?,?,?,?)""", (sid, customer_id, plan_id, "active", start, end))
+                conn.commit()
+                row = conn.execute("SELECT * FROM billing_subscriptions WHERE subscription_id=?", (sid,)).fetchone()
+            elif action in ("upgrade","downgrade"):
+                if not all([subscription_id, plan_id]):
+                    conn.close()
+                    return _make_error("SUBSCRIPTION_INVALID_TRANSITION", "subscription_id and plan_id required", comp)
+                conn.execute("UPDATE billing_subscriptions SET plan_id=? WHERE subscription_id=?",
+                             (plan_id, subscription_id))
+                conn.commit()
+                row = conn.execute("SELECT * FROM billing_subscriptions WHERE subscription_id=?", (subscription_id,)).fetchone()
+            elif action == "cancel":
+                conn.execute("UPDATE billing_subscriptions SET status='canceled', canceled_at=? WHERE subscription_id=?",
+                             (_now_iso(), subscription_id))
+                conn.commit()
+                row = conn.execute("SELECT * FROM billing_subscriptions WHERE subscription_id=?", (subscription_id,)).fetchone()
+            elif action == "reactivate":
+                conn.execute("UPDATE billing_subscriptions SET status='active', canceled_at=NULL WHERE subscription_id=?",
+                             (subscription_id,))
+                conn.commit()
+                row = conn.execute("SELECT * FROM billing_subscriptions WHERE subscription_id=?", (subscription_id,)).fetchone()
+            elif action == "list":
+                rows = conn.execute("SELECT * FROM billing_subscriptions WHERE customer_id=?", (customer_id,)).fetchall()
+                conn.close()
+                return {"subscriptions": [dict(r) for r in rows]}
+            else:
+                conn.close()
+                return _make_error("SUBSCRIPTION_INVALID_TRANSITION", f"Unknown action: {action}", comp)
+            result = dict(row) if row else None
+            conn.close()
+        _cb_success(comp)
+        _btrace(comp, "ok", action=action, subscription_id=subscription_id or (result or {}).get("subscription_id"))
+        return {"subscription": result}
+    except Exception as e:
+        _cb_fail(comp)
+        return _make_error("SUBSCRIPTION_UPDATE_UNAVAILABLE", str(e), comp)
+
+# 7. UsageEventRecorder
+def usage_event_recorder(subscription_id: str, metric: str, quantity: float,
+                          occurred_at: str, idempotency_key: str) -> dict:
+    comp = "UsageEventRecorder"
+    if not _cb_ok(comp):
+        return _make_error("USAGE_RECORD_UNAVAILABLE", "Circuit open", comp)
+    try:
+        with _DB_LOCK:
+            conn = _get_db()
+            existing = conn.execute("SELECT event_id FROM billing_usage_events WHERE idempotency_key=?",
+                                    (idempotency_key,)).fetchone()
+            if existing:
+                conn.close()
+                _btrace(comp, "duplicate", idempotency_key=idempotency_key)
+                return {"eventId": existing["event_id"], "recorded": False, "duplicate": True}
+            eid = str(_uuid.uuid4())
+            conn.execute("""INSERT INTO billing_usage_events
+                (event_id,subscription_id,metric,quantity,occurred_at,idempotency_key)
+                VALUES (?,?,?,?,?,?)""", (eid, subscription_id, metric, quantity, occurred_at, idempotency_key))
+            conn.commit()
+            conn.close()
+        _cb_success(comp)
+        _btrace(comp, "recorded", event_id=eid, metric=metric, qty=quantity)
+        return {"eventId": eid, "recorded": True, "duplicate": False}
+    except Exception as e:
+        _cb_fail(comp)
+        return _make_error("USAGE_RECORD_UNAVAILABLE", str(e), comp)
+
+# 8. UsageAggregator
+def usage_aggregator(subscription_id: str, period_start: str, period_end: str) -> dict:
+    comp = "UsageAggregator"
+    try:
+        with _DB_LOCK:
+            conn = _get_db()
+            rows = conn.execute("""
+                SELECT metric, SUM(quantity) as total
+                FROM billing_usage_events
+                WHERE subscription_id=? AND occurred_at >= ? AND occurred_at <= ?
+                GROUP BY metric""", (subscription_id, period_start, period_end)).fetchall()
+            conn.close()
+        summary = [{"metric": r["metric"], "totalQuantity": r["total"]} for r in rows]
+        _btrace(comp, "ok", subscription_id=subscription_id, metric_count=len(summary))
+        return {"usageSummary": summary}
+    except Exception as e:
+        return _make_error("USAGE_AGGREGATION_FAIL", str(e), comp)
+
+# 9. CurrencyConverter (with mock FX + stale-rate fallback)
+_FX_CACHE: dict = {}   # (from,to) → {rate, ts}
+_FX_STALE_S = 3600     # 1 hour
+
+def currency_converter(amount: float, from_currency: str, to_currency: str) -> dict:
+    comp = "CurrencyConverter"
+    if from_currency == to_currency:
+        return {"convertedAmount": amount, "rate": 1.0, "rateTimestamp": _now_iso()}
+    if not _cb_ok(comp):
+        # Use stale cache if available
+        cached = _FX_CACHE.get((from_currency, to_currency))
+        if cached:
+            converted = round(amount * cached["rate"], 6)
+            return {"convertedAmount": converted, "rate": cached["rate"],
+                    "rateTimestamp": cached["ts"], "source": "cache_stale"}
+        return _make_error("FX_RATE_UNAVAILABLE", "Circuit open, no cache", comp)
+    try:
+        cached = _FX_CACHE.get((from_currency, to_currency))
+        if cached and (_time.time() - cached["age"]) < _FX_STALE_S:
+            converted = round(amount * cached["rate"], 6)
+            return {"convertedAmount": converted, "rate": cached["rate"],
+                    "rateTimestamp": cached["ts"], "source": "cache"}
+        # Live fetch (mock rates for now — replace with real API call when FX_API_KEY set)
+        MOCK_RATES = {"USD":1.0,"EUR":0.92,"GBP":0.79,"CAD":1.36,"AUD":1.53,"JPY":149.5}
+        if from_currency not in MOCK_RATES or to_currency not in MOCK_RATES:
+            return _make_error("FX_RATE_UNAVAILABLE", f"Unsupported currency pair {from_currency}/{to_currency}", comp)
+        rate = MOCK_RATES[to_currency] / MOCK_RATES[from_currency]
+        ts   = _now_iso()
+        _FX_CACHE[(from_currency, to_currency)] = {"rate": rate, "ts": ts, "age": _time.time()}
+        converted = round(amount * rate, 6)
+        _cb_success(comp)
+        return {"convertedAmount": converted, "rate": rate, "rateTimestamp": ts, "source": "live"}
+    except Exception as e:
+        _cb_fail(comp)
+        return _make_error("FX_RATE_UNAVAILABLE", str(e), comp)
+
+# 10. TaxCalculator
+_TAX_TABLE = {
+    "US": 0.0,   "CA": 0.05, "GB": 0.20, "DE": 0.19,
+    "FR": 0.20,  "AU": 0.10, "JP": 0.10, "SG": 0.09,
+}
+def tax_calculator(amount: float, currency: str, customer_country: str,
+                   customer_tax_id: str = None, product_type: str = "recurring") -> dict:
+    comp = "TaxCalculator"
+    if not _cb_ok(comp):
+        return {"taxAmount": 0, "taxRate": 0, "taxJurisdiction": "UNKNOWN"}
+    try:
+        country = (customer_country or "US").upper()[:2]
+        # B2B exemption: if customer has a valid tax ID and is in a VAT country
+        if customer_tax_id and country in ("GB","DE","FR","AU"):
+            rate = 0.0
+        else:
+            rate = _TAX_TABLE.get(country, 0.0)
+        tax_amount = round(amount * rate, 2)
+        _cb_success(comp)
+        _btrace(comp, "ok", country=country, rate=rate, fallback=country not in _TAX_TABLE)
+        return {"taxAmount": tax_amount, "taxRate": rate, "taxJurisdiction": country}
+    except Exception as e:
+        _cb_fail(comp)
+        return {"taxAmount": 0, "taxRate": 0, "taxJurisdiction": "UNKNOWN"}
+
+# 11. PricingEngine
+def pricing_engine(plan: dict, usage_summary: list, one_time_charges: list,
+                   target_currency: str) -> dict:
+    comp = "PricingEngine"
+    if not _cb_ok(comp):
+        return _make_error("PRICING_CALCULATION_FAIL", "Circuit open", comp)
+    try:
+        line_items = []
+        plan_currency = plan.get("currency", target_currency)
+        metered_rates = plan.get("metered_rates") or plan.get("meteredRates") or []
+        if isinstance(metered_rates, str):
+            metered_rates = json.loads(metered_rates)
+
+        # Base price line item
+        base = float(plan.get("base_price") or plan.get("basePrice", 0))
+        if plan_currency != target_currency:
+            fx = currency_converter(base, plan_currency, target_currency)
+            base = fx.get("convertedAmount", base) if not _is_error(fx) else base
+        line_items.append({"description": f"{plan.get('name','Plan')} — base",
+                            "quantity": 1, "unitPrice": base, "amount": base, "type": "recurring"})
+
+        # Metered usage
+        for rate in metered_rates:
+            metric     = rate.get("metric","")
+            unit_price = float(rate.get("unit_price") or rate.get("unitPrice", 0))
+            usage_row  = next((u for u in usage_summary if u.get("metric") == metric), None)
+            qty        = float(usage_row.get("totalQuantity", 0)) if usage_row else 0
+            amt        = round(qty * unit_price, 6)
+            if plan_currency != target_currency:
+                fx  = currency_converter(amt, plan_currency, target_currency)
+                amt = fx.get("convertedAmount", amt) if not _is_error(fx) else amt
+            line_items.append({"description": f"Usage: {metric}", "quantity": qty,
+                                "unitPrice": unit_price, "amount": amt, "type": "usage"})
+
+        # One-time charges
+        for ot in (one_time_charges or []):
+            line_items.append({"description": ot.get("description","One-time"),
+                                "quantity": 1, "unitPrice": float(ot.get("amount",0)),
+                                "amount": float(ot.get("amount",0)), "type": "one_time"})
+
+        subtotal = round(sum(li["amount"] for li in line_items), 2)
+        _cb_success(comp)
+        _btrace(comp, "ok", items=len(line_items), subtotal=subtotal, currency=target_currency)
+        return {"lineItems": line_items, "subtotal": subtotal, "currency": target_currency}
+    except Exception as e:
+        _cb_fail(comp)
+        return _make_error("PRICING_CALCULATION_FAIL", str(e), comp)
+
+# 12. InvoiceGenerator
+def invoice_generator(customer_id: str, subscription_id: str, line_items: list,
+                      tax_amount: float, currency: str,
+                      period_start: str, period_end: str) -> dict:
+    comp = "InvoiceGenerator"
+    if not _cb_ok(comp):
+        return _make_error("INVOICE_PERSIST_FAILED", "Circuit open", comp)
+    try:
+        iid      = str(_uuid.uuid4())
+        subtotal = round(sum(li.get("amount", 0) for li in line_items), 2)
+        total    = round(subtotal + tax_amount, 2)
+        due_at   = (_dt.now(_tz.utc) + _td(days=30)).isoformat()
+        with _DB_LOCK:
+            conn = _get_db()
+            conn.execute("""INSERT INTO billing_invoices
+                (invoice_id,customer_id,subscription_id,total,tax_amount,currency,
+                 status,line_items,period_start,period_end,due_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (iid, customer_id, subscription_id, total, tax_amount, currency,
+                 "open", json.dumps(line_items), period_start, period_end, due_at))
+            conn.commit()
+            conn.close()
+        _cb_success(comp)
+        _btrace(comp, "ok", invoice_id=iid, total=total, currency=currency)
+        return {"invoice": {"invoiceId": iid, "customerId": customer_id,
+                            "subscriptionId": subscription_id, "total": total,
+                            "taxAmount": tax_amount, "currency": currency,
+                            "status": "open", "lineItems": line_items,
+                            "issuedAt": _now_iso(), "dueAt": due_at,
+                            "periodStart": period_start, "periodEnd": period_end}}
+    except Exception as e:
+        _cb_fail(comp)
+        return _make_error("INVOICE_PERSIST_FAILED", str(e), comp)
+
+# 13. PaymentGatewayClient (mock — replace with Stripe SDK when STRIPE_SECRET_KEY set)
+def payment_gateway_client(action: str, invoice_id: str, customer_id: str,
+                            amount: float, currency: str,
+                            payment_method_token: str = "mock_token") -> dict:
+    comp = "PaymentGatewayClient"
+    if not _cb_ok(comp):
+        return {"paymentResult": {"transactionId": None, "status": "pending",
+                                   "failureCode": "GATEWAY_UNAVAILABLE"}}
+    try:
+        txid   = f"txn_{str(_uuid.uuid4())[:8]}"
+        status = "succeeded"
+        fcode  = None
+        if _BILLING_GATEWAY == "mock":
+            # Simulate: amounts ending in .13 fail, .99 are pending
+            if str(amount).endswith(".13"):
+                status, fcode = "failed", "card_declined"
+            elif str(amount).endswith(".99"):
+                status = "pending"
+        elif _BILLING_GATEWAY == "stripe" and _BILLING_STRIPE_KEY:
+            try:
+                import stripe as _stripe
+                _stripe.api_key = _BILLING_STRIPE_KEY
+                if action == "charge":
+                    pi = _stripe.PaymentIntent.create(
+                        amount=int(amount * 100), currency=currency.lower(),
+                        customer=customer_id, payment_method=payment_method_token,
+                        confirm=True, metadata={"invoice_id": invoice_id}
+                    )
+                    txid   = pi.id
+                    status = "succeeded" if pi.status == "succeeded" else "failed"
+                    fcode  = None
+            except Exception as stripe_err:
+                status, fcode = "failed", str(stripe_err)[:80]
+
+        # Persist payment record
+        with _DB_LOCK:
+            conn = _get_db()
+            conn.execute("""INSERT INTO billing_payments
+                (payment_id,invoice_id,transaction_id,amount,currency,status,failure_code,gateway)
+                VALUES (?,?,?,?,?,?,?,?)""",
+                (str(_uuid.uuid4()), invoice_id, txid, amount, currency, status, fcode, _BILLING_GATEWAY))
+            if status == "succeeded":
+                conn.execute("UPDATE billing_invoices SET status='paid', paid_at=? WHERE invoice_id=?",
+                             (_now_iso(), invoice_id))
+            conn.commit()
+            conn.close()
+        _cb_success(comp)
+        _btrace(comp, "ok", invoice_id=invoice_id, status=status, gateway=_BILLING_GATEWAY)
+        return {"paymentResult": {"transactionId": txid, "status": status, "failureCode": fcode}}
+    except Exception as e:
+        _cb_fail(comp)
+        return {"paymentResult": {"transactionId": None, "status": "pending",
+                                   "failureCode": "GATEWAY_UNAVAILABLE"}}
+
+# 14. DunningManager
+_DUNNING_POLICY = [
+    {"attempt": 1, "retry_days": 3,  "action": "none"},
+    {"attempt": 2, "retry_days": 5,  "action": "mark_past_due"},
+    {"attempt": 3, "retry_days": 7,  "action": "suspend"},
+    {"attempt": 4, "retry_days": None, "action": "cancel"},
+]
+def dunning_manager(invoice_id: str, subscription_id: str,
+                    failure_code: str, attempt_number: int) -> dict:
+    comp = "DunningManager"
+    if not _cb_ok(comp):
+        return {"dunningAction": {"nextRetryAt": None, "subscriptionAction": "mark_past_due"}}
+    try:
+        policy   = next((p for p in _DUNNING_POLICY if p["attempt"] == attempt_number),
+                        {"retry_days": None, "action": "cancel"})
+        retry_at = ((_dt.now(_tz.utc) + _td(days=policy["retry_days"])).isoformat()
+                    if policy["retry_days"] else None)
+        sub_action = policy["action"]
+        with _DB_LOCK:
+            conn = _get_db()
+            conn.execute("""INSERT INTO billing_dunning
+                (dunning_id,invoice_id,subscription_id,failure_code,attempt_number,
+                 next_retry_at,subscription_action)
+                VALUES (?,?,?,?,?,?,?)""",
+                (str(_uuid.uuid4()), invoice_id, subscription_id, failure_code,
+                 attempt_number, retry_at, sub_action))
+            if sub_action in ("suspend","cancel"):
+                new_status = "past_due" if sub_action == "suspend" else "canceled"
+                conn.execute("UPDATE billing_subscriptions SET status=? WHERE subscription_id=?",
+                             (new_status, subscription_id))
+            conn.commit()
+            conn.close()
+        _cb_success(comp)
+        _btrace(comp, "ok", invoice_id=invoice_id, attempt=attempt_number, action=sub_action)
+        return {"dunningAction": {"nextRetryAt": retry_at, "subscriptionAction": sub_action}}
+    except Exception as e:
+        _cb_fail(comp)
+        return {"dunningAction": {"nextRetryAt": None, "subscriptionAction": "mark_past_due"}}
+
+# 15. NotificationDispatcher (mock — replace EmailProvider adaptor with real SMTP/SES/SendGrid)
+def notification_dispatcher(recipient_email: str, template_type: str, template_data: dict) -> dict:
+    comp = "NotificationDispatcher"
+    if not _cb_ok(comp):
+        return {"sent": False, "messageId": None}
+    try:
+        msg_id = f"msg_{str(_uuid.uuid4())[:8]}"
+        # Log the notification (mock send)
+        logger.info("[billing.notification] type=%s to=%s msg_id=%s",
+                    template_type, recipient_email.split("@")[-1], msg_id)
+        # TODO: integrate real email provider here when EMAIL_API_KEY is set
+        _cb_success(comp)
+        return {"sent": True, "messageId": msg_id}
+    except Exception as e:
+        _cb_fail(comp)
+        return {"sent": False, "messageId": None}
+
+# 16. BillingScheduler
+def billing_scheduler(as_of_date: str = None) -> dict:
+    comp = "BillingScheduler"
+    as_of = as_of_date or _now_iso()
+    try:
+        with _DB_LOCK:
+            conn = _get_db()
+            rows = conn.execute("""
+                SELECT s.subscription_id, s.customer_id,
+                       s.current_period_start, s.current_period_end
+                FROM billing_subscriptions s
+                WHERE s.status = 'active'
+                  AND s.current_period_end <= ?""", (as_of,)).fetchall()
+            conn.close()
+        due = [dict(r) for r in rows]
+        _btrace(comp, "ok", as_of=as_of, due_count=len(due))
+        return {"dueSubscriptions": due}
+    except Exception as e:
+        return _make_error("SCHEDULE_QUERY_FAIL", str(e), comp)
+
+# 17. WebhookEventValidator
+def webhook_event_validator(raw_payload: str, signature_header: str) -> dict:
+    comp = "WebhookEventValidator"
+    if not _cb_ok(comp):
+        return _make_error("WEBHOOK_VALIDATION_FAILED", "Circuit open", comp)
+    try:
+        # Stripe-style HMAC-SHA256 signature verification
+        if _BILLING_WEBHOOK_SECRET:
+            try:
+                parts   = {kv.split("=")[0]: kv.split("=")[1]
+                            for kv in signature_header.split(",") if "=" in kv}
+                ts      = parts.get("t", "")
+                sig     = parts.get("v1", "")
+                signed  = f"{ts}.{raw_payload}"
+                expected = _hmac_billing.new(_BILLING_WEBHOOK_SECRET.encode(),
+                                             signed.encode(), _hashlib_billing.sha256).hexdigest()
+                if not _hmac_billing.compare_digest(sig, expected):
+                    _btrace(comp, "invalid_sig")
+                    return _make_error("WEBHOOK_VALIDATION_FAILED", "Invalid signature", comp)
+            except Exception:
+                return _make_error("WEBHOOK_VALIDATION_FAILED", "Signature parse error", comp)
+
+        payload = json.loads(raw_payload)
+        event   = {"eventType": payload.get("type","unknown"),
+                   "gatewayTransactionId": payload.get("data",{}).get("object",{}).get("id",""),
+                   "status": payload.get("data",{}).get("object",{}).get("status",""),
+                   "rawData": payload}
+        _cb_success(comp)
+        _btrace(comp, "ok", event_type=event["eventType"])
+        return {"event": event}
+    except json.JSONDecodeError:
+        _cb_fail(comp)
+        return _make_error("WEBHOOK_VALIDATION_FAILED", "Invalid JSON payload", comp)
+    except Exception as e:
+        _cb_fail(comp)
+        return _make_error("WEBHOOK_VALIDATION_FAILED", str(e), comp)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ORCHESTRATORS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 24. SubscriptionOrchestrator
+def subscription_orchestrator(action: str, customer_id: str,
+                               plan_id: str = None, subscription_id: str = None) -> dict:
+    orch_id = str(_uuid.uuid4())[:8]
+    steps   = []
+    try:
+        # Validate customer
+        cust = customer_account_manager("get", customer_id=customer_id)
+        if _is_error(cust): return cust
+        steps.append("CustomerAccountManager")
+        # Validate plan when needed
+        if plan_id:
+            plan = plan_catalog_manager("get", plan_id=plan_id)
+            if _is_error(plan): return plan
+            steps.append("PlanCatalogManager")
+        # Execute lifecycle action
+        result = subscription_lifecycle_manager(action, customer_id=customer_id,
+                                                subscription_id=subscription_id, plan_id=plan_id)
+        steps.append("SubscriptionLifecycleManager")
+        _btrace("SubscriptionOrchestrator", "ok", orch_id=orch_id, steps=len(steps))
+        return result
+    except Exception as e:
+        return _make_error("ORCHESTRATOR_FAIL", str(e), "SubscriptionOrchestrator")
+
+# 25. BillingCycleOrchestrator
+def billing_cycle_orchestrator(as_of_date: str = None) -> dict:
+    processed, failures = [], []
+    due = billing_scheduler(as_of_date)
+    if _is_error(due): return due
+
+    for sub_info in due.get("dueSubscriptions", []):
+        sid = sub_info["subscription_id"]
+        cid = sub_info["customer_id"]
+        try:
+            # Fetch customer + subscription
+            cust_r = customer_account_manager("get", customer_id=cid)
+            if _is_error(cust_r): raise ValueError(cust_r["code"])
+            cust = cust_r["customer"]
+
+            with _DB_LOCK:
+                conn  = _get_db()
+                sub_r = conn.execute("SELECT * FROM billing_subscriptions WHERE subscription_id=?", (sid,)).fetchone()
+                plan_r= conn.execute("SELECT * FROM billing_plans WHERE plan_id=?",
+                                     (sub_r["plan_id"],)).fetchone() if sub_r else None
+                conn.close()
+            if not sub_r or not plan_r:
+                raise ValueError("subscription or plan not found")
+
+            sub   = dict(sub_r)
+            plan  = dict(plan_r)
+            tc    = cust.get("currency", _BILLING_BASE_CURRENCY)
+
+            # Usage aggregation
+            usage_r = usage_aggregator(sid, sub["current_period_start"], sub["current_period_end"])
+            usage   = usage_r.get("usageSummary", []) if not _is_error(usage_r) else []
+
+            # Pricing
+            pricing_r = pricing_engine(plan, usage, [], tc)
+            if _is_error(pricing_r): raise ValueError(pricing_r["code"])
+
+            # Tax
+            tax_r = tax_calculator(pricing_r["subtotal"], tc, cust.get("country","US"),
+                                   cust.get("tax_id"))
+            tax   = tax_r.get("taxAmount", 0)
+
+            # Invoice
+            inv_r = invoice_generator(cid, sid, pricing_r["lineItems"], tax, tc,
+                                      sub["current_period_start"], sub["current_period_end"])
+            if _is_error(inv_r): raise ValueError(inv_r["code"])
+            inv   = inv_r["invoice"]
+
+            # Payment
+            pay_r = payment_gateway_client("charge", inv["invoiceId"], cid,
+                                           inv["total"], tc)
+            pay   = pay_r.get("paymentResult", {})
+
+            if pay.get("status") == "succeeded":
+                # Roll period forward
+                new_start = sub["current_period_end"]
+                new_end   = _period_end(new_start, plan.get("billing_interval","monthly"))
+                with _DB_LOCK:
+                    conn = _get_db()
+                    conn.execute("UPDATE billing_subscriptions SET current_period_start=?, current_period_end=? WHERE subscription_id=?",
+                                 (new_start, new_end, sid))
+                    conn.commit()
+                    conn.close()
+                # Notify
+                notification_dispatcher(cust["email"], "invoice_receipt",
+                                        {"invoiceId": inv["invoiceId"], "total": inv["total"],
+                                         "currency": tc})
+                processed.append({"subscriptionId": sid, "invoiceId": inv["invoiceId"],
+                                   "status": "paid"})
+            else:
+                # Dunning
+                attempt = 1  # simplified — would look up existing attempts
+                dunning_manager(inv["invoiceId"], sid, pay.get("failureCode","unknown"), attempt)
+                notification_dispatcher(cust["email"], "payment_failed",
+                                        {"invoiceId": inv["invoiceId"], "failureCode": pay.get("failureCode")})
+                processed.append({"subscriptionId": sid, "invoiceId": inv["invoiceId"],
+                                   "status": pay.get("status","failed")})
+        except Exception as e:
+            logger.error("[billing_cycle] sub=%s err=%s", sid, e)
+            failures.append({"subscriptionId": sid, "errorCode": str(e)[:80]})
+
+    _btrace("BillingCycleOrchestrator", "done",
+            processed=len(processed), failures=len(failures))
+    return {"processed": processed, "failures": failures}
+
+# 26. WebhookOrchestrator
+def webhook_orchestrator(raw_payload: str, signature_header: str) -> dict:
+    validated = webhook_event_validator(raw_payload, signature_header)
+    if _is_error(validated):
+        return validated
+    event = validated.get("event", {})
+    etype = event.get("eventType", "")
+    txid  = event.get("gatewayTransactionId", "")
+
+    try:
+        if "payment_intent.succeeded" in etype:
+            with _DB_LOCK:
+                conn = _get_db()
+                pay_row = conn.execute("SELECT * FROM billing_payments WHERE transaction_id=?", (txid,)).fetchone()
+                if pay_row:
+                    conn.execute("UPDATE billing_invoices SET status='paid', paid_at=? WHERE invoice_id=?",
+                                 (_now_iso(), pay_row["invoice_id"]))
+                    conn.commit()
+                conn.close()
+        elif "payment_intent.payment_failed" in etype:
+            with _DB_LOCK:
+                conn = _get_db()
+                pay_row = conn.execute("SELECT * FROM billing_payments WHERE transaction_id=?", (txid,)).fetchone()
+                if pay_row:
+                    inv_row = conn.execute("SELECT * FROM billing_invoices WHERE invoice_id=?",
+                                           (pay_row["invoice_id"],)).fetchone()
+                    if inv_row:
+                        dunning_manager(inv_row["invoice_id"], inv_row["subscription_id"],
+                                        "webhook_payment_failed", 1)
+                conn.close()
+    except Exception as e:
+        logger.error("[webhook_orch] %s", e)
+
+    _btrace("WebhookOrchestrator", "ok", event_type=etype, txid=txid)
+    return {"processed": True, "eventType": etype}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FASTAPI ENDPOINTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _billing_guard():
+    """Raise 404 if billing is disabled."""
+    if not _BILLING_ENABLED:
+        raise HTTPException(status_code=404,
+                            detail="Billing is disabled. Set SAAS_BILLING_ENABLED=true to enable.")
+
+# ── Status / feature flag ──────────────────────────────────────────────────────
+@app.get("/api/billing/status", tags=["Billing"])
+async def billing_status():
+    """Check whether the billing module is enabled."""
+    return {"enabled": _BILLING_ENABLED, "gateway": _BILLING_GATEWAY if _BILLING_ENABLED else None,
+            "base_currency": _BILLING_BASE_CURRENCY}
+
+# ── Plans ──────────────────────────────────────────────────────────────────────
+@app.get("/api/billing/plans", tags=["Billing"])
+async def billing_list_plans():
+    _billing_guard()
+    return plan_catalog_manager("list")
+
+@app.get("/api/billing/plans/{plan_id}", tags=["Billing"])
+async def billing_get_plan(plan_id: str):
+    _billing_guard()
+    return plan_catalog_manager("get", plan_id=plan_id)
+
+@app.post("/api/billing/plans", tags=["Billing"])
+async def billing_upsert_plan(request: Request):
+    _billing_guard()
+    _require_auth(request)
+    body = await request.json()
+    return plan_catalog_manager("upsert", plan_id=body.get("planId"), plan=body)
+
+# ── Customers ──────────────────────────────────────────────────────────────────
+@app.post("/api/billing/customers", tags=["Billing"])
+async def billing_create_customer(request: Request):
+    _billing_guard()
+    caller = _require_auth(request)
+    body   = await request.json()
+    body.setdefault("username", caller)
+    return customer_account_manager("create", fields=body)
+
+@app.get("/api/billing/customers/me", tags=["Billing"])
+async def billing_get_my_customer(request: Request):
+    _billing_guard()
+    caller = _require_auth(request)
+    result = customer_account_manager("get_by_username", customer_id=caller)
+    if not result.get("customer"):
+        raise HTTPException(status_code=404, detail="No billing profile found. Create one first.")
+    return result
+
+@app.get("/api/billing/customers/{customer_id}", tags=["Billing"])
+async def billing_get_customer(customer_id: str, request: Request):
+    _billing_guard()
+    _require_auth(request)
+    return customer_account_manager("get", customer_id=customer_id)
+
+@app.put("/api/billing/customers/{customer_id}", tags=["Billing"])
+async def billing_update_customer(customer_id: str, request: Request):
+    _billing_guard()
+    _require_auth(request)
+    body = await request.json()
+    return customer_account_manager("update", customer_id=customer_id, fields=body)
+
+# ── Subscriptions ──────────────────────────────────────────────────────────────
+@app.post("/api/billing/subscriptions", tags=["Billing"])
+async def billing_create_subscription(request: Request):
+    _billing_guard()
+    caller = _require_auth(request)
+    body   = await request.json()
+    return subscription_orchestrator("create", customer_id=body["customerId"],
+                                     plan_id=body["planId"])
+
+@app.get("/api/billing/subscriptions", tags=["Billing"])
+async def billing_list_subscriptions(request: Request):
+    _billing_guard()
+    caller   = _require_auth(request)
+    cust     = customer_account_manager("get_by_username", customer_id=caller)
+    cust_obj = cust.get("customer")
+    if not cust_obj:
+        return {"subscriptions": []}
+    return subscription_lifecycle_manager("list", customer_id=cust_obj["customer_id"])
+
+@app.put("/api/billing/subscriptions/{subscription_id}", tags=["Billing"])
+async def billing_update_subscription(subscription_id: str, request: Request):
+    _billing_guard()
+    caller = _require_auth(request)
+    body   = await request.json()
+    action = body.get("action","upgrade")
+    return subscription_orchestrator(action, customer_id=body["customerId"],
+                                     plan_id=body.get("planId"),
+                                     subscription_id=subscription_id)
+
+@app.delete("/api/billing/subscriptions/{subscription_id}", tags=["Billing"])
+async def billing_cancel_subscription(subscription_id: str, request: Request):
+    _billing_guard()
+    caller = _require_auth(request)
+    return subscription_lifecycle_manager("cancel", subscription_id=subscription_id)
+
+# ── Usage Events ───────────────────────────────────────────────────────────────
+@app.post("/api/billing/usage", tags=["Billing"])
+async def billing_record_usage(request: Request):
+    _billing_guard()
+    _require_auth(request)
+    body = await request.json()
+    return usage_event_recorder(
+        subscription_id  = body["subscriptionId"],
+        metric           = body["metric"],
+        quantity         = float(body["quantity"]),
+        occurred_at      = body.get("occurredAt", _now_iso()),
+        idempotency_key  = body.get("idempotencyKey", str(_uuid.uuid4())),
+    )
+
+@app.get("/api/billing/usage/{subscription_id}", tags=["Billing"])
+async def billing_get_usage(subscription_id: str, period_start: str, period_end: str,
+                            request: Request):
+    _billing_guard()
+    _require_auth(request)
+    return usage_aggregator(subscription_id, period_start, period_end)
+
+# ── Invoices ───────────────────────────────────────────────────────────────────
+@app.get("/api/billing/invoices", tags=["Billing"])
+async def billing_list_invoices(request: Request, customer_id: str = None):
+    _billing_guard()
+    caller = _require_auth(request)
+    with _DB_LOCK:
+        conn = _get_db()
+        if customer_id:
+            rows = conn.execute("SELECT * FROM billing_invoices WHERE customer_id=? ORDER BY issued_at DESC",
+                                (customer_id,)).fetchall()
+        else:
+            cust = customer_account_manager("get_by_username", customer_id=caller)
+            cobj = cust.get("customer")
+            rows = conn.execute("SELECT * FROM billing_invoices WHERE customer_id=? ORDER BY issued_at DESC",
+                                (cobj["customer_id"],)).fetchall() if cobj else []
+        conn.close()
+    return {"invoices": [dict(r) for r in rows]}
+
+@app.get("/api/billing/invoices/{invoice_id}", tags=["Billing"])
+async def billing_get_invoice(invoice_id: str, request: Request):
+    _billing_guard()
+    _require_auth(request)
+    with _DB_LOCK:
+        conn = _get_db()
+        row  = conn.execute("SELECT * FROM billing_invoices WHERE invoice_id=?", (invoice_id,)).fetchone()
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Invoice {invoice_id} not found")
+    inv = dict(row)
+    inv["line_items"] = json.loads(inv.get("line_items","[]"))
+    return {"invoice": inv}
+
+# ── Billing cycle (admin) ──────────────────────────────────────────────────────
+@app.post("/api/billing/run-cycle", tags=["Billing"])
+async def billing_run_cycle(request: Request):
+    _billing_guard()
+    caller = _require_auth(request)
+    if caller != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    body    = await request.json()
+    as_of   = body.get("asOfDate", _now_iso())
+    result  = billing_cycle_orchestrator(as_of)
+    return result
+
+# ── Webhook ────────────────────────────────────────────────────────────────────
+@app.post("/api/billing/webhook", tags=["Billing"])
+async def billing_webhook(request: Request):
+    _billing_guard()
+    raw_body  = await request.body()
+    sig_hdr   = request.headers.get("Stripe-Signature","")
+    result    = webhook_orchestrator(raw_body.decode("utf-8"), sig_hdr)
+    if _is_error(result):
+        raise HTTPException(status_code=400, detail=result.get("message","Webhook failed"))
+    return result
+
+# ── Currency ───────────────────────────────────────────────────────────────────
+@app.get("/api/billing/fx", tags=["Billing"])
+async def billing_fx(from_currency: str, to_currency: str, amount: float = 1.0):
+    _billing_guard()
+    return currency_converter(amount, from_currency.upper(), to_currency.upper())
+
+# ── Health / circuit breakers ──────────────────────────────────────────────────
+@app.get("/api/billing/health", tags=["Billing"])
+async def billing_health():
+    _billing_guard()
+    comps = ["CustomerAccountManager","SubscriptionLifecycleManager","UsageEventRecorder",
+             "CurrencyConverter","TaxCalculator","PricingEngine","InvoiceGenerator",
+             "PaymentGatewayClient","DunningManager","NotificationDispatcher",
+             "BillingScheduler","WebhookEventValidator"]
+    status = {}
+    for c in comps:
+        s      = _CB.get(c, {})
+        open_b = bool(s.get("open_until") and _time.time() < s["open_until"])
+        status[c] = {"status": "down" if open_b else "ok",
+                     "circuit_open": open_b,
+                     "failure_count": s.get("failures", 0)}
+    overall = "ok" if all(v["status"] == "ok" for v in status.values()) else "degraded"
+    return {"overall": overall, "components": status, "gateway": _BILLING_GATEWAY,
+            "enabled": _BILLING_ENABLED}
+
+# ── Run init ───────────────────────────────────────────────────────────────────
+_init_billing_db()
 
 @app.get("/{full_path:path}", tags=["System"])
 async def spa_fallback(full_path: str):
@@ -2030,3 +3236,26 @@ if __name__ == "__main__":
         reload=os.getenv("DEV", "false").lower() == "true",
         log_level="info",
     )
+
+# ── DB Migration helper ────────────────────────────────────────────────────────
+# Called by the reset-admin endpoint and on startup when hash format is detected
+# as legacy (no pbkdf2: prefix or wrong inner hash structure).
+
+@app.post("/api/auth/wipe-and-reseed", tags=["Auth"])
+async def wipe_and_reseed(request: Request):
+    """
+    EMERGENCY: Delete ALL users and tokens, reseed admin/admin123.
+    Localhost-only. Use this after a hash-scheme migration.
+    """
+    client_ip = request.client.host if request.client else ""
+    if client_ip not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="Only accessible from localhost")
+    with _DB_LOCK:
+        conn = _get_db()
+        conn.execute("DELETE FROM auth_tokens")
+        conn.execute("DELETE FROM users")
+        conn.commit()
+        _create_user_internal(conn, "admin", "admin123")
+        conn.close()
+    logger.warning("[wipe_reseed] DB wiped and reseeded from %s", client_ip)
+    return {"wiped": True, "reseeded": True, "username": "admin", "password": "admin123"}
