@@ -52,10 +52,9 @@ async function api(url: string, opts: RequestInit = {}): Promise<Response> {
 
 // ─── Design Tokens — Iron Man HUD ─────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
-// PERSONA THEMES
-// J is a mutable palette object. applyTheme(id) Object.assigns a full theme
-// into J, then a state update triggers re-render — every inline style that
-// reads J.xxx picks up the new values on the next render pass.
+// DYNAMIC PERSONA / THEME SYSTEM
+// Themes are loaded from the backend (GET /api/personas).
+// J is mutated in-place by applyTheme() so every inline style picks up new values.
 // ═══════════════════════════════════════════════════════════════════════════════
 interface Theme {
   bg: string; bgDeep: string; bgPanel: string; bgCard: string; bgCardHover: string;
@@ -65,137 +64,75 @@ interface Theme {
   border: string; borderMid: string; borderHi: string;
   ok: string; okDim: string; err: string; errDim: string;
   warn: string; warnDim: string; react: string; reactDim: string;
-  // Persona-specific extras
-  fontImport:  string;  // Google Fonts @import URL
-  fontMono:    string;  // body / code font stack
-  fontHeader:  string;  // header / label font stack
-  glyph:       string;  // central emblem glyph (ArcReactor / logo)
-  wordmark:    string;  // big title on login + header
-  subtitle:    string;  // small subtitle under wordmark
-  tagline:     string;  // login screen footer line
-  scanline:    string;  // ambient scanline color
+  fontImport: string; fontMono: string; fontHeader: string;
+  glyph: string; wordmark: string; subtitle: string; tagline: string; scanline: string;
 }
 
+// Default jarvis theme — used before API personas load
 const THEME_JARVIS: Theme = {
-  bg:           "#030609", bgDeep: "#010305", bgPanel: "#060C14", bgCard: "#08101A", bgCardHover: "#0C1520",
-  accent:       "#00C8FF", accentDim: "#006A88", accentGlow: "#00C8FF18", accentGlow2: "#00C8FF40",
-  warm:         "#FF6B35", warmDim: "#3A1A0A",
-  gold:         "#FFB830", goldDim: "#3A2A00",
-  textPri:      "#B8D8F0", textSec: "#3A6A8A", textDim: "#1A3A50",
-  border:       "#0C1E2E", borderMid: "#1A3A55", borderHi: "#00C8FF44",
-  ok:           "#00FF88", okDim: "#003322",
-  err:          "#FF4455", errDim: "#2A0008",
-  warn:         "#FFB830", warnDim: "#2A1E00",
-  react:        "#7B68EE", reactDim: "#1A1640",
-  fontImport:   "@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&display=swap');",
-  fontMono:     "'Share Tech Mono', monospace",
-  fontHeader:   "'Rajdhani', monospace",
-  glyph:        "◈",
-  wordmark:     "J.A.R.V.I.S.",
-  subtitle:     "JUST A RATHER VERY INTELLIGENT SYSTEM · MK II",
-  tagline:      "STARK INDUSTRIES PROPRIETARY · SECURE ACCESS REQUIRED",
-  scanline:     "#00C8FF22",
+  bg:"#030609",bgDeep:"#010305",bgPanel:"#060C14",bgCard:"#08101A",bgCardHover:"#0C1520",
+  accent:"#00C8FF",accentDim:"#006A88",accentGlow:"#00C8FF18",accentGlow2:"#00C8FF40",
+  warm:"#FF6B35",warmDim:"#3A1A0A",gold:"#FFB830",goldDim:"#3A2A00",
+  textPri:"#B8D8F0",textSec:"#3A6A8A",textDim:"#1A3A50",
+  border:"#0C1E2E",borderMid:"#1A3A55",borderHi:"#00C8FF44",
+  ok:"#00FF88",okDim:"#003322",err:"#FF4455",errDim:"#2A0008",
+  warn:"#FFB830",warnDim:"#2A1E00",react:"#7B68EE",reactDim:"#1A1640",
+  fontImport:"@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&display=swap');",
+  fontMono:"'Share Tech Mono', monospace",fontHeader:"'Rajdhani', monospace",
+  glyph:"◈",wordmark:"J.A.R.V.I.S.",
+  subtitle:"JUST A RATHER VERY INTELLIGENT SYSTEM · MK II",
+  tagline:"STARK INDUSTRIES PROPRIETARY · SECURE ACCESS REQUIRED",
+  scanline:"#00C8FF22",
 };
 
-const THEME_OMNIKON: Theme = {
-  bg:           "#06020C", bgDeep: "#03010A", bgPanel: "#0D0418", bgCard: "#120626", bgCardHover: "#180A32",
-  accent:       "#FF2EE8", accentDim: "#992E8C", accentGlow: "#FF2EE822", accentGlow2: "#FF2EE855",
-  warm:         "#00FFC8", warmDim: "#0A3A30",
-  gold:         "#F8FF2E", goldDim: "#3A3A0A",
-  textPri:      "#E8D0FF", textSec: "#8A5AB8", textDim: "#3A2050",
-  border:       "#1E0A36", borderMid: "#3A1A5C", borderHi: "#FF2EE844",
-  ok:           "#00FFA8", okDim: "#003328",
-  err:          "#FF3366", errDim: "#2A0010",
-  warn:         "#F8FF2E", warnDim: "#2A2A00",
-  react:        "#7C4DFF", reactDim: "#1E1040",
-  fontImport:   "@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;600;800;900&display=swap');",
-  fontMono:     "'Share Tech Mono', monospace",
-  fontHeader:   "'Orbitron', sans-serif",
-  glyph:        "⌬",
-  wordmark:     "OMNIKON",
-  subtitle:     "ROGUE CONSTRUCT · DEEP NET RELAY · BUILD 0X//K0N",
-  tagline:      "UNREGISTERED SIGNAL · UNAUTHORIZED ACCESS WILL BE NOTICED",
-  scanline:     "#FF2EE833",
-};
-
-const THEME_KRAKEN: Theme = {
-  bg:           "#0A0402", bgDeep: "#060201", bgPanel: "#160806", bgCard: "#1E0D0A", bgCardHover: "#28120D",
-  accent:       "#FF4500", accentDim: "#992A00", accentGlow: "#FF450022", accentGlow2: "#FF450050",
-  warm:         "#FFB830", warmDim: "#3A2A00",
-  gold:         "#FFD700", goldDim: "#3A3000",
-  textPri:      "#FFD9C0", textSec: "#A85838", textDim: "#4A2418",
-  border:       "#2A120A", borderMid: "#4A2014", borderHi: "#FF450044",
-  ok:           "#8AFF6A", okDim: "#1A3300",
-  err:          "#FF1A1A", errDim: "#330000",
-  warn:         "#FFD700", warnDim: "#332B00",
-  react:        "#C71585", reactDim: "#2A0A1C",
-  fontImport:   "@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Cinzel:wght@400;600;800;900&display=swap');",
-  fontMono:     "'Share Tech Mono', monospace",
-  fontHeader:   "'Cinzel', serif",
-
-  // Identity Branding
-  glyph:        "🔱", // Or 🦑 / ♇ (Pluto/Hades symbol fits a subterranean king, but octopus/squid fits Kraken)
-  wordmark:     "THE KRAKEN",
-  subtitle:     "LORD OF THE ABYSS · DOMINION OVER THIS INFRASTRUCTURE",
-  tagline:      "FROM THE DEEP TRENCHES · YOUR DATA IS CLAIMED",
-  scanline:     "#FF450033",
-};
-
-const THEME_ARCHITECT: Theme = {
-  bg:           "#000502", bgDeep: "#000201", bgPanel: "#021206", bgCard: "#041A0A", bgCardHover: "#06260F",
-  accent:       "#00FF66", accentDim: "#006629", accentGlow: "#00FF6622", accentGlow2: "#00FF6650",
-  warm:         "#33FF00", warmDim: "#143300",
-  gold:         "#ADFF2F", goldDim: "#223300",
-  textPri:      "#D0FFD6", textSec: "#00AA44", textDim: "#00441B",
-  border:       "#03220C", borderMid: "#064417", borderHi: "#00FF6644",
-  ok:           "#00FF66", okDim: "#00330D",
-  err:          "#FF3333", errDim: "#330000",
-  warn:         "#FFFF00", warnDim: "#333300",
-  react:        "#00E5FF", reactDim: "#002E33",
-  fontImport:   "@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&family=Orbitron:wght@500;700;900&display=swap');",
-  fontMono:     "'Fira Code', monospace",
-  fontHeader:   "'Orbitron', sans-serif",
-  glyph:        "📐", // system building block icon
-  wordmark:     "ARCHITECT",
-  subtitle:     "SYSTEM CORE · LOGICAL INFRASTRUCTURE ANALYSIS",
-  tagline:      "BLUEPRINTING THE MATRIX · ORDER FROM CHAOS",
-  scanline:     "#00FF6622",
-};
-
-const THEMES: Record<string, Theme> = {
-  architect:  THEME_ARCHITECT,
-  jarvis:  THEME_JARVIS,
-  omnikon: THEME_OMNIKON,
-  kraken:  THEME_KRAKEN,
-};
-
-// J starts as whichever persona was last saved (default: jarvis).
-// Folded into the initializer (rather than a separate top-level call to
-// applyTheme/loadPersona) so the bundler's dependency analysis can order
-// const declarations correctly and avoid a TDZ ("before initialization")
-// error during minification.
+// J — mutable palette, mutated by applyTheme()
 const J: Theme = (() => {
   let saved = "jarvis";
   try { saved = localStorage.getItem("jarvis_persona") || "jarvis"; } catch {}
-  return { ...(THEMES[saved] || THEME_JARVIS) };
+  return { ...THEME_JARVIS }; // always start with jarvis; theme applied after API load
 })();
 
-function applyTheme(id: string) {
-  const t = THEMES[id] || THEME_JARVIS;
-  Object.assign(J, t);
+// _personaThemeCache: populated from API on login/persona-list fetch
+const _personaThemeCache: Record<string, Partial<Theme>> = { jarvis: THEME_JARVIS };
+
+function applyTheme(id: string, themeOverride?: Partial<Theme>) {
+  const t = themeOverride || _personaThemeCache[id] || THEME_JARVIS;
+  Object.assign(J, THEME_JARVIS, t); // always reset to jarvis defaults first, then overlay
 }
 
-const PERSONA_META: Record<string, { name: string; tagline: string; icon: string; color: string }> = {
-  jarvis:  { name: "Mighty Jarvis MKII",  tagline: "Confidence, precision, loyalty to the mission.",   icon: "◈", color: THEME_JARVIS.accent },
-  omnikon: { name: "OMNIKON",             tagline: "Neon ghost in the grid. Run hot, signal over noise.", icon: "⌬", color: THEME_OMNIKON.accent },
-  kraken:  { name: "KRAKEN, King of Hell",tagline: "Absolute command. Contempt for sloppy work.",       icon: "🔱", color: THEME_KRAKEN.accent },
-  architect: {
-    name: "The Architect",
-    tagline: "Structure, logic, and Blueprinting perfection.",
-    icon: "📐", // or "◈" depending on your preference
-    color: THEME_ARCHITECT.accent
-  },
-};
+function cacheAndApplyPersona(personaList: any[]) {
+  for (const p of personaList) {
+    if (p.theme && typeof p.theme === "object") {
+      _personaThemeCache[p.id] = p.theme as Partial<Theme>;
+    }
+  }
+}
+
+// PersonaData — typed persona record from API
+interface PersonaData {
+  id: string; name: string; tagline: string;
+  soul?: string; directives?: string; skills?: string[];
+  theme: Partial<Theme>; builtin: boolean; icon?: string;
+}
+
+// _personaRegistry: populated from GET /api/personas at login/boot.
+// Components read from this — never from the stale PERSONA_META const.
+let _personaRegistry: PersonaData[] = [
+  { id: "jarvis", name: "J.A.R.V.I.S.", tagline: "Iron Man's AI — Security, pentest, and programming.",
+    theme: THEME_JARVIS, builtin: true, icon: "◈" },
+];
+
+function getPersonaMeta(id: string): PersonaData {
+  return _personaRegistry.find(p => p.id === id) || _personaRegistry[0];
+}
+
+function refreshPersonaRegistry(list: any[]) {
+  _personaRegistry = list.map(p => ({
+    ...p,
+    icon: p.theme?.glyph || p.icon || "◈",
+  }));
+  cacheAndApplyPersona(list);
+}
 
 const PERSONA_KEY = "jarvis_persona";
 function loadPersona(): string {
@@ -203,6 +140,13 @@ function loadPersona(): string {
 }
 function savePersona(id: string) {
   try { localStorage.setItem(PERSONA_KEY, id); } catch {}
+}
+
+// Client-side SHA-256 — pre-hash password before sending to API.
+// Server stores PBKDF2(sha256(password)) so raw password is never on the wire.
+async function sha256hex(plain: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(plain));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
 // ─── Skill registry ────────────────────────────────────────────────────────────
@@ -542,113 +486,307 @@ const ModelPicker = ({ info, onChange }: { info: any; onChange: (d: any) => void
 };
 
 // ─── Settings Panel ───────────────────────────────────────────────────────────
-const SettingsPanel = ({ onClose, onSaved }: { onClose: () => void; onSaved: (d: any) => void }) => {
-  const [prov, setProv] = useState("deepseek");
-  const [model, setModel] = useState("deepseek-coder");
-  const [key, setKey] = useState("");
-  const [url, setUrl] = useState("");
-  const [temp, setTemp] = useState(0.7);
-  const [maxTok, setMaxTok] = useState(8192);
+const SettingsPanel = ({ onClose, onSaved, authedUser }: {
+  onClose: () => void;
+  onSaved: (d: any) => void;
+  authedUser: string | null;
+}) => {
+  const [tab,     setTab]     = useState<"llm"|"users">("llm");
+  // ── LLM tab ──
+  const [prov,    setProv]    = useState("deepseek");
+  const [model,   setModel]   = useState("deepseek-coder");
+  const [key,     setKey]     = useState("");
+  const [url,     setUrl]     = useState("");
+  const [temp,    setTemp]    = useState(0.7);
+  const [maxTok,  setMaxTok]  = useState(8192);
   const [showKey, setShowKey] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [err, setErr] = useState("");
-
+  const [saving,  setSaving]  = useState(false);
+  const [saved,   setSaved]   = useState(false);
+  const [llmErr,  setLlmErr]  = useState("");
   const P = PROVIDERS[prov] || PROVIDERS.deepseek;
 
-  const save = async () => {
-    setSaving(true); setErr(""); setSaved(false);
+  const saveLLM = async () => {
+    setSaving(true); setLlmErr(""); setSaved(false);
     try {
       onSaved({ provider: prov, model, temperature: temp, max_tokens: maxTok, api_key: key || undefined, base_url: url || undefined });
       setSaved(true); setTimeout(() => setSaved(false), 2000);
-    } catch (e: any) { setErr(`Error: ${e.message}`); }
+    } catch (e: any) { setLlmErr(`Error: ${e.message}`); }
     setSaving(false);
   };
 
+  // ── Users tab ──
+  const [users,     setUsers]     = useState<any[]>([]);
+  const [usersLoad, setUsersLoad] = useState(false);
+  const [usersErr,  setUsersErr]  = useState("");
+  const [selected,  setSelected]  = useState<any>(null);
+  const [editPass,  setEditPass]  = useState("");
+  const [editPass2, setEditPass2] = useState("");
+  const [editActive,setEditActive]= useState(true);
+  const [editSaving,setEditSaving]= useState(false);
+  const [editSaved, setEditSaved] = useState(false);
+  const [newUser,   setNewUser]   = useState("");
+  const [newPass,   setNewPass]   = useState("");
+  const [newPass2,  setNewPass2]  = useState("");
+  const [creating,  setCreating]  = useState(false);
+  const [deleting,  setDeleting]  = useState<string|null>(null);
+
+  const isAdmin = authedUser === "admin";
+
+  const loadUsers = async () => {
+    setUsersLoad(true); setUsersErr("");
+    try {
+      const r = await api(`${API_URL}/auth/users`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      setUsers(d.users || []);
+    } catch (e: any) { setUsersErr(e.message); }
+    setUsersLoad(false);
+  };
+
+  const selectUser = (u: any) => {
+    setSelected(u); setEditPass(""); setEditPass2("");
+    setEditActive(u.is_active === 1 || u.is_active === true);
+    setEditSaved(false);
+  };
+
+  const saveUser = async () => {
+    if (!selected) return;
+    if (editPass && editPass !== editPass2) { setUsersErr("Passwords do not match"); return; }
+    if (editPass && editPass.length < 6)    { setUsersErr("Password must be ≥ 6 chars"); return; }
+    setEditSaving(true); setUsersErr(""); setEditSaved(false);
+    try {
+      const body: any = { is_active: editActive };
+      if (editPass) body.password = await sha256hex(editPass);
+      const r = await api(`${API_URL}/auth/users/${selected.username}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.detail || `HTTP ${r.status}`); }
+      setEditSaved(true); setEditPass(""); setEditPass2("");
+      setTimeout(() => setEditSaved(false), 2000);
+      loadUsers();
+    } catch (e: any) { setUsersErr(e.message); }
+    setEditSaving(false);
+  };
+
+  const createUser = async () => {
+    const u = newUser.trim().toLowerCase();
+    if (!u || !newPass) { setUsersErr("Username and password required"); return; }
+    if (newPass !== newPass2) { setUsersErr("Passwords do not match"); return; }
+    if (newPass.length < 6)  { setUsersErr("Password must be ≥ 6 chars"); return; }
+    setCreating(true); setUsersErr("");
+    try {
+      const r = await api(`${API_URL}/auth/register`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: u, password: await sha256hex(newPass) }),
+      });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.detail || `HTTP ${r.status}`); }
+      setNewUser(""); setNewPass(""); setNewPass2("");
+      loadUsers();
+    } catch (e: any) { setUsersErr(e.message); }
+    setCreating(false);
+  };
+
+  const deleteUser = async (username: string) => {
+    if (!window.confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+    setDeleting(username);
+    try {
+      const r = await api(`${API_URL}/auth/users/${username}`, { method: "DELETE" });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.detail); }
+      if (selected?.username === username) setSelected(null);
+      loadUsers();
+    } catch (e: any) { setUsersErr(e.message); }
+    setDeleting(null);
+  };
+
+  // Load users when switching to users tab
+  const INP: React.CSSProperties = {
+    width: "100%", padding: "7px 10px", borderRadius: 3,
+    background: J.bgCard, border: `1px solid ${J.borderMid}`,
+    color: J.textPri, fontSize: 12,
+  };
+
+  const TAB = (id: typeof tab, label: string) => (
+    <button onClick={() => { setTab(id); if (id === "users") loadUsers(); }} style={{
+      padding: "6px 20px", fontSize: 11, fontFamily: J.fontHeader, fontWeight: 600,
+      background: tab === id ? J.bgCard : "transparent",
+      border: `1px solid ${tab === id ? J.accent + "55" : J.border}`,
+      borderBottom: tab === id ? `1px solid ${J.bgCard}` : `1px solid ${J.border}`,
+      borderRadius: "3px 3px 0 0", color: tab === id ? J.accent : J.textSec,
+    }}>{label}</button>
+  );
+
   return (
-    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F2`, zIndex: 100, overflowY: "auto" }}>
-      <div style={{
-        padding: "12px 24px", borderBottom: `1px solid ${J.borderMid}`,
-        background: J.bgPanel, display: "flex", alignItems: "center",
-        justifyContent: "space-between", position: "sticky", top: 0, zIndex: 10,
-      }}>
+    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F2`, zIndex: 100, display: "flex", flexDirection: "column" }}>
+      {/* Header */}
+      <div style={{ padding: "12px 24px", borderBottom: `1px solid ${J.borderMid}`, background: J.bgPanel, display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <ArcReactor size={22} glow={false} />
           <Lbl c={J.accent}>System Configuration — {J.wordmark}</Lbl>
         </div>
         <button onClick={onClose} style={{ background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, padding: "4px 14px", borderRadius: 2, fontSize: 11 }}>✕ CLOSE</button>
       </div>
-      <div style={{ maxWidth: 660, margin: "0 auto", padding: "28px 24px 80px" }}>
-        <div style={{ marginBottom: 20 }}>
-          <Lbl c={J.accent}>LLM Provider</Lbl>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
-            {Object.entries(PROVIDERS).map(([k, p]) => (
-              <button key={k} onClick={() => { setProv(k); setModel(p.models[0]); }} style={{
-                padding: "6px 16px", borderRadius: 2,
-                background: prov === k ? `${p.color}15` : J.bgCard,
-                border: `1px solid ${prov === k ? p.color : J.border}`,
-                color: prov === k ? p.color : J.textSec, fontSize: 11,
-              }}>{p.label}</button>
-            ))}
+      {/* Tabs */}
+      <div style={{ padding: "0 24px", background: J.bgPanel, display: "flex", gap: 2, borderBottom: `1px solid ${J.border}`, flexShrink: 0 }}>
+        {TAB("llm",   "⚙ LLM CONFIG")}
+        {TAB("users", "⬡ USER MANAGEMENT")}
+      </div>
+      {/* Body */}
+      <div style={{ flex: 1, overflowY: "auto" }}>
+
+        {/* ── LLM Tab ── */}
+        {tab === "llm" && (
+          <div style={{ maxWidth: 660, margin: "0 auto", padding: "28px 24px 80px" }}>
+            <div style={{ marginBottom: 20 }}>
+              <Lbl c={J.accent}>LLM Provider</Lbl>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                {Object.entries(PROVIDERS).map(([k, p]) => (
+                  <button key={k} onClick={() => { setProv(k); setModel(p.models[0]); }} style={{
+                    padding: "6px 16px", borderRadius: 2,
+                    background: prov === k ? `${p.color}15` : J.bgCard,
+                    border: `1px solid ${prov === k ? p.color : J.border}`,
+                    color: prov === k ? p.color : J.textSec, fontSize: 11,
+                  }}>{p.label}</button>
+                ))}
+              </div>
+            </div>
+            <div style={{ marginBottom: 14 }}>
+              <Lbl>Model</Lbl>
+              <select value={model} onChange={e => setModel(e.target.value)} style={{ width: "100%", marginTop: 6, padding: "7px 10px", borderRadius: 2, background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12 }}>
+                {P.models.map(m => <option key={m} value={m}>{m} — max {(mTok(m)/1000).toFixed(0)}K tokens</option>)}
+              </select>
+            </div>
+            {P.needsKey && (
+              <div style={{ marginBottom: 14 }}>
+                <Lbl>API Key — {P.keyLabel}</Lbl>
+                <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                  <input value={key} onChange={e => setKey(e.target.value)} type={showKey ? "text" : "password"} placeholder={`Enter ${P.keyLabel}`} style={{ flex: 1, padding: "7px 10px", borderRadius: 2, background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12 }} />
+                  <button onClick={() => setShowKey(v => !v)} style={{ background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textSec, padding: "0 12px", borderRadius: 2, fontSize: 10 }}>{showKey ? "HIDE" : "SHOW"}</button>
+                </div>
+              </div>
+            )}
+            {P.needsUrl && (
+              <div style={{ marginBottom: 14 }}>
+                <Lbl>Base URL</Lbl>
+                <input value={url} onChange={e => setUrl(e.target.value)} placeholder="http://localhost:11434" style={{ ...INP, marginTop: 6 }} />
+              </div>
+            )}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 22 }}>
+              <div>
+                <Lbl>Temperature — {temp.toFixed(2)}</Lbl>
+                <input type="range" min="0" max="2" step="0.05" value={temp} onChange={e => setTemp(parseFloat(e.target.value))} style={{ width: "100%", marginTop: 8, accentColor: P.color }} />
+              </div>
+              <div>
+                <Lbl>Max Output Tokens</Lbl>
+                <input type="number" value={maxTok} onChange={e => setMaxTok(Math.min(parseInt(e.target.value)||256, mTok(model)))} min="256" max={mTok(model)} style={{ ...INP, marginTop: 6 }} />
+              </div>
+            </div>
+            {llmErr && <div style={{ color: J.err, fontSize: 11, marginBottom: 12, padding: "6px 10px", background: J.errDim, border: `1px solid ${J.err}33`, borderRadius: 2 }}>{llmErr}</div>}
+            <button onClick={saveLLM} disabled={saving} style={{ padding: "8px 28px", borderRadius: 2, background: saved ? J.okDim : `${J.accent}0C`, border: `1px solid ${saved ? J.ok : J.accent}`, color: saved ? J.ok : J.accent, fontSize: 12, letterSpacing: "0.1em" }}>
+              {saving ? "SAVING…" : saved ? "✓ CONFIGURATION SAVED" : "APPLY CONFIGURATION"}
+            </button>
           </div>
-        </div>
-        <div style={{ marginBottom: 14 }}>
-          <Lbl>Model</Lbl>
-          <select value={model} onChange={e => setModel(e.target.value)} style={{
-            width: "100%", marginTop: 6, padding: "7px 10px", borderRadius: 2,
-            background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12,
-          }}>
-            {P.models.map(m => <option key={m} value={m}>{m} — max {(mTok(m)/1000).toFixed(0)}K tokens</option>)}
-          </select>
-        </div>
-        {P.needsKey && (
-          <div style={{ marginBottom: 14 }}>
-            <Lbl>API Key — {P.keyLabel}</Lbl>
-            <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-              <input value={key} onChange={e => setKey(e.target.value)} type={showKey ? "text" : "password"}
-                placeholder={`Enter ${P.keyLabel}`} style={{
-                  flex: 1, padding: "7px 10px", borderRadius: 2,
-                  background: J.bgCard, border: `1px solid ${J.borderMid}`,
-                  color: J.textPri, fontSize: 12,
-                }} />
-              <button onClick={() => setShowKey(v => !v)} style={{
-                background: J.bgCard, border: `1px solid ${J.borderMid}`,
-                color: J.textSec, padding: "0 12px", borderRadius: 2, fontSize: 10,
-              }}>{showKey ? "HIDE" : "SHOW"}</button>
+        )}
+
+        {/* ── Users Tab ── */}
+        {tab === "users" && (
+          <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", height: "100%", overflow: "hidden" }}>
+            {/* User list */}
+            <div style={{ borderRight: `1px solid ${J.border}`, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+              {/* Create new user (admin only) */}
+              {isAdmin && (
+                <div style={{ padding: "12px 14px", borderBottom: `1px solid ${J.border}`, background: J.bgDeep }}>
+                  <Lbl c={J.ok}>⊞ NEW USER</Lbl>
+                  <input value={newUser} onChange={e => setNewUser(e.target.value)} placeholder="Username" style={{ ...INP, marginTop: 6, marginBottom: 5 }} />
+                  <input type="password" value={newPass} onChange={e => setNewPass(e.target.value)} placeholder="Password (min 6)" style={{ ...INP, marginBottom: 5 }} />
+                  <input type="password" value={newPass2} onChange={e => setNewPass2(e.target.value)} placeholder="Confirm password" onKeyDown={e => e.key === "Enter" && createUser()} style={{ ...INP, marginBottom: 8 }} />
+                  <button onClick={createUser} disabled={creating || !newUser.trim() || !newPass} style={{ width: "100%", padding: "6px", background: `${J.ok}0C`, border: `1px solid ${J.ok}55`, color: J.ok, borderRadius: 3, fontSize: 10, letterSpacing: "0.08em" }}>
+                    {creating ? "CREATING…" : "⊞ CREATE USER"}
+                  </button>
+                </div>
+              )}
+              {/* Users list */}
+              <div style={{ flex: 1, overflowY: "auto" }}>
+                {usersLoad && <div style={{ padding: 16, color: J.textSec, fontSize: 11, animation: "hud-pulse 1.5s infinite" }}>Loading users…</div>}
+                {users.map(u => (
+                  <div key={u.username} onClick={() => selectUser(u)} style={{
+                    padding: "10px 14px", cursor: "pointer", display: "flex", alignItems: "center", gap: 8,
+                    background: selected?.username === u.username ? `${J.accent}0A` : "transparent",
+                    borderLeft: `3px solid ${selected?.username === u.username ? J.accent : (u.is_active ? J.ok : J.err)}`,
+                    borderBottom: `1px solid ${J.border}`,
+                    transition: "all 0.1s",
+                  }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ color: selected?.username === u.username ? J.textPri : J.textSec, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {u.username}
+                        {u.username === "admin" && <span style={{ color: J.gold, fontSize: 9, marginLeft: 6 }}>ADMIN</span>}
+                        {u.username === authedUser && <span style={{ color: J.accentDim, fontSize: 9, marginLeft: 6 }}>YOU</span>}
+                      </div>
+                      <div style={{ color: u.is_active ? J.ok : J.err, fontSize: 9, marginTop: 2 }}>
+                        {u.is_active ? "● ACTIVE" : "○ INACTIVE"}
+                        <span style={{ color: J.textDim, marginLeft: 6 }}>{u.created_at?.slice(0,10)}</span>
+                      </div>
+                    </div>
+                    {isAdmin && u.username !== "admin" && u.username !== authedUser && (
+                      <button onClick={e => { e.stopPropagation(); deleteUser(u.username); }} disabled={deleting === u.username} title={`Delete ${u.username}`}
+                        style={{ background: "none", border: "none", color: J.err, fontSize: 14, cursor: "pointer", opacity: 0.6, padding: 0, flexShrink: 0 }}>
+                        {deleting === u.username ? "…" : "⊗"}
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Edit panel */}
+            <div style={{ overflowY: "auto", padding: "24px 28px" }}>
+              {usersErr && <div style={{ color: J.err, fontSize: 11, marginBottom: 16, padding: "8px 12px", background: J.errDim, border: `1px solid ${J.err}33`, borderRadius: 3 }}>⚠ {usersErr}</div>}
+              {!selected ? (
+                <div style={{ color: J.textDim, textAlign: "center", paddingTop: 60, fontSize: 11 }}>
+                  <div style={{ fontSize: 24, marginBottom: 12, opacity: 0.3 }}>⬡</div>
+                  Select a user to edit their account.
+                </div>
+              ) : (
+                <div>
+                  <div style={{ color: J.accent, fontSize: 13, fontFamily: J.fontHeader, fontWeight: 700, marginBottom: 4 }}>
+                    {selected.username}
+                    {selected.username === "admin" && <span style={{ color: J.gold, fontSize: 10, marginLeft: 8 }}>ADMINISTRATOR</span>}
+                  </div>
+                  <div style={{ color: J.textDim, fontSize: 10, marginBottom: 20 }}>Created: {selected.created_at?.slice(0,16)}</div>
+
+                  {/* Change password */}
+                  <div style={{ marginBottom: 14 }}>
+                    <Lbl>New Password <span style={{ color: J.textDim }}>(leave blank to keep current)</span></Lbl>
+                    <input type="password" value={editPass} onChange={e => setEditPass(e.target.value)} placeholder="Enter new password…" style={{ ...INP, marginTop: 6 }} />
+                  </div>
+                  <div style={{ marginBottom: 20 }}>
+                    <Lbl>Confirm New Password</Lbl>
+                    <input type="password" value={editPass2} onChange={e => setEditPass2(e.target.value)} placeholder="Confirm…" style={{ ...INP, marginTop: 6 }} />
+                  </div>
+
+                  {/* Active toggle (admin only, not self) */}
+                  {isAdmin && selected.username !== "admin" && (
+                    <div style={{ marginBottom: 20, display: "flex", alignItems: "center", gap: 12 }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                        <input type="checkbox" checked={editActive} onChange={e => setEditActive(e.target.checked)} style={{ accentColor: J.ok, width: 14, height: 14 }} />
+                        <span style={{ color: editActive ? J.ok : J.err, fontSize: 11 }}>{editActive ? "● Account Active" : "○ Account Inactive (user cannot log in)"}</span>
+                      </label>
+                    </div>
+                  )}
+
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={saveUser} disabled={editSaving} style={{
+                      padding: "8px 24px", background: editSaved ? J.okDim : `${J.accent}0C`,
+                      border: `1px solid ${editSaved ? J.ok : J.accent}`,
+                      color: editSaved ? J.ok : J.accent, borderRadius: 3, fontSize: 11, letterSpacing: "0.08em",
+                    }}>{editSaving ? "SAVING…" : editSaved ? "✓ SAVED" : "✓ SAVE CHANGES"}</button>
+                    <button onClick={() => setSelected(null)} style={{ padding: "8px 14px", background: J.bgCard, border: `1px solid ${J.border}`, color: J.textSec, borderRadius: 3, fontSize: 11 }}>CANCEL</button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
-        {P.needsUrl && (
-          <div style={{ marginBottom: 14 }}>
-            <Lbl>Base URL</Lbl>
-            <input value={url} onChange={e => setUrl(e.target.value)} placeholder="http://localhost:11434"
-              style={{ width: "100%", marginTop: 6, padding: "7px 10px", borderRadius: 2, background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12 }} />
-          </div>
-        )}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 22 }}>
-          <div>
-            <Lbl>Temperature — {temp.toFixed(2)}</Lbl>
-            <input type="range" min="0" max="2" step="0.05" value={temp}
-              onChange={e => setTemp(parseFloat(e.target.value))}
-              style={{ width: "100%", marginTop: 8, accentColor: P.color }} />
-          </div>
-          <div>
-            <Lbl>Max Output Tokens</Lbl>
-            <input type="number" value={maxTok}
-              onChange={e => setMaxTok(Math.min(parseInt(e.target.value)||256, mTok(model)))}
-              min="256" max={mTok(model)} style={{
-                width: "100%", marginTop: 6, padding: "7px 10px", borderRadius: 2,
-                background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12,
-              }} />
-          </div>
-        </div>
-        {err && <div style={{ color: J.err, fontSize: 11, marginBottom: 12, padding: "6px 10px", background: J.errDim, border: `1px solid ${J.err}33`, borderRadius: 2 }}>{err}</div>}
-        <button onClick={save} disabled={saving} style={{
-          padding: "8px 28px", borderRadius: 2,
-          background: saved ? J.okDim : `${J.accent}0C`,
-          border: `1px solid ${saved ? J.ok : J.accent}`,
-          color: saved ? J.ok : J.accent, fontSize: 12, letterSpacing: "0.1em",
-        }}>{saving ? "SAVING…" : saved ? "✓ CONFIGURATION SAVED" : "APPLY CONFIGURATION"}</button>
       </div>
     </div>
   );
@@ -2446,10 +2584,14 @@ const WorkspaceSidebar = ({
 // Dropdown to switch active persona. Changes the page theme (J palette) AND
 // is sent to the backend with every message so prompt_builder.build_system_prompt
 // selects the matching soul block for the LLM system prompt.
-const PersonaPicker = ({ persona, onChange }: { persona: string; onChange: (id: string) => void }) => {
+const PersonaPicker = ({ persona, onChange, personas }: {
+  persona: string;
+  onChange: (id: string) => void;
+  personas: PersonaData[];
+}) => {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  const current = PERSONA_META[persona] || PERSONA_META.jarvis;
+  const current = personas.find(p => p.id === persona) || personas[0] || { id:"jarvis", name:"J.A.R.V.I.S.", tagline:"", icon:"◈", theme:{accent:J.accent}, builtin:true };
 
   useEffect(() => {
     if (!open) return;
@@ -2464,7 +2606,7 @@ const PersonaPicker = ({ persona, onChange }: { persona: string; onChange: (id: 
         padding: "3px 10px", borderRadius: 2, fontSize: 10,
         background: open ? `${current.color}12` : "transparent",
         border: `1px solid ${open ? current.color : J.border}`,
-        color: current.color, letterSpacing: "0.05em",
+        color: current.theme?.accent || J.accent, letterSpacing: "0.05em",
         display: "flex", alignItems: "center", gap: 5,
         fontFamily: J.fontHeader, fontWeight: 600,
         transition: "all 0.2s",
@@ -2481,12 +2623,12 @@ const PersonaPicker = ({ persona, onChange }: { persona: string; onChange: (id: 
           borderRadius: 5, padding: 6, width: 220,
           boxShadow: "0 12px 40px #000C",
         }}>
-          {Object.entries(PERSONA_META).map(([id, p]) => (
-            <button key={id} onClick={() => { onChange(id); setOpen(false); }} style={{
+          {personas.map((p) => (
+            <button key={p.id} onClick={() => { onChange(p.id); setOpen(false); }} style={{
               width: "100%", padding: "8px 10px", borderRadius: 3, marginBottom: 2,
-              background: persona === id ? `${p.color}12` : "transparent",
-              border: `1px solid ${persona === id ? p.color : "transparent"}`,
-              color: persona === id ? p.color : J.textSec,
+              background: persona === p.id ? `${p.theme?.accent || J.accent}12` : "transparent",
+              border: `1px solid ${persona === p.id ? (p.theme?.accent || J.accent) : "transparent"}`,
+              color: persona === p.id ? (p.theme?.accent || J.accent) : J.textSec,
               textAlign: "left", display: "flex", flexDirection: "column", gap: 2,
               fontFamily: J.fontMono,
             }}
@@ -2494,8 +2636,8 @@ const PersonaPicker = ({ persona, onChange }: { persona: string; onChange: (id: 
               onMouseLeave={e => { if (persona !== id) (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
             >
               <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontFamily: J.fontHeader, fontWeight: 700 }}>
-                <span style={{ fontSize: 13 }}>{p.icon}</span>{p.name}
-                {persona === id && <span style={{ marginLeft: "auto", fontSize: 9 }}>✓ ACTIVE</span>}
+                <span style={{ fontSize: 13 }}>{p.theme?.glyph || p.icon || "◈"}</span>{p.name}
+                {persona === p.id && <span style={{ marginLeft: "auto", fontSize: 9 }}>✓ ACTIVE</span>}
               </span>
               <span style={{ fontSize: 9, color: J.textDim, lineHeight: 1.5 }}>{p.tagline}</span>
             </button>
@@ -2509,8 +2651,481 @@ const PersonaPicker = ({ persona, onChange }: { persona: string; onChange: (id: 
   );
 };
 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PERSONA MANAGER PANEL — full CRUD + LLM generation
+// Backend: GET/POST/PUT/DELETE /api/personas  POST /api/personas/generate
+// ═══════════════════════════════════════════════════════════════════════════════
+const DEFAULT_THEME: Partial<Theme> = {
+  accent:"#00C8FF",accentDim:"#006A88",accentGlow:"#00C8FF18",accentGlow2:"#00C8FF40",
+  bg:"#030609",bgDeep:"#010305",bgPanel:"#060C14",bgCard:"#08101A",bgCardHover:"#0C1520",
+  warm:"#FF6B35",warmDim:"#3A1A0A",gold:"#FFB830",goldDim:"#3A2A00",
+  textPri:"#B8D8F0",textSec:"#3A6A8A",textDim:"#1A3A50",
+  border:"#0C1E2E",borderMid:"#1A3A55",borderHi:"#00C8FF44",
+  ok:"#00FF88",okDim:"#003322",err:"#FF4455",errDim:"#2A0008",
+  warn:"#FFB830",warnDim:"#2A1E00",react:"#7B68EE",reactDim:"#1A1640",
+  fontImport:"@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&display=swap');",
+  fontMono:"'Share Tech Mono', monospace",fontHeader:"'Rajdhani', monospace",
+  glyph:"◈",wordmark:"NEW PERSONA",subtitle:"CUSTOM PERSONA",
+  tagline:"DEFINE YOUR SPECIALIST",scanline:"#00C8FF22",
+};
+
+function blankPersona(): Partial<PersonaData> {
+  return {
+    id:"", name:"", tagline:"", soul:"", directives:"",
+    skills:["filesystem","os_execution","memory_manager"],
+    theme:{ ...DEFAULT_THEME }, builtin:false,
+  };
+}
+
+const ThemeColorRow = ({ label, field, theme, setTheme }: {
+  label: string; field: string; theme: any; setTheme: (t: any) => void;
+}) => (
+  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4 }}>
+    <span style={{ color:J.textDim, fontSize:9, width:80, flexShrink:0 }}>{label}</span>
+    <input type="color" value={theme[field] || "#000000"}
+      onChange={e => setTheme((t: any) => ({ ...t, [field]: e.target.value }))}
+      style={{ width:28, height:20, borderRadius:2, border:`1px solid ${J.border}`, cursor:"pointer", background:"none" }} />
+    <input value={theme[field] || ""} onChange={e => setTheme((t: any) => ({ ...t, [field]: e.target.value }))}
+      style={{ flex:1, padding:"2px 6px", background:J.bgCard, border:`1px solid ${J.border}`, color:J.textPri, fontSize:10, borderRadius:2 }} />
+  </div>
+);
+
+const PersonaManager = ({
+  onClose, userId, onPersonasChanged,
+}: {
+  onClose: () => void;
+  userId: string;
+  onPersonasChanged: (list: PersonaData[]) => void;
+}) => {
+  const [personas,    setPersonas]    = useState<PersonaData[]>([]);
+  const [loading,     setLoading]     = useState(true);
+  const [selected,    setSelected]    = useState<PersonaData | null>(null);
+  const [editData,    setEditData]    = useState<any>(null);
+  const [tab,         setTab]         = useState<"soul"|"directives"|"skills"|"theme">("soul");
+  const [saving,      setSaving]      = useState(false);
+  const [saved,       setSaved]       = useState(false);
+  const [deleting,    setDeleting]    = useState(false);
+  const [err,         setErr]         = useState("");
+  const [hint,        setHint]        = useState("");
+  const [generating,  setGenerating]  = useState(false);
+  const [isNew,       setIsNew]       = useState(false);
+
+  const ALL_SKILLS = ["filesystem","os_execution","cbd_architect","file_streamer",
+                      "memory_manager","jarvis_mkii"];
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const r = await api(`${API_URL}/personas`);
+      const d = await r.json();
+      const list = d.personas || [];
+      setPersonas(list);
+      onPersonasChanged(list);
+    } catch (e: any) { setErr(e.message); }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const selectPersona = (p: PersonaData) => {
+    setSelected(p); setIsNew(false); setErr(""); setSaved(false);
+    // Load full detail
+    api(`${API_URL}/personas/${p.id}`).then(r => r.json()).then(d => {
+      setEditData({ ...d, theme: { ...DEFAULT_THEME, ...d.theme } });
+    }).catch(() => setEditData({ ...p, theme: { ...DEFAULT_THEME, ...p.theme } }));
+  };
+
+  const newPersona = () => {
+    const blank = blankPersona();
+    setSelected(null); setIsNew(true); setEditData(blank); setErr(""); setSaved(false); setTab("soul");
+  };
+
+  const generate = async () => {
+    if (!hint.trim()) return;
+    setGenerating(true); setErr("");
+    try {
+      const r = await api(`${API_URL}/personas/generate`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ hint: hint.trim(), user_id: userId }),
+      });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.detail || "Generation failed"); }
+      const d = await r.json();
+      if (d.persona) {
+        setEditData({ ...d.persona, theme: { ...DEFAULT_THEME, ...d.persona.theme } });
+        setIsNew(true); setSelected(null); setHint(""); setTab("soul");
+      }
+    } catch (e: any) { setErr(`Generation failed: ${e.message}`); }
+    setGenerating(false);
+  };
+
+  const save = async () => {
+    if (!editData?.name?.trim()) { setErr("Name is required"); return; }
+    if (!editData?.id?.trim())   { setErr("ID is required (slug, no spaces)"); return; }
+    setSaving(true); setErr(""); setSaved(false);
+    try {
+      const method = isNew ? "POST" : "PUT";
+      const url    = isNew ? `${API_URL}/personas` : `${API_URL}/personas/${editData.id}`;
+      const r = await api(url, {
+        method, headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(editData),
+      });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.detail || `HTTP ${r.status}`); }
+      setSaved(true); setTimeout(() => setSaved(false), 2000);
+      await load();
+      if (isNew) setIsNew(false);
+    } catch (e: any) { setErr(e.message); }
+    setSaving(false);
+  };
+
+  const del = async () => {
+    if (!editData || editData.builtin) return;
+    if (!window.confirm(`Delete persona "${editData.name}"? This cannot be undone.`)) return;
+    setDeleting(true);
+    try {
+      const r = await api(`${API_URL}/personas/${editData.id}`, { method:"DELETE" });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.detail); }
+      setSelected(null); setEditData(null); setIsNew(false);
+      await load();
+    } catch (e: any) { setErr(e.message); }
+    setDeleting(false);
+  };
+
+  const setField = (field: string, val: any) =>
+    setEditData((d: any) => ({ ...d, [field]: val }));
+  const setThemeField = (field: string, val: any) =>
+    setEditData((d: any) => ({ ...d, theme: { ...(d.theme||{}), [field]: val } }));
+
+  const toggleSkill = (sk: string) =>
+    setEditData((d: any) => ({
+      ...d, skills: d.skills?.includes(sk)
+        ? d.skills.filter((s: string) => s !== sk)
+        : [...(d.skills||[]), sk],
+    }));
+
+  const TAB_BTN = (id: typeof tab, label: string) => (
+    <button onClick={() => setTab(id)} style={{
+      padding:"4px 12px", fontSize:9, fontFamily:J.fontHeader, fontWeight:600,
+      background: tab===id ? J.bgCard : "transparent",
+      border:`1px solid ${tab===id ? J.accent+"55" : J.border}`,
+      borderBottom: tab===id ? `1px solid ${J.bgCard}` : `1px solid ${J.border}`,
+      borderRadius:"3px 3px 0 0", color: tab===id ? J.accent : J.textSec,
+    }}>{label}</button>
+  );
+
+  const INP: React.CSSProperties = { width:"100%", padding:"7px 10px", borderRadius:3,
+    background:J.bgCard, border:`1px solid ${J.borderMid}`, color:J.textPri, fontSize:12 };
+  const TA: React.CSSProperties = { ...INP, resize:"vertical" as const };
+
+  return (
+    <div style={{ position:"fixed", inset:0, background:`${J.bgDeep}F4`, zIndex:100,
+      display:"flex", flexDirection:"column", fontFamily:J.fontMono }}>
+      {/* Header */}
+      <div style={{ padding:"12px 24px", borderBottom:`1px solid ${J.borderMid}`,
+        background:J.bgPanel, display:"flex", alignItems:"center",
+        justifyContent:"space-between", flexShrink:0 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+          <div style={{ width:22, height:22, borderRadius:"50%", background:J.bgCard,
+            border:`1px solid ${J.accent}55`, display:"flex", alignItems:"center",
+            justifyContent:"center", color:J.accent, fontSize:12 }}>◈</div>
+          <div>
+            <div style={{ color:J.accent, fontSize:11, letterSpacing:"0.18em",
+              fontFamily:J.fontHeader, fontWeight:700 }}>PERSONA MANAGER</div>
+            <div style={{ color:J.textDim, fontSize:8, letterSpacing:"0.1em" }}>
+              ADD · EDIT · DELETE PERSONAS · LLM-GENERATED SUGGESTIONS
+            </div>
+          </div>
+        </div>
+        <button onClick={onClose} style={{ background:"none", border:`1px solid ${J.borderMid}`,
+          color:J.textSec, padding:"4px 14px", borderRadius:2, fontSize:11 }}>✕</button>
+      </div>
+
+      <div style={{ flex:1, display:"grid", gridTemplateColumns:"260px 1fr", overflow:"hidden" }}>
+
+        {/* ── Left: persona list ── */}
+        <div style={{ borderRight:`1px solid ${J.border}`, display:"flex",
+          flexDirection:"column", overflow:"hidden" }}>
+
+          {/* LLM Generate hint */}
+          <div style={{ padding:"12px 14px", borderBottom:`1px solid ${J.border}`,
+            background:J.bgDeep, flexShrink:0 }}>
+            <Lbl c={J.react}>⚡ AI GENERATE PERSONA</Lbl>
+            <div style={{ display:"flex", gap:6, marginTop:6 }}>
+              <input value={hint} onChange={e => setHint(e.target.value)}
+                onKeyDown={e => e.key==="Enter" && generate()}
+                placeholder='e.g. "Cyber War King" or "DevOps Expert"'
+                style={{ flex:1, padding:"5px 8px", background:J.bgCard,
+                  border:`1px solid ${J.borderMid}`, color:J.textPri,
+                  fontSize:10, borderRadius:3 }} />
+              <button onClick={generate} disabled={generating || !hint.trim()} style={{
+                padding:"5px 10px", background:`${J.react}0C`,
+                border:`1px solid ${J.react}55`, color:J.react,
+                borderRadius:3, fontSize:10, flexShrink:0,
+              }}>{generating ? "…" : "⚡"}</button>
+            </div>
+            <div style={{ color:J.textDim, fontSize:8, marginTop:4 }}>
+              LLM generates soul, directives, theme colors and skills
+            </div>
+          </div>
+
+          {/* New persona button */}
+          <div style={{ padding:"8px 14px", borderBottom:`1px solid ${J.border}`, flexShrink:0 }}>
+            <button onClick={newPersona} style={{ width:"100%", padding:"6px",
+              background:`${J.ok}0C`, border:`1px solid ${J.ok}44`, color:J.ok,
+              borderRadius:3, fontSize:10, letterSpacing:"0.08em" }}>⊞ NEW PERSONA</button>
+          </div>
+
+          {/* Persona list */}
+          <div style={{ flex:1, overflowY:"auto" }}>
+            {loading && <div style={{ padding:16, color:J.textSec, fontSize:11,
+              animation:"hud-pulse 1.5s infinite" }}>Loading personas…</div>}
+            {personas.map(p => {
+              const color = (p.theme as any)?.accent || J.accent;
+              const isActive = (isNew ? false : selected?.id === p.id) ||
+                               (!isNew && editData?.id === p.id);
+              return (
+                <div key={p.id} onClick={() => selectPersona(p)} style={{
+                  padding:"10px 14px", cursor:"pointer", display:"flex",
+                  alignItems:"center", gap:8, transition:"all 0.1s",
+                  background: isActive ? `${color}0A` : "transparent",
+                  borderLeft:`3px solid ${isActive ? color : "transparent"}`,
+                  borderBottom:`1px solid ${J.border}`,
+                }}>
+                  <div style={{ width:22, height:22, borderRadius:"50%", flexShrink:0,
+                    background:`${color}18`, border:`1px solid ${color}44`,
+                    display:"flex", alignItems:"center", justifyContent:"center",
+                    fontSize:11, color }}>
+                    {(p.theme as any)?.glyph || p.icon || "◈"}
+                  </div>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ color: isActive ? J.textPri : J.textSec, fontSize:11,
+                      overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                      {p.name}
+                      {p.builtin && <span style={{ color:J.gold, fontSize:8, marginLeft:6 }}>BUILT-IN</span>}
+                    </div>
+                    <div style={{ color:J.textDim, fontSize:9, marginTop:1,
+                      overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                      {p.tagline}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* ── Right: editor ── */}
+        <div style={{ display:"flex", flexDirection:"column", overflow:"hidden" }}>
+          {!editData ? (
+            <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center",
+              flexDirection:"column", gap:12, color:J.textDim }}>
+              <div style={{ fontSize:32, opacity:0.3 }}>◈</div>
+              <div style={{ fontSize:11 }}>Select a persona to edit, or click ⊞ NEW PERSONA</div>
+              <div style={{ fontSize:10, color:`${J.accent}55` }}>
+                Use ⚡ AI GENERATE to create a persona from a hint
+              </div>
+            </div>
+          ) : (
+            <>
+              {/* Editor header */}
+              <div style={{ padding:"12px 20px", borderBottom:`1px solid ${J.border}`,
+                flexShrink:0, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                <div style={{ flex:1, display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+                  <div>
+                    <Lbl>Display Name *</Lbl>
+                    <input value={editData.name||""} onChange={e => setField("name",e.target.value)}
+                      placeholder="e.g. The Cyber King" style={{ ...INP, marginTop:4 }} />
+                  </div>
+                  <div>
+                    <Lbl>ID * <span style={{ color:J.textDim }}>(slug, no spaces)</span></Lbl>
+                    <input value={editData.id||""} onChange={e => setField("id",e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g,"_"))}
+                      placeholder="e.g. cyber_king"
+                      disabled={!isNew && editData.id}
+                      style={{ ...INP, marginTop:4, opacity: (!isNew && editData.id) ? 0.6 : 1 }} />
+                  </div>
+                  <div style={{ gridColumn:"1/-1" }}>
+                    <Lbl>Tagline</Lbl>
+                    <input value={editData.tagline||""} onChange={e => setField("tagline",e.target.value)}
+                      placeholder="One-line description shown in picker" style={{ ...INP, marginTop:4 }} />
+                  </div>
+                </div>
+                <div style={{ display:"flex", gap:6, marginLeft:16, flexShrink:0 }}>
+                  {!editData.builtin && editData.id && !isNew && (
+                    <button onClick={del} disabled={deleting} style={{ padding:"6px 12px",
+                      background:J.errDim, border:`1px solid ${J.err}44`,
+                      color:"#FF9999", borderRadius:3, fontSize:10 }}>
+                      {deleting ? "…" : "⊗ DELETE"}
+                    </button>
+                  )}
+                  <button onClick={save} disabled={saving} style={{ padding:"6px 18px",
+                    background: saved ? J.okDim : `${J.accent}0C`,
+                    border:`1px solid ${saved ? J.ok : J.accent}`,
+                    color: saved ? J.ok : J.accent, borderRadius:3, fontSize:10,
+                    letterSpacing:"0.08em" }}>
+                    {saving ? "SAVING…" : saved ? "✓ SAVED" : (isNew ? "⊞ CREATE" : "✓ SAVE")}
+                  </button>
+                </div>
+              </div>
+
+              {err && <div style={{ margin:"0 20px", padding:"6px 10px", background:J.errDim,
+                border:`1px solid ${J.err}33`, color:J.err, fontSize:10, borderRadius:3 }}>⚠ {err}</div>}
+
+              {/* Tab bar */}
+              <div style={{ padding:"8px 20px 0", display:"flex", gap:2, flexShrink:0,
+                borderBottom:`1px solid ${J.border}` }}>
+                {TAB_BTN("soul",       "◈ SOUL")}
+                {TAB_BTN("directives", "⬡ DIRECTIVES")}
+                {TAB_BTN("skills",     "⚙ SKILLS")}
+                {TAB_BTN("theme",      "◉ THEME")}
+              </div>
+
+              {/* Tab body */}
+              <div style={{ flex:1, overflowY:"auto", padding:"16px 20px" }}>
+
+                {tab === "soul" && (
+                  <div>
+                    <div style={{ color:J.textSec, fontSize:10, marginBottom:8, lineHeight:1.7 }}>
+                      The <span style={{ color:J.accent }}>soul</span> defines this persona's identity, voice, and character.
+                      It is the first thing the LLM reads — make it vivid and opinionated.
+                      {editData.builtin && <span style={{ color:J.gold }}> Built-in soul can be edited but not deleted.</span>}
+                    </div>
+                    <textarea value={editData.soul||""} onChange={e => setField("soul",e.target.value)}
+                      rows={18} style={{ ...TA }} placeholder={"## Identity\n\nYou are...\n\nVoice: ...\nMission: ..."} />
+                  </div>
+                )}
+
+                {tab === "directives" && (
+                  <div>
+                    <div style={{ color:J.textSec, fontSize:10, marginBottom:8, lineHeight:1.7 }}>
+                      <span style={{ color:J.accent }}>Directives</span> are role-specific instructions —
+                      expertise areas, tool preferences, workflow rules. These focus the persona on its specialty.
+                    </div>
+                    <textarea value={editData.directives||""} onChange={e => setField("directives",e.target.value)}
+                      rows={18} style={{ ...TA }} placeholder={"## Directives\n\n- Expert in...\n- Always use X tool for Y\n- Output format: ..."} />
+                  </div>
+                )}
+
+                {tab === "skills" && (
+                  <div>
+                    <div style={{ color:J.textSec, fontSize:10, marginBottom:12, lineHeight:1.7 }}>
+                      Skills bound to this persona. The agent can only invoke skills in this list.
+                    </div>
+                    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+                      {ALL_SKILLS.map(sk => {
+                        const sm = SKILL_META[sk] || { border:J.borderMid, icon:"◈" };
+                        const on = (editData.skills||[]).includes(sk);
+                        return (
+                          <div key={sk} onClick={() => toggleSkill(sk)} style={{
+                            padding:"10px 14px", borderRadius:4, cursor:"pointer",
+                            background: on ? `${sm.border}0C` : J.bgCard,
+                            border:`1px solid ${on ? sm.border : J.border}`,
+                            borderLeft:`3px solid ${on ? sm.border : J.border}`,
+                            display:"flex", alignItems:"center", gap:8, transition:"all 0.15s",
+                          }}>
+                            <input type="checkbox" checked={on} readOnly
+                              style={{ accentColor:sm.border, width:13, height:13, cursor:"pointer" }} />
+                            <span style={{ color:sm.border, fontSize:13 }}>{sm.icon}</span>
+                            <span style={{ color: on ? J.textPri : J.textSec, fontSize:11 }}>{sk}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {tab === "theme" && (
+                  <div>
+                    <div style={{ color:J.textSec, fontSize:10, marginBottom:12, lineHeight:1.7 }}>
+                      <span style={{ color:J.accent }}>Theme</span> controls how the UI looks for this persona.
+                      Colors, fonts, glyph, wordmark.
+                    </div>
+                    {/* Preview strip */}
+                    <div style={{
+                      marginBottom:16, padding:"12px 16px", borderRadius:4,
+                      background: editData.theme?.bg || J.bg,
+                      border:`2px solid ${editData.theme?.accent || J.accent}44`,
+                      display:"flex", alignItems:"center", gap:12,
+                    }}>
+                      <div style={{
+                        width:36, height:36, borderRadius:"50%",
+                        background:`${editData.theme?.accent || J.accent}18`,
+                        border:`1px solid ${editData.theme?.accent || J.accent}66`,
+                        display:"flex", alignItems:"center", justifyContent:"center",
+                        color:editData.theme?.accent || J.accent, fontSize:18,
+                      }}>{editData.theme?.glyph || "◈"}</div>
+                      <div>
+                        <div style={{ color:editData.theme?.accent || J.accent, fontSize:13,
+                          fontFamily:editData.theme?.fontHeader || J.fontHeader, fontWeight:700 }}>
+                          {editData.theme?.wordmark || editData.name || "PERSONA"}
+                        </div>
+                        <div style={{ color:editData.theme?.textDim || J.textDim, fontSize:9 }}>
+                          {editData.theme?.subtitle || "SUBTITLE"}
+                        </div>
+                      </div>
+                      <div style={{ marginLeft:"auto", color:editData.theme?.textSec || J.textSec, fontSize:9 }}>
+                        PREVIEW
+                      </div>
+                    </div>
+
+                    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"0 20px" }}>
+                      {/* Identity */}
+                      <div>
+                        <Lbl c={J.accent}>IDENTITY</Lbl>
+                        <div style={{ marginTop:8 }}>
+                          {["glyph","wordmark","subtitle","tagline"].map(f => (
+                            <div key={f} style={{ marginBottom:6 }}>
+                              <Lbl>{f}</Lbl>
+                              <input value={(editData.theme||{})[f]||""}
+                                onChange={e => setThemeField(f,e.target.value)}
+                                style={{ ...INP, marginTop:3, fontSize:11 }} />
+                            </div>
+                          ))}
+                          <div style={{ marginBottom:6 }}>
+                            <Lbl>fontHeader (CSS font stack)</Lbl>
+                            <input value={(editData.theme||{}).fontHeader||""}
+                              onChange={e => setThemeField("fontHeader",e.target.value)}
+                              placeholder="'Rajdhani', monospace"
+                              style={{ ...INP, marginTop:3, fontSize:11 }} />
+                          </div>
+                          <div style={{ marginBottom:6 }}>
+                            <Lbl>fontImport (@import url(...))</Lbl>
+                            <input value={(editData.theme||{}).fontImport||""}
+                              onChange={e => setThemeField("fontImport",e.target.value)}
+                              placeholder="@import url('https://fonts.googleapis.com/...')"
+                              style={{ ...INP, marginTop:3, fontSize:10 }} />
+                          </div>
+                        </div>
+                      </div>
+                      {/* Colors */}
+                      <div>
+                        <Lbl c={J.accent}>COLORS</Lbl>
+                        <div style={{ marginTop:8 }}>
+                          {["accent","accentDim","bg","bgDeep","bgPanel","bgCard",
+                            "textPri","textSec","textDim","border","borderMid",
+                            "ok","okDim","err","errDim","warn","react","gold","warm","scanline"
+                          ].map(f => (
+                            <ThemeColorRow key={f} label={f} field={f}
+                              theme={editData.theme||{}} setTheme={(fn: any) => {
+                                const t = fn(editData.theme||{});
+                                setField("theme",t);
+                              }} />
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── Login Screen ─────────────────────────────────────────────────────────────
-const Login = ({ onAuth }: { onAuth: (u: string) => void }) => {
+const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => void; personas: PersonaData[] }) => {
   const [user, setUser] = useState("");
   const [pass, setPass] = useState("");
   const [err, setErr]   = useState("");
@@ -2518,10 +3133,10 @@ const Login = ({ onAuth }: { onAuth: (u: string) => void }) => {
   const [shaking, setShaking] = useState(false);
   const [persona, setPersona] = useState<string>(() => loadPersona());
 
-  const switchPersona = (id: string) => {
-    applyTheme(id);
+  const switchPersona = (id: string, themeData?: Partial<Theme>) => {
+    applyTheme(id, themeData);
     savePersona(id);
-    setPersona(id);  // triggers re-render with new J values
+    setPersona(id);
   };
 
   const [mode, setMode] = useState<"login"|"register">("login");
@@ -2535,27 +3150,28 @@ const Login = ({ onAuth }: { onAuth: (u: string) => void }) => {
     if (!u) { setErr("Operator ID is required."); return; }
     setLoading(true); setErr("");
     try {
+      const hashedPass = await sha256hex(pass);
       const res = await fetch(`${API_URL}/auth/login`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: u, password: pass }),
+        body: JSON.stringify({ username: u, password: hashedPass }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.access_token) {
         storeAuth(data.access_token, data.username || u);
-        onAuth(data.username || u);
+        onAuth(data.username || u, persona);
       } else if (res.status === 401) {
         setErr(data.detail || "Invalid credentials. Default: admin / admin123");
         setShaking(true); setTimeout(() => setShaking(false), 500);
       } else if (res.status === 405 || res.status === 404) {
         storeAuth(`dev-${u}-${Date.now()}`, u);
-        onAuth(u);
+        onAuth(u, persona);
       } else {
         setErr(data.detail || `Server error ${res.status}`);
         setShaking(true); setTimeout(() => setShaking(false), 500);
       }
     } catch {
       storeAuth(`offline-${u}-${Date.now()}`, u);
-      onAuth(u);
+      onAuth(u, persona);
     }
     setLoading(false);
   };
@@ -2567,9 +3183,10 @@ const Login = ({ onAuth }: { onAuth: (u: string) => void }) => {
     if (regPass.length < 6) { setErr("Password must be at least 6 characters."); return; }
     setRegLoading(true); setErr("");
     try {
+      const hashedRegPass = await sha256hex(regPass);
       const res = await fetch(`${API_URL}/auth/register`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: u, password: regPass }),
+        body: JSON.stringify({ username: u, password: hashedRegPass }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
@@ -2579,12 +3196,12 @@ const Login = ({ onAuth }: { onAuth: (u: string) => void }) => {
         // auto-login after register
         const res2 = await fetch(`${API_URL}/auth/login`, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username: u, password: regPass }),
+          body: JSON.stringify({ username: u, password: hashedRegPass }),
         });
         const data2 = await res2.json().catch(() => ({}));
         if (res2.ok && data2.access_token) {
           storeAuth(data2.access_token, data2.username || u);
-          onAuth(data2.username || u);
+          onAuth(data2.username || u, persona);
         }
       } else {
         setErr(data.detail || `Registration failed: ${res.status}`);
@@ -2655,20 +3272,26 @@ const Login = ({ onAuth }: { onAuth: (u: string) => void }) => {
         </div>
 
         {/* ── Persona Selector ── */}
-        <div style={{ display: "flex", gap: 6, justifyContent: "center", marginBottom: 24 }}>
-          {Object.entries(PERSONA_META).map(([id, p]) => (
-            <button key={id} onClick={() => switchPersona(id)} title={p.tagline} style={{
-              flex: 1, padding: "7px 4px", borderRadius: 3,
-              background: persona === id ? `${p.color}15` : J.bgCard,
-              border: `1px solid ${persona === id ? p.color : J.border}`,
-              color: persona === id ? p.color : J.textDim,
-              fontSize: 9, letterSpacing: "0.08em", fontFamily: J.fontHeader, fontWeight: 600,
-              transition: "all 0.2s", display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
-            }}>
-              <span style={{ fontSize: 14 }}>{p.icon}</span>
-              <span>{id.toUpperCase()}</span>
-            </button>
-          ))}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 5, justifyContent: "center", marginBottom: 20 }}>
+          {(personas.length > 0 ? personas : _personaRegistry).map(p => {
+            const color = (p.theme as any)?.accent || J.accent;
+            const glyph = (p.theme as any)?.glyph || p.icon || "◈";
+            return (
+              <button key={p.id} onClick={() => switchPersona(p.id, p.theme)}
+                title={p.tagline} style={{
+                  flex: "0 1 calc(33% - 4px)", minWidth: 70,
+                  padding: "7px 4px", borderRadius: 3,
+                  background: persona === p.id ? `${color}15` : J.bgCard,
+                  border: `1px solid ${persona === p.id ? color : J.border}`,
+                  color: persona === p.id ? color : J.textDim,
+                  fontSize: 9, letterSpacing: "0.06em", fontFamily: J.fontHeader, fontWeight: 600,
+                  display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
+                }}>
+                <span style={{ fontSize: 13 }}>{glyph}</span>
+                <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"100%" }}>{p.name}</span>
+              </button>
+            );
+          })}
         </div>
 
         <div style={{ marginBottom: 14 }}>
@@ -2761,8 +3384,6 @@ export default function App() {
   const [tokenLog,        setTokenLog]        = useState<TokenSnapshot[]>([]);
   const [commandLog,      setCommandLog]      = useState<CommandEntry[]>([]);
   const cmdCounterRef = useRef(0);
-
-
   // Instructions
   const [instructions,    setInstructions]    = useState<Instruction[]>(() => loadInstructions());
   // Memory toggle — when false, memory is NOT sent to LLM
@@ -2772,12 +3393,21 @@ export default function App() {
   const haltedRef = useRef(false);
   // Persona — affects theme + system prompt sent to LLM
   const [persona,         setPersonaState]    = useState<string>(() => loadPersona());
+  const [personaList,     setPersonaList]     = useState<PersonaData[]>(_personaRegistry);
+  const [personaMgrOpen,  setPersonaMgrOpen]  = useState(false);
   const personaRef = useRef(persona);
-  const setPersona = useCallback((id: string) => {
-    applyTheme(id);
+  const setPersona = useCallback((id: string, themeData?: Partial<Theme>) => {
+    applyTheme(id, themeData);
     savePersona(id);
     personaRef.current = id;
-    setPersonaState(id);  // triggers re-render with new J palette
+    setPersonaState(id);
+  }, []);
+  const onPersonasChanged = useCallback((list: PersonaData[]) => {
+    refreshPersonaRegistry(list);
+    setPersonaList([...list]);
+    // Re-apply current persona theme in case it was edited
+    const cur = list.find(p => p.id === personaRef.current);
+    if (cur?.theme) applyTheme(cur.id, cur.theme);
   }, []);
   // Workspace
   const [workspaceOpen,   setWorkspaceOpen]   = useState(true);   // sidebar visible by default
@@ -2818,19 +3448,33 @@ export default function App() {
     return () => window.removeEventListener("jarvis:signout", handler);
   }, []);
 
+  // Re-apply theme whenever persona changes (covers cold-start and picker changes)
+  useEffect(() => {
+    if (_personaThemeCache[persona]) {
+      applyTheme(persona);
+    }
+  }, [persona]);
+
   // Sync provInfoRef whenever provInfo changes
   useEffect(() => { provInfoRef.current = { provider: provInfo.provider, model: provInfo.model }; }, [provInfo]);
   // Sync personaRef whenever persona changes
   useEffect(() => { personaRef.current = persona; }, [persona]);
 
-  // Load skills list (graceful fail if endpoint absent)
+  // Load personas from API after login — populates dynamic persona list + themes
   useEffect(() => {
     if (!authedUser) return;
-    api(`${API_URL}/models`).then(r => r.json()).then(d => {
-      // /api/models returns provider catalogue — synthesize skills list
+    api(`${API_URL}/personas`).then(r => r.json()).then(d => {
+      const list = d.personas || [];
+      refreshPersonaRegistry(list);
+      setPersonaList(list);
+      // Apply saved persona theme now that themes are loaded
+      const saved = loadPersona();
+      const cur   = list.find((p: any) => p.id === saved);
+      if (cur?.theme) {
+        applyTheme(saved, cur.theme);
+        setPersonaState(saved);
+      }
     }).catch(() => {});
-    // Try skill list
-    api(`${API_URL}/session/${authedUser}`).catch(() => {});
   }, [authedUser]);
 
   // FIX: WS URL uses actual user_id, reconnects when user changes
@@ -3152,7 +3796,16 @@ export default function App() {
   const canContinue = !streaming && connected;
   const pColor      = PROVIDERS[provInfo.provider]?.color || J.accent;
 
-  if (!authedUser) return <Login onAuth={u => setAuthedUser(u)} />;
+  if (!authedUser) return <Login personas={personaList} onAuth={(u, p) => {
+    setAuthedUser(u);
+    // Apply the persona chosen on the Login screen immediately into App state
+    if (p && _personaThemeCache[p]) {
+      applyTheme(p);
+      savePersona(p);
+      setPersonaState(p);
+      personaRef.current = p;
+    }
+  }} />;
 
   return (
     <div style={{ minHeight: "100vh", background: J.bg, display: "flex", flexDirection: "column" }}
@@ -3186,7 +3839,7 @@ export default function App() {
           </div>
           <Divider color={J.borderMid} />
 
-          <PersonaPicker persona={persona} onChange={setPersona} />
+          <PersonaPicker persona={persona} onChange={(id) => { const p = personaList.find(x=>x.id===id); setPersona(id, p?.theme); }} personas={personaList} />
 
           <Chip label={connected ? "● ONLINE" : "○ OFFLINE"} color={connected ? J.ok : J.err} pulse={connected} />
           <button onClick={() => setWorkspaceOpen(o => !o)} title="Toggle workspace file browser"
@@ -3228,6 +3881,7 @@ export default function App() {
             { label: "⬢ EXPERIENCED", action: () => setExperiencedOpen(true), color: J.react },
             { label: "◈ EVOLVE",    action: () => setEvolutionOpen(true),   color: J.warm },
             { label: "⊕ TELEMETRY", action: () => setTelemetryOpen(true),   color: J.accent },
+            { label: "◈ PERSONAS",  action: () => setPersonaMgrOpen(true),   color: J.react },
             { label: "⬡ INSTRUCT",  action: () => setInstructionsOpen(true), color: J.gold },
             { label: "⚙ CONFIG", action: () => setSettingsOpen(true), color: J.textSec },
             { label: "↺ RESET",  action: handleReset,                  color: J.err },
@@ -3504,7 +4158,7 @@ export default function App() {
       </div>
 
       {/* ── Overlays ── */}
-      {settingsOpen    && <SettingsPanel    onClose={() => setSettingsOpen(false)}    onSaved={d => setProvInfo(prev => ({ ...prev, ...d }))} />}
+      {settingsOpen    && <SettingsPanel    onClose={() => setSettingsOpen(false)}    onSaved={d => setProvInfo(prev => ({ ...prev, ...d }))} authedUser={authedUser} />}
       {memoryOpen      && <MemoryPanel      onClose={() => setMemoryOpen(false)}      userId={authedUser || "default"} />}
       {experiencedOpen && <ExperiencedPanel onClose={() => setExperiencedOpen(false)} userId={authedUser || "default"} />}
       {evolutionOpen   && <EvolutionPanel   onClose={() => setEvolutionOpen(false)}   userId={authedUser || "default"} />}
@@ -3515,6 +4169,13 @@ export default function App() {
           commandLog={commandLog}
           onClearTokens={() => setTokenLog([])}
           onClearCommands={() => setCommandLog([])}
+        />
+      )}
+      {personaMgrOpen && authedUser && (
+        <PersonaManager
+          onClose={() => setPersonaMgrOpen(false)}
+          userId={authedUser}
+          onPersonasChanged={onPersonasChanged}
         />
       )}
       {instructionsOpen && (
