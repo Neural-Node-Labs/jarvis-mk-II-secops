@@ -4,8 +4,12 @@ Enhancement:
 - Add react capability and a checked box to turn it on or off, to ensure if On the task will be completed with selfhealing capability/ self correction.
 
 
-
-
+# Download ollama image
+docker compose exec ollama ollama pull llama3.2:1b
+docker compose exec ollama ollama list
+# Deploy the image to the agent backend container
+docker compose up -d
+docker compose up -d --force-recreate app
 
 
  docker cp agent-backend:/tmp ./agent-app-docker/tmp

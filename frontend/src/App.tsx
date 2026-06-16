@@ -3808,7 +3808,7 @@ export default function App() {
   }} />;
 
   return (
-    <div style={{ minHeight: "100vh", background: J.bg, display: "flex", flexDirection: "column" }}
+    <div style={{ height: "100vh", background: J.bg, display: "flex", flexDirection: "column", overflow: "hidden" }}
       onDrop={onDrop} onDragOver={onDragOver}>
       <style>{buildGlobalCSS(persona)}</style>
 
@@ -3998,7 +3998,7 @@ export default function App() {
         background: `${J.bgPanel}E8`,
         backdropFilter: "blur(10px)",
         maxWidth: 940, width: "100%", margin: "0 auto",
-        position: "sticky", bottom: 0,
+        flexShrink: 0,
       }}>
         {/* Staged attachments + workspace files */}
         {(attachments.length > 0 || workspaceFiles.length > 0) && (

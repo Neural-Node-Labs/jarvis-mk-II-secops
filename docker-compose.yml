@@ -1,64 +1,80 @@
 services:
 
-  # ─── Single container: React (nginx) + FastAPI (uvicorn) ─────────────────────
   app:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: jarvis-app
     restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
     ports:
-      - "${PORT:-3000}:80"
+      - "${PORT:-80}:80"
     environment:
-      # ── LLM API Keys ──
+      LLM_PROVIDER:       ${LLM_PROVIDER:-ollama}
+      LLM_MODEL:          ${LLM_MODEL:-llama3.2:1b}
       DEEPSEEK_API_KEY:   ${DEEPSEEK_API_KEY:-}
       ANTHROPIC_API_KEY:  ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY:     ${OPENAI_API_KEY:-}
-      # ── Ollama (point to external host if needed) ──
       OLLAMA_HOST:        ${OLLAMA_HOST:-http://ollama:11434}
-      # ── Runtime ──
       LOG_LEVEL:          ${LOG_LEVEL:-info}
       PYTHONUNBUFFERED:   "1"
     volumes:
-      # ── EXPOSED TO HOST ──
-      # Settings and provider configs — maps to a './data' folder on your host
       - type: bind
         source: ./jarvis/data
         target: /app/data
-
-      # Experienced knowledge base — maps to a './experienced' folder on your host
       - type: bind
         source: ./jarvis/experienced
         target: /app/experienced
-
-      # Host filesystem access for the filesystem skill
-#      - type: bind
-#        source: ${HOST_MOUNT:-/}
-#        target: /host
-#        read_write: true
-
-      # Custom host output folder mount
       - type: bind
         source: ${HOST_OUTPUT:-./jarvis/output}
         target: /app/output
-
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:80/health"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 25s
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
 
-  # ─── Ollama (optional local Llama) ───────────────────────────────────────────
+  # Pulls the model once, exits cleanly — app waits for this before starting
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: jarvis-ollama-init
+    restart: "no"
+    entrypoint: >
+      sh -c "
+        ollama serve &
+        sleep 5 &&
+        ollama pull ${LLM_MODEL:-llama3.2:1b} &&
+        echo 'Model ready.'
+      "
+    environment:
+      LLM_MODEL: ${LLM_MODEL:-llama3.2:1b}
+    volumes:
+      - type: bind
+        source: ./ollama_models
+        target: /root/.ollama
+    depends_on:
+      ollama:
+        condition: service_healthy
+
   ollama:
     image: ollama/ollama:latest
     container_name: jarvis-ollama
     restart: unless-stopped
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     volumes:
-      # ── EXPOSED TO HOST ──
-      # Ollama models — maps to a './ollama_models' folder on your host
       - type: bind
         source: ./ollama_models
         target: /root/.ollama
-
-# All named volumes have been removed because everything is now managed directly on your host machine.

@@ -23,74 +23,6 @@ from typing import AsyncGenerator, Optional
 
 logger = logging.getLogger("llm_router")
 
-# ── Ollama auto-detection ──────────────────────────────────────────────────────
-
-_OLLAMA_PROBE_TIMEOUT = 2.0   # seconds — fast, non-blocking probe
-
-def _probe_ollama(base_url: str) -> Optional[str]:
-    """
-    Probe the Ollama /api/tags endpoint and return the first available model name,
-    or None if Ollama is unreachable or has no models loaded.
-    Uses a short synchronous httpx call so it can be used at config-build time.
-    """
-    import httpx as _httpx
-    try:
-        tags_url = base_url.rstrip("/v1").rstrip("/") + "/api/tags"
-        resp = _httpx.get(tags_url, timeout=_OLLAMA_PROBE_TIMEOUT)
-        if resp.status_code == 200:
-            models = resp.json().get("models", [])
-            if models:
-                return models[0].get("name") or models[0].get("model")
-    except Exception:
-        pass
-    return None
-
-
-def resolve_config_with_ollama_fallback(
-    provider:    str,
-    model:       str,
-    api_key:     Optional[str] = None,
-    ollama_host: Optional[str] = None,
-) -> tuple[str, str, Optional[str]]:
-    """
-    If *provider* has no API key and Ollama is reachable in Docker, transparently
-    fall back to Ollama.
-
-    Returns (resolved_provider, resolved_model, resolved_api_key).
-
-    Fallback triggers when ALL of these are true:
-      1. No api_key was provided for the current provider.
-      2. The provider is not already 'ollama'.
-      3. Ollama is reachable at OLLAMA_HOST (default: http://ollama:11434).
-    """
-    if provider == "ollama" or api_key:
-        return provider, model, api_key   # nothing to do
-
-    # Determine Ollama base URL — prefer explicit arg, then env, then Docker default
-    raw_host = (
-        ollama_host
-        or os.getenv("OLLAMA_HOST", "http://ollama:11434")
-    )
-    # Normalise: strip trailing /v1 so _probe_ollama can build /api/tags cleanly
-    host_base = raw_host.rstrip("/v1").rstrip("/")
-
-    detected_model = _probe_ollama(host_base)
-    if detected_model is not None:
-        logger.warning(
-            "[ollama_fallback] No API key for provider=%s — falling back to Ollama "
-            "at %s with model=%s",
-            provider, host_base, detected_model,
-        )
-        return "ollama", detected_model, None
-
-    # Ollama not available either — return as-is and let the router surface the error
-    logger.warning(
-        "[no_key_no_ollama] provider=%s has no API key and Ollama is unreachable at %s",
-        provider, host_base,
-    )
-    return provider, model, api_key
-
-
 # ── Wire schema constants ──────────────────────────────────────────────────────
 SCHEMA_OPENAI    = "openai"
 SCHEMA_ANTHROPIC = "anthropic"
@@ -198,29 +130,16 @@ class LLMRouter:
     """
 
     def __init__(self, config: LLMConfig):
-        # ── Ollama fallback — resolve before touching defaults ─────────────────
-        raw_key = config.api_key or (
-            os.getenv(PROVIDER_DEFAULTS.get(config.provider, {}).get("key_env") or "")
-            if PROVIDER_DEFAULTS.get(config.provider, {}).get("key_env")
-            else None
-        )
-        resolved_provider, resolved_model, resolved_key = resolve_config_with_ollama_fallback(
-            provider = config.provider,
-            model    = config.model,
-            api_key  = raw_key,
-        )
-        # Patch config in-place so the rest of the class sees consistent values
-        config.provider = resolved_provider
-        config.model    = resolved_model
-
         self.config   = config
         defaults      = PROVIDER_DEFAULTS.get(config.provider, PROVIDER_DEFAULTS["deepseek"])
 
         self.base_url = config.base_url or defaults["base_url"]
-        self.model    = resolved_model  or defaults["model"]
+        self.model    = config.model    or defaults["model"]
 
+        key_env = defaults.get("key_env")
+        resolved_key = config.api_key or (os.getenv(key_env) if key_env else None)
         if not resolved_key:
-            resolved_key = "ollama" if config.provider == "ollama" else f"MISSING_{defaults.get('key_env') or 'API_KEY'}"
+            resolved_key = "ollama" if config.provider == "ollama" else f"MISSING_{key_env or 'API_KEY'}"
         self.api_key = resolved_key
 
     # ── Header builders ────────────────────────────────────────────────────────
@@ -311,76 +230,36 @@ class LLMRouter:
 
         retries = 0
         while True:
-            _retry_after_stream = False   # set inside the stream ctx, acted on outside it
-            _wait_s             = 0
             try:
                 async with httpx.AsyncClient(timeout=self.config.timeout_s) as client:
                     async with client.stream("POST", endpoint, headers=headers, json=payload) as response:
                         if response.status_code in (429, 502, 503) and retries < self.config.max_retries:
-                            # Must drain the response before leaving the stream context manager —
-                            # httpx raises ResponseNotRead if we exit without reading first.
-                            await response.aread()
                             retries += 1
-                            _wait_s = 2 ** retries
+                            wait = 2 ** retries
                             logger.warning("[llm_retry] req=%s status=%d retry=%d wait=%ds",
-                                           request_id, response.status_code, retries, _wait_s)
-                            _retry_after_stream = True
-                            # Fall through to exit the context manager cleanly — do NOT continue here.
-                        else:
-                            # Read error body BEFORE raise_for_status — once we leave
-                            # the stream context the connection is gone and aread() fails.
-                            if response.status_code >= 400:
-                                await response.aread()
-                                err_body = response.text[:300]
-                                if response.status_code in (429, 502, 503) and retries < self.config.max_retries:
-                                    retries += 1
-                                    _wait_s = 2 ** retries
-                                    logger.warning("[llm_retry] req=%s status=%d retry=%d wait=%ds",
-                                                   request_id, response.status_code, retries, _wait_s)
-                                    _retry_after_stream = True
-                                else:
-                                    # Store for yield after context manager closes
-                                    _retry_after_stream = False
-                                    _err_yield = f"\n[LLM ERROR] HTTP {response.status_code}: {err_body}"
-                            else:
-                                _err_yield = None
-                                async for line in response.aiter_lines():
-                                    if not line or line == "data: [DONE]":
-                                        continue
-                                    raw = line[6:] if line.startswith("data: ") else line
-                                    try:
-                                        chunk = json.loads(raw)
-                                        token = self._extract_token(chunk)
-                                        if token:
-                                            yield token
-                                    except json.JSONDecodeError:
-                                        continue
-
-                # ── Outside the stream context manager ────────────────────────
-                if _retry_after_stream:
-                    await asyncio.sleep(_wait_s)
-                    continue        # safe to retry now — context manager is closed
-                if _err_yield:
-                    yield _err_yield
-                    return
-                return              # success
+                                           request_id, response.status_code, retries, wait)
+                            await asyncio.sleep(wait)
+                            continue
+                        response.raise_for_status()
+                        async for line in response.aiter_lines():
+                            if not line or line == "data: [DONE]":
+                                continue
+                            data = line[6:] if line.startswith("data: ") else line
+                            try:
+                                chunk = json.loads(data)
+                                token = self._extract_token(chunk)
+                                if token:
+                                    yield token
+                            except json.JSONDecodeError:
+                                continue
+                return  # success — exit retry loop
 
             except httpx.HTTPStatusError as exc:
-                # Fallback: raised by raise_for_status() if we missed it above.
-                # Body is likely gone at this point; surface what we can.
-                err_body = getattr(exc.response, "_content", None)
-                if err_body is not None:
-                    try:
-                        err_body = err_body.decode(errors="replace")[:300]
-                    except Exception:
-                        err_body = repr(err_body)[:300]
-                else:
-                    err_body = str(exc)[:300]
                 if exc.response.status_code in (429, 502, 503) and retries < self.config.max_retries:
                     retries += 1
                     await asyncio.sleep(2 ** retries)
                     continue
-                yield f"\n[LLM ERROR] HTTP {exc.response.status_code}: {err_body}"
+                yield f"\n[LLM ERROR] HTTP {exc.response.status_code}: {exc.response.text[:200]}"
                 return
 
             except httpx.ConnectError:

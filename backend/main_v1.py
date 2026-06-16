@@ -121,24 +121,16 @@ def _destroy_session(user_id: str) -> bool:
 
 
 def _build_llm_config(model: str = None, provider: str = None, temperature: float = 0.7) -> LLMConfig:
-    """
-    Construct LLMConfig from env + optional overrides.
-    If the resolved provider has no API key and Ollama is reachable in Docker,
-    LLMRouter.__init__ will transparently fall back to Ollama automatically.
-    No Pydantic — pure dict construction.
-    """
+    """Construct LLMConfig from env + optional overrides. No Pydantic — pure dict construction."""
     resolved_provider = provider or os.getenv("LLM_PROVIDER", "deepseek")
     resolved_model    = model    or os.getenv("LLM_MODEL", "deepseek-coder")
     max_tokens        = get_model_max_tokens(resolved_model)
-    # Read the API key for the resolved provider (may be None — fallback handled in LLMRouter)
-    key_env           = f"{resolved_provider.upper()}_API_KEY"
-    api_key           = os.getenv(key_env)
     return LLMConfig(
         provider=resolved_provider,
         model=resolved_model,
         temperature=temperature,
         max_tokens=max_tokens,
-        api_key=api_key,
+        api_key=os.getenv(f"{resolved_provider.upper()}_API_KEY"),
     )
 
 
@@ -3212,23 +3204,12 @@ async def spa_fallback(full_path: str):
 
 @app.on_event("startup")
 async def on_startup():
-    from core.llm_router import resolve_config_with_ollama_fallback, PROVIDER_DEFAULTS
-    _provider = os.getenv("LLM_PROVIDER", "deepseek")
-    _model    = os.getenv("LLM_MODEL",    "deepseek-coder")
-    _key_env  = f"{_provider.upper()}_API_KEY"
-    _api_key  = os.getenv(_key_env)
-    eff_provider, eff_model, _ = resolve_config_with_ollama_fallback(_provider, _model, _api_key)
-
     logger.info("═" * 60)
     logger.info("  ⚡ Mighty Jarvis MKII v4.0.0 — ONLINE")
     logger.info("  Methodology : CBD v2.2")
     logger.info("  Environment : Kali Linux Rolling")
-    if eff_provider != _provider:
-        logger.info("  Provider    : %s → %s (Ollama fallback — no API key)", _provider, eff_provider)
-        logger.info("  Model       : %s (auto-detected from Ollama)", eff_model)
-    else:
-        logger.info("  Provider    : %s", _provider)
-        logger.info("  Model       : %s", _model)
+    logger.info("  Provider    : %s", os.getenv("LLM_PROVIDER", "deepseek"))
+    logger.info("  Model       : %s", os.getenv("LLM_MODEL",    "deepseek-coder"))
     logger.info("  Max ReAct   : 30 iterations")
     logger.info("  Max Parallel: %s tasks", os.getenv("JARVIS_MAX_PARALLEL", "10"))
     logger.info("  Task Timeout: %s s", TASK_TIMEOUT_SECONDS)
