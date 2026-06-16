@@ -494,6 +494,91 @@
           "params": {}
         }
       ]
+    },
+    {
+      "id": "SKL-UNIX-TOOLS",
+      "name": "unix_tools_skill",
+      "version": "1.0.0",
+      "description": "POSIX-compliant toolchain wrapper. Executes high-efficiency shell pipelines, pipe orchestrations, and native text mutations using standard Unix core utilities.",
+      "actions": [
+        {
+          "name": "execute_pipeline",
+          "description": "Construct and run sequential UNIX pipeline command streams natively (e.g., grep, sed, awk, cut) under a performance tracking shell environment.",
+          "params": {
+            "pipeline": { "type": "string", "required": true, "description": "The exact sequential command pipe structure to process data" },
+            "input_file": { "type": "string", "required": false, "description": "Optional path to a target file to pipe as standard input" },
+            "timeout": { "type": "integer", "required": false, "default": 60 }
+          }
+        },
+        {
+          "name": "stream_grep",
+          "description": "High-speed line-by-line regex search filtering optimized for massive file parsing without causing memory overflows.",
+          "params": {
+            "path": { "type": "string", "required": true, "description": "Target file or directory path to scan" },
+            "pattern": { "type": "string", "required": true, "description": "The regex pattern to scan for matching footprints" },
+            "invert_match": { "type": "boolean", "required": false, "default": false },
+            "max_lines": { "type": "integer", "required": false, "default": 5000 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "SKL-SELENIUM-TEST",
+      "name": "selenium_test_skill",
+      "version": "1.0.0",
+      "description": "Automated end-to-end user interface testing suite. Controls browser automation profiles, performs assertion checks, and scaffolds test frameworks.",
+      "actions": [
+        {
+          "name": "scaffold",
+          "description": "Generates complete Selenium test boilerplate structures, page objects, and continuous integration pipeline configs.",
+          "params": {
+            "target_url": { "type": "string", "required": true, "description": "The target base URL for the test suite" },
+            "framework": { "type": "string", "required": false, "default": "pytest", "description": "Testing framework variant (e.g., pytest, unittest)" },
+            "output_dir": { "type": "string", "required": false, "default": "tests/ui" }
+          }
+        },
+        {
+          "name": "run_suite",
+          "description": "Triggers the local execution of the UI test suite in either headless or visible browser modes.",
+          "params": {
+            "test_path": { "type": "string", "required": true, "description": "Path to the specific test file or test suite directory" },
+            "headless": { "type": "boolean", "required": false, "default": true },
+            "browser": { "type": "string", "required": false, "default": "chrome" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "SKL-SKILL-CREATOR",
+      "name": "skill_creator",
+      "version": "1.0.0",
+      "description": "Self-referential meta-agent engineering tool. Authors, evaluates, runs structural alignment benchmarks, and bundles new .skill archives dynamically.",
+      "actions": [
+        {
+          "name": "run_loop",
+          "description": "Starts the iterative feedback optimization cycle to generate, debug, and improve an agent skill target.",
+          "params": {
+            "skill_name": { "type": "string", "required": true, "description": "The name identifier for the skill being generated" },
+            "objectives": { "type": "string", "required": true, "description": "Detailed description of what the target skill must accomplish" }
+          }
+        },
+        {
+          "name": "package_skill",
+          "description": "Compresses an engineered skill workspace folder structure down into a deployable, standard-compliant .skill zip package.",
+          "params": {
+            "source_dir": { "type": "string", "required": true, "description": "Path to the uncompressed skill directory containing SKILL.md" },
+            "output_name": { "type": "string", "required": false, "description": "Optional custom filename for the resulting bundle" }
+          }
+        },
+        {
+          "name": "run_eval",
+          "description": "Runs an automated alignment and safety validation check using internal comparators and scoring matrix schemas.",
+          "params": {
+            "skill_path": { "type": "string", "required": true, "description": "Path to the targeted .skill folder or compressed bundle" },
+            "benchmark_dataset": { "type": "string", "required": false, "description": "Optional custom evaluation suite dataset path" }
+          }
+        }
+      ]
     }
   ]
 }

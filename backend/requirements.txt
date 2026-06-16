@@ -6,3 +6,6 @@ python-multipart==0.0.9
 aiofiles==23.2.1
 psutil==5.9.8
 python-nmap
+selenium
+pytest
+webdriver-manager

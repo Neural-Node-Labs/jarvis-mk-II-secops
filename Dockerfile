@@ -40,7 +40,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         npm \
         python3-venv \
         python3 \
-            python3-pip \
+        python3-pip \
+        chromium \
+        chromium-driver \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Python dependencies ───────────────────────────────────────────────────────
@@ -54,7 +56,9 @@ RUN python3 -m venv /opt/venv
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN pip install --no-cache-dir -r requirements.txt
-
+RUN pip install --no-cache-dir selenium
+RUN pip install --no-cache-dir pytest
+RUN pip install --no-cache-dir webdriver-manager
 # ── Backend source ────────────────────────────────────────────────────────────
 COPY backend/ ./
 

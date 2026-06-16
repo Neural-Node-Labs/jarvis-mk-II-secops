@@ -3833,8 +3833,8 @@ export default function App() {
             <ArcReactor size={26} />
             <div>
               <div data-text={J.wordmark} className={persona !== "jarvis" ? "persona-glitch" : ""}
-                style={{ color: J.accent, fontSize: 12, letterSpacing: "0.2em", fontFamily: J.fontHeader, fontWeight: 700, lineHeight: 1.2 }}>{J.wordmark}</div>
-              <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.15em", fontFamily: J.fontHeader, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{J.subtitle}</div>
+                style={{ color: J.accent, fontSize: 12, letterSpacing: "0.2em", fontFamily: J.fontHeader, fontWeight: 700, lineHeight: 1.2 }}>🧠 S.I.R</div>
+              <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.15em", fontFamily: J.fontHeader, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>Super Intelligent Robot Platform</div>
             </div>
           </div>
           <Divider color={J.borderMid} />

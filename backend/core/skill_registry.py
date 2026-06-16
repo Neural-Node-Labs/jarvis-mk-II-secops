@@ -70,6 +70,10 @@ class SkillRegistry:
             ("jarvis_mkii", self._load_jarvis_mkii),
             ("swarm", self._load_swarm),
             ("sentinel", self._load_sentinel),
+
+            ("selenium_test_skill", self._load_selenium_test_skill),
+            ("skill_creator", self._load_skill_creator),
+            ("unix_tools_skill", self._load_unix_tools_skill),
         ]
         for name, loader in loaders:
             try:
@@ -114,6 +118,23 @@ class SkillRegistry:
     def _load_sentinel(self):
         from skills.sentinel_skill import SentinelSkill
         return SentinelSkill()
+
+    def _load_selenium_test_skill(self):
+        """Loads the selenium test orchestration and scaffolding skill."""
+        # Using a unified folder/package runner matching your structural pattern
+        from skills.selenium_test_skill import SeleniumTestSkill
+        return SeleniumTestSkill()
+
+    def _load_skill_creator(self):
+        """Loads the skill creator package containing evaluators and analytical agents."""
+        from skills.skill_creator_skill import SkillCreatorSkill
+        return SkillCreatorSkill()
+
+    def _load_unix_tools_skill(self):
+        """Loads the specialized native unix shell utilities wrapper skill."""
+        from skills.unix_tools_skill import UnixToolsSkill
+        return UnixToolsSkill()
+
 
     async def execute(self, skill_name: str, action: str, params: dict, confirmed: bool = False) -> SkillResult:
         self._ensure_loaded()

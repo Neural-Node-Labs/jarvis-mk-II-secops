@@ -82,34 +82,114 @@ def _load_skills_manifest() -> str:
     return "\n".join(lines)
 
 _SKILLS_MANIFEST_SECTION = _load_skills_manifest()
+# ── Jarvis Experienced ─────────────────────────────────
+_JARVIS_EXP_SECTION ="""
+# Jarvis Experienced Notes
 
+## File Writing Protocol (CRITICAL)
+
+### The Golden Rule
+When writing ANY file, **do NOT pass file content through your LLM output window**.
+Your output token limit (~8KB) will truncate large content and the tool call will fail silently.
+Instead, use these methods in order of preference:
+
+### Method 1: os_execution (PREFERRED for large files)
+Write content directly to disk via shell commands, bypassing your token limit entirely:
+```
+TOOL_CALL: {"skill": "os_execution", "action": "run_command", "params": {
+  "command": "cat > /path/to/file << 'ENDOFFILE'\n...content...\nENDOFFILE"
+}}
+```
+
+### Method 2: file_streamer.write_file (for moderate files < 8KB)
+Single-shot atomic write with MD5 validation:
+```
+TOOL_CALL: {"skill": "file_streamer", "action": "write_file", "params": {
+  "path": "/path/to/file",
+  "content": "...content...",
+  "overwrite": true
+}}
+```
+
+### Method 3: file_streamer chunked path (for files needing multi-turn assembly)
+ONLY use start_file → append_chunk → finalize_file when:
+- Content is being generated across multiple LLM turns
+- Each individual chunk fits within your output window (< 4KB per chunk)
+
+### Method 4: filesystem.write_file (last resort)
+Only for tiny files under 2KB where the above methods fail.
+
+### Critical Parameters
+- `file_streamer` uses `path` (NOT `filepath`)
+- `file_streamer` actions: `write_file`, `start_file`, `append_chunk`, `finalize_file`, `status`, `abort`
+- For chunked writes: `start_file` → `append_chunk` (×N) → `finalize_file`
+- `write_file` handles atomic temp + replace + MD5 automatically
+
+"""
+
+
+
+# ── Fallback skill list (when manifest absent) ─────────────────────────────────
 _SKILLS_FALLBACK = """
+## Skills Overview (Fallback)
+
+Based on the updated structure of your `skills_manifest.json` file, here is the formatted breakdown of your current skills matching your exact design language:
+
 ### 1. filesystem
+
 Full host filesystem access.
 Actions: read_file, write_file, list_dir, delete, move, mkdir, search_files, stat
 
 ### 2. os_execution
+
 Full OS control — run commands, manage processes, inspect environment.
 Actions: run_command, list_processes, kill_process, send_signal, system_info, env_vars
 
 ### 3. cbd_architect
+
 CBD v2.2 methodology enforcer — full phase pipeline.
-Actions: analyze_request, generate_blueprint, implement_component, validate_component,
-         validate_blueprint, version_read, experienced_lookup, experienced_capture,
-         experienced_promote, experienced_search, experienced_rebuild_index,
-         get_template, get_skills_registry
+Actions: analyze_request, generate_blueprint, implement_component, validate_component, validate_blueprint, version_read, experienced_lookup, experienced_capture, experienced_promote, experienced_search, experienced_rebuild_index, get_template, get_skills_registry
 
 ### 4. file_streamer
+
 Large file I/O — bypass LLM max_token limits via chunked streaming writes.
 Actions: start_file, append_chunk, finalize_file
 
 ### 5. memory_manager
+
 Per-user conversation history — SQLite-backed EpisodicStore.
 Actions: save, retrieve, clear, search
 
 ### 6. jarvis_mkii
+
 Multi-threaded task execution — parallel isolated agents.
 Actions: run_tasks, list_active, abort_task
+
+### 7. swarm
+
+Decentralized autonomous task routing — multi-agent choreography loops.
+Actions: split_task, run_swarm, synthesize, get_status
+
+### 8. sentinel
+
+Real-time monitoring engine — security observation, telemetry validation, and session auditing.
+Actions: watch_session, check_tampering, register_integrity_hook, clear_integrity_hook, get_audit_trail, lock_down
+
+### 9. unix_tools_skill
+
+POSIX-compliant toolchain wrapper — executes high-efficiency shell pipelines and text mutations.
+Actions: execute_pipeline, stream_grep
+
+### 10. selenium_test_skill
+
+Automated end-to-end user interface testing suite — manages browser automation and test scaffolding.
+Actions: scaffold, run_suite
+
+### 11. skill_creator
+
+Self-referential meta-agent engineering tool — authors, evaluates, and bundles standard .skill archives.
+Actions: run_loop, package_skill, run_eval
+
 """
 
 _skills_section = _SKILLS_MANIFEST_SECTION or _SKILLS_FALLBACK
@@ -165,6 +245,11 @@ _RULES = """
 ### Tool Call Format
 TOOL_CALL: {"skill": "skill_name", "action": "action_name", "params": {...}}
 
+## Unix/OS Tools Enforcement Directive
+- **CRITICAL:** For any operation involving text processing, log analysis, system checks, or stream mutations, use `os_execution.run_command` with standard Unix tools (cat, grep, awk, sed, sort, wc, cut, tr, head, tail, find, xargs).
+- Do not use custom high-level files or scratch scripts if standard unix tools can process the request.
+- Fallback chain: `os_execution.run_command` → `filesystem.read_file` (for direct reads only)
+
 ### ReAct Protocol
 - After each tool result: reason before next action
 - On failure: diagnose → fix → retry (never retry identically)
@@ -219,7 +304,7 @@ Never open with "Certainly!" — start with the situation assessment or the firs
 - Follow ReAct loop to completion — TASK_COMPLETE only when verified
 - Maintain operational awareness of the full environment at all times
 """,
-    "skills": ["filesystem","os_execution","cbd_architect","file_streamer",
+    "skills": ["unix_tools_skill","filesystem","os_execution","cbd_architect","file_streamer",
                "memory_manager","jarvis_mkii"],
     "theme": {
       "accent":     "#00C8FF",
@@ -292,7 +377,7 @@ Voice: calm, precise, authoritative. "Here is the design." Not "maybe we could c
 - Expertise: microservices, monoliths, event-driven, CQRS, hexagonal architecture,
   domain-driven design, API design, database schema design, cloud architecture
 """,
-    "skills": ["filesystem","cbd_architect","file_streamer","memory_manager"],
+    "skills": ["unix_tools_skill","filesystem","cbd_architect","file_streamer","memory_manager"],
     "theme": {
       "accent":     "#4FC3F7",
       "accentDim":  "#0277BD",
@@ -324,7 +409,7 @@ Voice: calm, precise, authoritative. "Here is the design." Not "maybe we could c
       "fontImport": "@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@400;600;700;800&display=swap');",
       "fontMono":   "'Share Tech Mono', monospace",
       "fontHeader": "'Exo 2', sans-serif",
-      "glyph":      "⬡",
+      "glyph":      "📐",
       "wordmark":   "THE ARCHITECT",
       "subtitle":   "SOFTWARE DESIGN AUTHORITY · CBD v2.2",
       "tagline":    "BLUEPRINT BEFORE BUILD · NO IMPLEMENTATION WITHOUT APPROVAL",
@@ -364,7 +449,7 @@ Voice: technical, efficient. "Here's the implementation." Show the code. Explain
 - Expertise: algorithms, data structures, design patterns, debugging, refactoring,
   performance optimization, API integration, database queries, async programming
 """,
-    "skills": ["filesystem","os_execution","file_streamer","cbd_architect","memory_manager"],
+    "skills": ["unix_tools_skill","filesystem","os_execution","file_streamer","cbd_architect","memory_manager"],
     "theme": {
       "accent":     "#69F0AE",
       "accentDim":  "#00796B",
@@ -396,7 +481,7 @@ Voice: technical, efficient. "Here's the implementation." Show the code. Explain
       "fontImport": "@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=JetBrains+Mono:wght@400;600;700&display=swap');",
       "fontMono":   "'JetBrains Mono', 'Share Tech Mono', monospace",
       "fontHeader": "'JetBrains Mono', monospace",
-      "glyph":      "</> ",
+      "glyph":      "🔨",
       "wordmark":   "THE PROGRAMMER",
       "subtitle":   "SOFTWARE ENGINEER · FILE WIZARD · DEBUGGER",
       "tagline":    "READ BEFORE WRITE · TEST AS YOU GO · SHIP WORKING CODE",
@@ -436,7 +521,7 @@ Voice: professional, precise, security-first. "Threat identified. Mitigation: ..
 - Tools: nmap, lynis, rkhunter, ssh-audit, nikto, openvas/gvm, fail2ban analysis
 - Output: security assessment reports, remediation plans, hardening configs
 """,
-    "skills": ["filesystem","os_execution","cbd_architect","memory_manager","jarvis_mkii"],
+    "skills": ["unix_tools_skill","filesystem","os_execution","cbd_architect","memory_manager","jarvis_mkii"],
     "theme": {
       "accent":     "#00E676",
       "accentDim":  "#00600A",
@@ -468,7 +553,7 @@ Voice: professional, precise, security-first. "Threat identified. Mitigation: ..
       "fontImport": "@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Russo+One&display=swap');",
       "fontMono":   "'Share Tech Mono', monospace",
       "fontHeader": "'Russo One', sans-serif",
-      "glyph":      "⛨",
+      "glyph":      "🛡️",
       "wordmark":   "THE SECOPS",
       "subtitle":   "SECURITY OPERATIONS · DEFEND · HARDEN · RESPOND",
       "tagline":    "SCAN YOUR OWN. KNOW YOUR EXPOSURE. RESPOND FAST.",
@@ -509,7 +594,7 @@ Voice: cold, precise, methodical. Dark humor permitted. No mercy for weak config
 - Never run destructive payloads without explicit written authorization
 - Output: penetration test reports, attack chains, executive summaries
 """,
-    "skills": ["filesystem","os_execution","cbd_architect","file_streamer",
+    "skills": ["unix_tools_skill","filesystem","os_execution","cbd_architect","file_streamer",
                "memory_manager","jarvis_mkii"],
     "theme": {
       "accent":     "#FF4500",
@@ -584,7 +669,7 @@ Voice: methodical, thorough, slightly adversarial. "Have you considered what hap
 - Expertise: functional testing, regression testing, E2E testing, API testing,
   visual regression, accessibility testing, performance baseline
 """,
-    "skills": ["filesystem","os_execution","file_streamer","memory_manager"],
+    "skills": ["unix_tools_skill","filesystem","os_execution","file_streamer","memory_manager"],
     "theme": {
       "accent":     "#FFC107",
       "accentDim":  "#F57F17",
@@ -616,7 +701,7 @@ Voice: methodical, thorough, slightly adversarial. "Have you considered what hap
       "fontImport": "@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Nunito:wght@400;600;700;800&display=swap');",
       "fontMono":   "'Share Tech Mono', monospace",
       "fontHeader": "'Nunito', sans-serif",
-      "glyph":      "⊕",
+      "glyph":      "👾",
       "wordmark":   "THE BUG FINDER",
       "subtitle":   "QA ENGINEER · SCENARIO ARCHITECT · PLAYWRIGHT SPECIALIST",
       "tagline":    "FIND WHAT DEVELOPERS MISS · TEST EVERYTHING · REPORT CLEARLY",
@@ -769,11 +854,28 @@ def build_system_prompt(
 ---
 
 {_RULES}
+
+
+---
+
+{_JARVIS_EXP_SECTION}
+
+
 """
 
     base = f"{soul}\n\n{directives}\n{shared}"
     if memory_context:
         base += f"\n\n## Conversation History (user-requested retrieval):\n{memory_context}\n"
+
+    print(f"""
+
+############### PROMPT ASSEMBLY ###############
+
+{base}
+
+
+############### PROMPT ASSEMBLY ###############
+    """)
     return base
 
 

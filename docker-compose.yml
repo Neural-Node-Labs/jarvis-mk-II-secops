@@ -50,15 +50,15 @@ services:
       start_period: 25s
 
   # ─── Ollama (optional local Llama) ───────────────────────────────────────────
-#  ollama:
-#    image: ollama/ollama:latest
-#    container_name: jarvis-ollama
-#    restart: unless-stopped
-#    volumes:
-#      # ── EXPOSED TO HOST ──
-#      # Ollama models — maps to a './ollama_models' folder on your host
-#      - type: bind
-#        source: ./ollama_models
-#        target: /root/.ollama
+  ollama:
+    image: ollama/ollama:latest
+    container_name: jarvis-ollama
+    restart: unless-stopped
+    volumes:
+      # ── EXPOSED TO HOST ──
+      # Ollama models — maps to a './ollama_models' folder on your host
+      - type: bind
+        source: ./ollama_models
+        target: /root/.ollama
 
 # All named volumes have been removed because everything is now managed directly on your host machine.
