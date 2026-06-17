@@ -3216,12 +3216,23 @@ async def spa_fallback(full_path: str):
 
 @app.on_event("startup")
 async def on_startup():
+    from core.llm_router import resolve_config_with_ollama_fallback, PROVIDER_DEFAULTS
+    _provider = os.getenv("LLM_PROVIDER", "deepseek")
+    _model    = os.getenv("LLM_MODEL",    "deepseek-coder")
+    _key_env  = f"{_provider.upper()}_API_KEY"
+    _api_key  = os.getenv(_key_env)
+    eff_provider, eff_model, _ = resolve_config_with_ollama_fallback(_provider, _model, _api_key)
+
     logger.info("═" * 60)
     logger.info("  ⚡ Mighty Jarvis MKII v4.0.0 — ONLINE")
     logger.info("  Methodology : CBD v2.2")
     logger.info("  Environment : Kali Linux Rolling")
-    logger.info("  Provider    : %s", os.getenv("LLM_PROVIDER", "deepseek"))
-    logger.info("  Model       : %s", os.getenv("LLM_MODEL",    "deepseek-coder"))
+    if eff_provider != _provider:
+        logger.info("  Provider    : %s → %s (Ollama fallback — no API key)", _provider, eff_provider)
+        logger.info("  Model       : %s (auto-detected from Ollama)", eff_model)
+    else:
+        logger.info("  Provider    : %s", _provider)
+        logger.info("  Model       : %s", _model)
     logger.info("  Max ReAct   : 30 iterations")
     logger.info("  Max Parallel: %s tasks", os.getenv("JARVIS_MAX_PARALLEL", "10"))
     logger.info("  Task Timeout: %s s", TASK_TIMEOUT_SECONDS)
