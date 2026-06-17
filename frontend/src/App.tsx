@@ -3610,6 +3610,18 @@ export default function App() {
     } else if (type === "error") {
       setMessages(prev => [...prev, { role: "assistant", content: `❌ ${data}` }]);
       setStreaming(false);
+    } else if (type === "auth_ok") {
+      // Sync UI provider/model to whatever the backend actually resolved
+      // (covers Ollama fallback where env says deepseek but no key exists)
+      if (data?.provider_info) {
+        const pi = data.provider_info;
+        setProvInfo(prev => ({
+          ...prev,
+          provider:      pi.provider      || prev.provider,
+          model:         pi.model         || prev.model,
+          schema_format: pi.schema_format || prev.schema_format,
+        }));
+      }
     } else if (type === "stream_start") {
       // backend SSE start acknowledgement — ignore
     }

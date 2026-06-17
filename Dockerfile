@@ -62,6 +62,7 @@ RUN pip install --no-cache-dir webdriver-manager
 # ── Backend source ────────────────────────────────────────────────────────────
 COPY backend/ ./
 
+
 # ── Frontend build artifacts → nginx root ────────────────────────────────────
 COPY --from=frontend-builder /app/dist /usr/share/nginx/html
 
@@ -76,11 +77,12 @@ COPY deploy/supervisord.conf /etc/supervisor/conf.d/agent.conf
 # /app/data  — settings.json (provider config)
 # /app/experienced — Experienced knowledge base entries + index.md
 RUN mkdir -p /app/data /app/experienced \
-    && useradd -m -u 1001 jarvis \
+    && useradd -m -u 1001 sir \
     && mkdir -p /var/log/supervisor \
-    && chown -R jarvis:jarvis /app
+    && mkdir -p /app/workspace \
+    && chown -R sir:sir /app
 
-# USER jarvis
+USER sir
 
 # ── Health check ──────────────────────────────────────────────────────────────
 HEALTHCHECK --interval=15s --timeout=5s --start-period=25s --retries=5 \
