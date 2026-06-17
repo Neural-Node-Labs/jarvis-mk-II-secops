@@ -29,7 +29,7 @@ def main():
     parser = argparse.ArgumentParser(description="Task Scheduler Skill")
     parser.add_argument("--port", type=int, default=int(os.environ.get("TASK_SCHEDULER_PORT", "9090")))
     parser.add_argument("--host", type=str, default=os.environ.get("TASK_SCHEDULER_HOST", "0.0.0.0"))
-    parser.add_argument("--db", type=str, default=os.environ.get("TASK_SCHEDULER_DB", "/tmp/workspace/scheduler/tasks.db"))
+    parser.add_argument("--db", type=str, default=os.environ.get("TASK_SCHEDULER_DB", "/app/workspace/scheduler/tasks.db"))
     parser.add_argument("--static", type=str, default=os.environ.get("TASK_SCHEDULER_STATIC", ""))
     parser.add_argument("--no-scheduler", action="store_true", help="Don't start the background scheduler")
     args = parser.parse_args()

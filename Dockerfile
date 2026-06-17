@@ -83,7 +83,21 @@ RUN mkdir -p /app/data /app/experienced \
     && chown -R sir:sir /app \
     && chown -R sir:sir /var/log/supervisor
 
-#USER sir
+# USER jarvis
+
+# ── Entrypoint: fixes bind-mount ownership on every container start ──────────
+# /app/data, /app/experienced, /app/output are bind-mounted from the host
+# (docker-compose.yml) at RUNTIME, which overrides the `chown -R jarvis:jarvis
+# /app` above — that chown only ever touches the image's own layers. If those
+# host folders don't already exist, Docker creates them owned by root, and the
+# FastAPI app (run as the unprivileged `jarvis` user via supervisord) then
+# can't write into them — this is the "workspace becomes root, agent can't
+# write to it" bug. The entrypoint runs as root, before supervisord starts,
+# and re-chowns those paths every time the container boots so this can't
+# silently regress. See deploy/docker-entrypoint.sh for the full explanation.
+COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 # ── Health check ──────────────────────────────────────────────────────────────
 HEALTHCHECK --interval=15s --timeout=5s --start-period=25s --retries=5 \

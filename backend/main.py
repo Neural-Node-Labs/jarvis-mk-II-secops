@@ -285,7 +285,7 @@ async def _kali_exec(command: str, cwd: str = None, timeout: int = None, env_ext
     """Execute a shell command and return structured result."""
     effective_timeout = timeout or KALI_TOOL_TIMEOUT
     effective_env     = {**_KALI_ENV, **(env_extra or {})}
-    effective_cwd     = cwd or "/tmp"
+    effective_cwd     = cwd or "/app/workspace"
 
     started = datetime.now(timezone.utc)
     logger.info("[kali_exec_start] cmd=%.80s cwd=%s timeout=%ds", command, effective_cwd, effective_timeout)
@@ -589,7 +589,7 @@ async def chat_websocket(ws: WebSocket, user_id: str):
             memory_enabled  = msg.get("memory_enabled", True)   # False = skip memory injection
             persona         = msg.get("persona", DEFAULT_PERSONA)  # "jarvis" | "omnikon" | "kraken"
             project         = msg.get("project",  DEFAULT_PROJECT) # active UI project name
-            workspace_path  = _workspace_path(user_id, project)   # /tmp/{user}/{project}/workspace
+            workspace_path  = _workspace_path(user_id, project)   # /app/workspace/{user}/{project}/workspace
 
             # ── HALT signal: destroy session so agent stops and forgets context ──
             if halt:
@@ -1086,6 +1086,215 @@ async def _skill_call(skill: str, action: str, params: dict) -> JSONResponse:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ROUTER COMPONENT 18b — Scheduler
+# Logical function: CRUD for scheduled tasks (UI: add / edit / delete / run-now)
+# + a background loop that actually executes due tasks.
+#
+# A scheduled task is either:
+#   task_type="ai_call"  -> on schedule, run payload.message through the
+#                            agent (same path as a normal chat turn).
+#   task_type="command"  -> on schedule, run payload.command as a shell
+#                            command (this covers "run a python script" too:
+#                            command = "python3 /app/output/script.py arg1").
+#
+# Storage/CRUD lives in the `scheduler` skill (skills/scheduler_skill.py).
+# Execution lives here because this is where the per-user Agent sessions are.
+# IN:  { name, user_id, task_type, schedule:{kind,value}, payload, enabled }
+# OUT: task dict (id, next_run_at, last_status, ...)
+# Trace points: scheduler_task_created, scheduler_task_due, scheduler_run_*
+# ══════════════════════════════════════════════════════════════════════════════
+
+SCHEDULER_POLL_SECONDS    = int(os.getenv("JARVIS_SCHEDULER_POLL_SECONDS", "15"))
+SCHEDULER_CMD_TIMEOUT     = int(os.getenv("JARVIS_SCHEDULER_CMD_TIMEOUT", "300"))
+SCHEDULER_OUTPUT_MAX_CHARS = 20_000
+_scheduler_task: Optional[asyncio.Task] = None
+
+
+async def _run_scheduled_ai_call(task: dict) -> dict:
+    """Send payload.message into the agent for this task's user, exactly like
+    a normal chat turn, and collect the final text. react=True by default so
+    the agent can use tools/skills, not just answer in one shot."""
+    payload    = task.get("payload") or {}
+    message    = payload.get("message", "")
+    persona    = payload.get("persona", DEFAULT_PERSONA)
+    react      = bool(payload.get("react", True))
+    auto_confirm = bool(payload.get("auto_confirm", True))  # scheduled tasks run unattended
+    user_id    = payload.get("user_id_override") or task.get("user_id") or "scheduler"
+
+    agent  = _get_session(user_id)
+    chunks: list[str] = []
+    async for event in agent.chat_stream(message, react=react, auto_confirm=auto_confirm, persona=persona):
+        if event.get("type") == "token":
+            chunks.append(str(event.get("data", "")))
+        elif event.get("type") == "tool_result":
+            chunks.append(f"\n[tool: {event['data'].get('skill')}.{event['data'].get('action')} -> "
+                           f"{'OK' if event['data'].get('success') else 'FAILED'}]\n")
+    summary = "".join(chunks).strip() or "(no output)"
+    return {"status": "success", "output": summary[:SCHEDULER_OUTPUT_MAX_CHARS]}
+
+
+async def _run_scheduled_command(task: dict) -> dict:
+    """Run payload.command as a shell command with a timeout. Same trust
+    model as the os_execution skill — this agent already ships nmap/hydra/
+    sqlmap, so scheduled commands run with the same privileges the agent
+    itself runs with."""
+    payload  = task.get("payload") or {}
+    command  = payload.get("command", "")
+    cwd      = payload.get("cwd") or None
+    timeout  = int(payload.get("timeout_seconds", SCHEDULER_CMD_TIMEOUT))
+    env      = {**os.environ, **(payload.get("env") or {})}
+
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command, cwd=cwd, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return {"status": "timeout", "output": "", "error": f"Command exceeded {timeout}s timeout"}
+        out = (stdout or b"").decode(errors="replace") + (("\n[stderr]\n" + stderr.decode(errors="replace")) if stderr else "")
+        ok  = proc.returncode == 0
+        return {
+            "status": "success" if ok else "failed",
+            "output": out[:SCHEDULER_OUTPUT_MAX_CHARS],
+            "error":  None if ok else f"exit code {proc.returncode}",
+        }
+    except Exception as exc:
+        return {"status": "failed", "output": "", "error": str(exc)}
+
+
+async def _execute_scheduled_task(task: dict) -> dict:
+    """Run one task (used by both the background loop and the manual
+    'run now' endpoint) and persist the run via the scheduler skill."""
+    started = datetime.now(timezone.utc).isoformat()
+    logger.info("[scheduler_run_start] task_id=%s name=%s type=%s",
+                task["id"], task.get("name"), task.get("task_type"))
+    try:
+        if task["task_type"] == "ai_call":
+            result = await _run_scheduled_ai_call(task)
+        elif task["task_type"] == "command":
+            result = await _run_scheduled_command(task)
+        else:
+            result = {"status": "failed", "output": "", "error": f"unknown task_type '{task['task_type']}'"}
+    except Exception as exc:
+        logger.error("[scheduler_run_error] task_id=%s err=%s\n%s", task["id"], exc, traceback.format_exc())
+        result = {"status": "failed", "output": "", "error": str(exc)}
+
+    finished = datetime.now(timezone.utc).isoformat()
+    record = await _registry.execute("scheduler", "record_run", {
+        "task_id": task["id"], "status": result["status"], "output": result.get("output", ""),
+        "error": result.get("error"), "started_at": started, "finished_at": finished,
+    }, confirmed=True)
+    logger.info("[scheduler_run_done] task_id=%s status=%s", task["id"], result["status"])
+    return {"run": result, "task": record.to_dict().get("output")}
+
+
+async def _scheduler_loop():
+    """Polls for due tasks every SCHEDULER_POLL_SECONDS and runs them.
+    Tasks run sequentially to keep this simple and avoid surprising the
+    agent with concurrent sessions for the same user; with a 15s default
+    poll interval and tasks normally measured in seconds, this is plenty
+    responsive for a scheduler (not a high-frequency job queue)."""
+    logger.info("[scheduler_loop_started] poll_interval=%ss", SCHEDULER_POLL_SECONDS)
+    while True:
+        try:
+            due = await _registry.execute("scheduler", "get_due_tasks", {})
+            for task in (due.output or {}).get("tasks", []):
+                await _execute_scheduled_task(task)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("[scheduler_loop_error] err=%s\n%s", exc, traceback.format_exc())
+        await asyncio.sleep(SCHEDULER_POLL_SECONDS)
+
+
+@app.get("/api/scheduler/tasks", tags=["Scheduler"])
+async def scheduler_list_tasks(user_id: str = None):
+    return await _skill_call("scheduler", "list_tasks", {"user_id": user_id} if user_id else {})
+
+
+@app.post("/api/scheduler/tasks", tags=["Scheduler"])
+async def scheduler_create_task(request: Request):
+    """Body: { name, user_id, task_type: 'ai_call'|'command', schedule: {kind, value}, payload, enabled? }"""
+    body = await request.json()
+    return await _skill_call("scheduler", "create_task", body)
+
+
+@app.get("/api/scheduler/tasks/{task_id}", tags=["Scheduler"])
+async def scheduler_get_task(task_id: str):
+    return await _skill_call("scheduler", "get_task", {"task_id": task_id})
+
+
+@app.put("/api/scheduler/tasks/{task_id}", tags=["Scheduler"])
+async def scheduler_update_task(task_id: str, request: Request):
+    body = await request.json()
+    body["task_id"] = task_id
+    return await _skill_call("scheduler", "update_task", body)
+
+
+@app.delete("/api/scheduler/tasks/{task_id}", tags=["Scheduler"])
+async def scheduler_delete_task(task_id: str):
+    return await _skill_call("scheduler", "delete_task", {"task_id": task_id})
+
+
+@app.post("/api/scheduler/tasks/{task_id}/toggle", tags=["Scheduler"])
+async def scheduler_toggle_task(task_id: str, request: Request):
+    """Body: { enabled: true|false }"""
+    body = await request.json()
+    return await _skill_call("scheduler", "toggle_task", {"task_id": task_id, "enabled": body.get("enabled")})
+
+
+@app.post("/api/scheduler/tasks/{task_id}/run", tags=["Scheduler"])
+async def scheduler_run_task_now(task_id: str):
+    """Manual 'run now' — executes immediately (doesn't wait for the poll loop) and returns the result."""
+    got = await _registry.execute("scheduler", "get_task", {"task_id": task_id}, confirmed=True)
+    if not got.success:
+        raise HTTPException(status_code=404, detail=got.error)
+    result = await _execute_scheduled_task(got.output)
+    return JSONResponse(result)
+
+
+@app.get("/api/scheduler/tasks/{task_id}/runs", tags=["Scheduler"])
+async def scheduler_list_runs(task_id: str, limit: int = 50):
+    return await _skill_call("scheduler", "list_runs", {"task_id": task_id, "limit": limit})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ROUTER COMPONENT 18c — Skill Hot-Reload
+# Logical function: Re-scan skills/ for newly-written skill modules (e.g. one
+# the Self-Evolution pipeline just created) and register them without a
+# container restart. Have the evolution pipeline's deploy phase call this
+# after writing a new skills/*.py file.
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/skills/reload", tags=["Skills"])
+async def skills_reload():
+    """Re-run dynamic skill discovery now. Returns newly-added skill names
+    plus the full current skill list."""
+    result = _registry.reload()
+    logger.info("[skills_reload] added=%s total=%d", result.get("added"), len(result.get("skills", [])))
+    return result
+
+
+@app.post("/api/skills/register", tags=["Skills"])
+async def skills_register(request: Request):
+    """Explicitly register one skill module by dotted path, e.g.
+    { "module_path": "skills.scheduler_skill", "class_name": "SchedulerSkill", "name": "scheduler" }
+    class_name and name are optional — see SkillRegistry.register_module."""
+    body = await request.json()
+    module_path = body.get("module_path")
+    if not module_path:
+        raise HTTPException(status_code=400, detail="module_path is required")
+    result = _registry.register_module(module_path, body.get("class_name"), body.get("name"))
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ROUTER COMPONENT 19 — SPA Fallback
 # Logical function: Serve React frontend for all non-API routes
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1565,10 +1774,10 @@ async def auth_reset_admin(request: Request):
 # ══════════════════════════════════════════════════════════════════════════════
 import fnmatch as _fnmatch
 
-# Path: /tmp/{user}/{project}/workspace
-# ENV: JARVIS_WORKSPACE_ROOT=/tmp  (override base dir)
+# Path: /app/workspace/{user}/{project}/workspace
+# ENV: JARVIS_WORKSPACE_ROOT=/app/workspace  (override base dir)
 #      JARVIS_DEFAULT_PROJECT=default
-WORKSPACE_ROOT    = os.getenv("JARVIS_WORKSPACE_ROOT",    "/tmp")
+WORKSPACE_ROOT    = os.getenv("JARVIS_WORKSPACE_ROOT",    "/app/workspace")
 DEFAULT_PROJECT   = os.getenv("JARVIS_DEFAULT_PROJECT",   "default")
 WS_MAX_FILE_BYTES  = 128_000   # 128 KB per file sent to LLM
 WS_MAX_TOTAL_BYTES = 512_000   # 512 KB total across checked files
@@ -1588,14 +1797,14 @@ def _safe_name(name: str, maxlen: int = 48) -> str:
 
 
 def _user_root(user_id: str) -> str:
-    """Return /tmp/{user} — created on demand."""
+    """Return /app/workspace/{user} — created on demand."""
     path = os.path.join(WORKSPACE_ROOT, _safe_name(user_id))
     os.makedirs(path, exist_ok=True)
     return path
 
 
 def _workspace_path(user_id: str, project: str = DEFAULT_PROJECT) -> str:
-    """Return /tmp/{user}/{project}/workspace — created on demand."""
+    """Return /app/workspace/{user}/{project}/workspace — created on demand."""
     safe_proj = _safe_name(project) if project else DEFAULT_PROJECT
     path = os.path.join(_user_root(user_id), safe_proj, "workspace")
     os.makedirs(path, exist_ok=True)
@@ -1603,7 +1812,7 @@ def _workspace_path(user_id: str, project: str = DEFAULT_PROJECT) -> str:
 
 
 def _project_root(user_id: str, project: str) -> str:
-    """Return /tmp/{user}/{project} — created on demand."""
+    """Return /app/workspace/{user}/{project} — created on demand."""
     path = os.path.join(_user_root(user_id), _safe_name(project))
     os.makedirs(path, exist_ok=True)
     return path
@@ -1612,7 +1821,7 @@ def _project_root(user_id: str, project: str) -> str:
 def _list_projects(user_id: str) -> list[dict]:
     """
     List all projects for a user.
-    A project is any subdirectory of /tmp/{user}/ that is not hidden.
+    A project is any subdirectory of /app/workspace/{user}/ that is not hidden.
     Returns list of {name, workspace, created, file_count, size_bytes}.
     """
     user_dir = _user_root(user_id)
@@ -1665,7 +1874,7 @@ async def workspace_list(
     project: str = DEFAULT_PROJECT,
 ):
     """
-    List files in /tmp/{user_id}/{project}/workspace/.
+    List files in /app/workspace/{user_id}/{project}/workspace/.
     Query params:
       project — project name (default from JARVIS_DEFAULT_PROJECT env)
       path    — sub-path within the workspace (default: root)
@@ -1833,7 +2042,7 @@ async def workspace_download_zip(
 ):
     """
     Stream the entire project workspace as a .zip file download.
-    Path: /tmp/{user_id}/{project}/workspace/ → {project}.zip
+    Path: /app/workspace/{user_id}/{project}/workspace/ → {project}.zip
 
     Query params:
       project — project name (default: "default")
@@ -1878,14 +2087,14 @@ async def workspace_download_zip(
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CBD COMPONENT — Project Manager
-# Path schema: /tmp/{user}/{project}/workspace/
+# Path schema: /app/workspace/{user}/{project}/workspace/
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/projects/{user_id}", tags=["Workspace"])
 async def list_projects(user_id: str):
     """
     List all projects for a user.
-    Each project is a directory at /tmp/{user_id}/{project}/.
+    Each project is a directory at /app/workspace/{user_id}/{project}/.
     Returns: [{ name, workspace, created, modified, file_count, size_bytes, is_default }]
     """
     projects = _list_projects(user_id)
@@ -1904,7 +2113,7 @@ async def create_project(user_id: str, request: Request):
     """
     Create a new project for the user.
     Body: { "name": "my-project", "description"?: "..." }
-    Creates /tmp/{user_id}/{project}/workspace/ and a .jarvis_project.json metadata file.
+    Creates /app/workspace/{user_id}/{project}/workspace/ and a .jarvis_project.json metadata file.
     """
     body    = await request.json()
     name    = body.get("name", "").strip()

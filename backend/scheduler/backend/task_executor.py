@@ -19,7 +19,7 @@ from typing import Optional
 
 JARVIS_QUEUE_DIR = os.environ.get(
     "JARVIS_QUEUE_DIR",
-    "/tmp/workspace/scheduler/queue"
+    "/app/workspace/scheduler/queue"
 )
 
 

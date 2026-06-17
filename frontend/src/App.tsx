@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 // ─── Dynamic URLs ──────────────────────────────────────────────────────────────
+const _base_workspace = "/app/workspace"
 const _base = (import.meta as any).env?.VITE_API_URL || "";
 const _wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
 function buildWsUrl(userId: string): string {
@@ -1408,6 +1409,22 @@ const EvolutionPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
     const autoSlug = slug.trim() || taskDesc.trim().toLowerCase().replace(/\s+/g,"-").slice(0,30);
     setErr(""); setLaunching(true); setLog([]); setPhase("running"); setCurrentPhaseNum(0);
 
+    // Live accumulator — `log` (React state) is stale inside this closure for the
+    // duration of the stream, so approval-gate / phase detection must read from
+    // here, not from `log`.
+    let fullText = "";
+    const bumpPhaseFromText = (text: string) => {
+      // The agent narrates progress as "Phase N — ..." per the prompt built in
+      // POST /api/evolve. react_status.phase is a generic ReAct-loop label
+      // ("acting — 2 tool call(s)", "complete", ...) and never contains this,
+      // so we scan the model's own text instead of relying on that field.
+      const matches = [...text.matchAll(/phase\s+(\d+)/gi)];
+      if (matches.length) {
+        const highest = Math.max(...matches.map(m => parseInt(m[1], 10)));
+        setCurrentPhaseNum(prev => Math.max(prev, highest));
+      }
+    };
+
     try {
       const r = await api(`${API_URL}/evolve`, {
         method: "POST",
@@ -1431,23 +1448,30 @@ const EvolutionPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
           try {
             const ev = JSON.parse(line.slice(5).trim());
             if (ev.type === "token" && ev.data) {
+              fullText += ev.data;
+              bumpPhaseFromText(ev.data);
               setLog(prev => {
                 const last = prev[prev.length - 1] || "";
                 return [...prev.slice(0,-1), last + ev.data];
               });
             } else if (ev.type === "react_status") {
               const phaseMatch = ev.data?.phase?.match(/phase\s*(\d)/i);
-              if (phaseMatch) setCurrentPhaseNum(parseInt(phaseMatch[1]));
-              setLog(prev => [...prev, `\n── REACT [${ev.data?.iteration || "?"}] ${ev.data?.phase?.toUpperCase()} ──\n`]);
+              if (phaseMatch) setCurrentPhaseNum(prev => Math.max(prev, parseInt(phaseMatch[1])));
+              const line = `\n── REACT [${ev.data?.iteration || "?"}] ${ev.data?.phase?.toUpperCase()} ──\n`;
+              fullText += line;
+              setLog(prev => [...prev, line]);
             } else if (ev.type === "tool_result") {
               const output = ev.data?.output;
-              if (output && typeof output === "object") setLog(prev => [...prev, `  → ${JSON.stringify(output).slice(0,200)}\n`]);
+              if (output && typeof output === "object") {
+                const line = `  → ${JSON.stringify(output).slice(0,200)}\n`;
+                fullText += line;
+                setLog(prev => [...prev, line]);
+              }
             } else if (ev.type === "done") {
-              const allText = log.join("") ;
-              // Check if agent stopped for blueprint approval
-              if (allText.toLowerCase().includes("approval") || allText.toLowerCase().includes("awaiting")) {
+              // Use the LIVE accumulator, not the stale `log` state.
+              if (fullText.toLowerCase().includes("approval") || fullText.toLowerCase().includes("awaiting")) {
                 setPhase("approval");
-                setApproval(allText);
+                setApproval(fullText);
               } else {
                 setPhase("done");
               }
@@ -1486,7 +1510,14 @@ const EvolutionPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
               if (!line.startsWith("data:")) continue;
               try {
                 const ev = JSON.parse(line.slice(5).trim());
-                if (ev.type === "token" && ev.data) setLog(prev => { const last = prev[prev.length-1]||""; return [...prev.slice(0,-1), last+ev.data]; });
+                if (ev.type === "token" && ev.data) {
+                  setLog(prev => { const last = prev[prev.length-1]||""; return [...prev.slice(0,-1), last+ev.data]; });
+                  const matches = [...String(ev.data).matchAll(/phase\s+(\d+)/gi)];
+                  if (matches.length) {
+                    const highest = Math.max(...matches.map(m => parseInt(m[1], 10)));
+                    setCurrentPhaseNum(prev => Math.max(prev, highest));
+                  }
+                }
                 if (ev.type === "done") { setPhase("done"); return; }
               } catch {}
             }
@@ -1701,6 +1732,298 @@ function fmtTs(ts: string) {
   try { return new Date(ts).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
   catch { return ts.slice(11,19); }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCHEDULER PANEL — Create / edit / delete / run scheduled AI calls and commands
+// Backend: GET/POST /api/scheduler/tasks, PUT/DELETE .../tasks/{id},
+//          POST .../tasks/{id}/toggle, POST .../tasks/{id}/run, GET .../tasks/{id}/runs
+// ═══════════════════════════════════════════════════════════════════════════════
+const SCHED_STATUS_COLORS: Record<string,string> = {
+  success: "#3DDC84", failed: "#FF5C5C", timeout: "#FFB454", unknown: "#8B96A5",
+};
+
+const SchedulerPanel = ({ onClose, userId }: { onClose: () => void; userId: string }) => {
+  const [tasks,    setTasks]    = useState<any[]>([]);
+  const [loading,  setLoading]  = useState(true);
+  const [err,      setErr]      = useState("");
+  const [view,     setView]     = useState<"list"|"form">("list");
+  const [editingId,setEditingId]= useState<string | null>(null);
+  const [saving,   setSaving]   = useState(false);
+  const [runningId,setRunningId]= useState<string | null>(null);
+  const [runsFor,  setRunsFor]  = useState<{ taskId: string; runs: any[] } | null>(null);
+  const [lastRun,  setLastRun]  = useState<{ taskId: string; status: string; output: string } | null>(null);
+
+  const blankForm = {
+    name: "", user_id: userId, task_type: "ai_call" as "ai_call" | "command",
+    schedule_kind: "interval" as "interval" | "cron" | "once", schedule_value: "3600",
+    message: "", persona: "", command: "", cwd: "", timeout_seconds: "300", enabled: true,
+  };
+  const [form, setForm] = useState(blankForm);
+  const setF = (k: string, v: any) => setForm(prev => ({ ...prev, [k]: v }));
+
+  const load = async () => {
+    setLoading(true); setErr("");
+    try {
+      const r = await api(`${API_URL}/scheduler/tasks?user_id=${encodeURIComponent(userId)}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      setTasks(d.output?.tasks || []);
+    } catch (e: any) { setErr(`Failed to load: ${e.message}`); }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); const t = setInterval(load, 20000); return () => clearInterval(t); }, []);
+
+  const openCreate = () => { setForm(blankForm); setEditingId(null); setView("form"); };
+
+  const openEdit = (t: any) => {
+    setForm({
+      name: t.name, user_id: t.user_id, task_type: t.task_type,
+      schedule_kind: t.schedule_kind, schedule_value: String(t.schedule_value),
+      message: t.payload?.message || "", persona: t.payload?.persona || "",
+      command: t.payload?.command || "", cwd: t.payload?.cwd || "",
+      timeout_seconds: String(t.payload?.timeout_seconds || 300), enabled: t.enabled,
+    });
+    setEditingId(t.id); setView("form");
+  };
+
+  const buildPayload = () => {
+    const schedule = {
+      kind: form.schedule_kind,
+      value: form.schedule_kind === "interval" ? parseInt(form.schedule_value, 10) || 0 : form.schedule_value,
+    };
+    const payload = form.task_type === "ai_call"
+      ? { message: form.message, ...(form.persona ? { persona: form.persona } : {}) }
+      : { command: form.command, ...(form.cwd ? { cwd: form.cwd } : {}), timeout_seconds: parseInt(form.timeout_seconds, 10) || 300 };
+    return { name: form.name, user_id: form.user_id || userId, task_type: form.task_type, schedule, payload, enabled: form.enabled };
+  };
+
+  const save = async () => {
+    if (!form.name.trim()) { setErr("Name is required."); return; }
+    if (form.task_type === "ai_call" && !form.message.trim()) { setErr("Message is required for AI call tasks."); return; }
+    if (form.task_type === "command" && !form.command.trim()) { setErr("Command is required for command tasks."); return; }
+    setSaving(true); setErr("");
+    try {
+      const body = buildPayload();
+      const url = editingId ? `${API_URL}/scheduler/tasks/${editingId}` : `${API_URL}/scheduler/tasks`;
+      const r = await api(url, { method: editingId ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const d = await r.json();
+      if (!r.ok || d.success === false) throw new Error(d.error || d.detail || `HTTP ${r.status}`);
+      setView("list"); load();
+    } catch (e: any) { setErr(`Save failed: ${e.message}`); }
+    setSaving(false);
+  };
+
+  const remove = async (id: string) => {
+    if (!window.confirm("Delete this scheduled task and its run history? This can't be undone.")) return;
+    try {
+      const r = await api(`${API_URL}/scheduler/tasks/${id}`, { method: "DELETE" });
+      const d = await r.json();
+      if (!r.ok || d.success === false) throw new Error(d.error || `HTTP ${r.status}`);
+      load();
+    } catch (e: any) { setErr(`Delete failed: ${e.message}`); }
+  };
+
+  const toggle = async (t: any) => {
+    try {
+      await api(`${API_URL}/scheduler/tasks/${t.id}/toggle`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: !t.enabled }) });
+      load();
+    } catch (e: any) { setErr(`Toggle failed: ${e.message}`); }
+  };
+
+  const runNow = async (t: any) => {
+    setRunningId(t.id); setErr(""); setLastRun(null);
+    try {
+      const r = await api(`${API_URL}/scheduler/tasks/${t.id}/run`, { method: "POST" });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      setLastRun({ taskId: t.id, status: d.run?.status, output: d.run?.output || d.run?.error || "" });
+      load();
+    } catch (e: any) { setErr(`Run failed: ${e.message}`); }
+    setRunningId(null);
+  };
+
+  const viewRuns = async (t: any) => {
+    try {
+      const r = await api(`${API_URL}/scheduler/tasks/${t.id}/runs?limit=20`);
+      const d = await r.json();
+      setRunsFor({ taskId: t.id, runs: d.output?.runs || [] });
+    } catch (e: any) { setErr(`Failed to load run history: ${e.message}`); }
+  };
+
+  const scheduleSummary = (t: any) => {
+    if (t.schedule_kind === "interval") {
+      const s = parseInt(t.schedule_value, 10);
+      if (s % 3600 === 0) return `every ${s / 3600}h`;
+      if (s % 60 === 0) return `every ${s / 60}m`;
+      return `every ${s}s`;
+    }
+    if (t.schedule_kind === "cron") return `cron: ${t.schedule_value}`;
+    return `once: ${new Date(t.schedule_value).toLocaleString()}`;
+  };
+
+  const FLD = (label: string, el: any) => (
+    <div style={{ marginBottom: 12 }}>
+      <Lbl>{label}</Lbl>
+      <div style={{ marginTop: 5 }}>{el}</div>
+    </div>
+  );
+  const INP = (val: string, set: (v: string) => void, ph = "", multi = false): any => multi
+    ? <textarea value={val} onChange={e => set(e.target.value)} placeholder={ph} rows={3} style={{ width: "100%", padding: "7px 10px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12, borderRadius: 3, resize: "vertical" }} />
+    : <input value={val} onChange={e => set(e.target.value)} placeholder={ph} style={{ width: "100%", padding: "7px 10px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12, borderRadius: 3 }} />;
+  const SEL = (val: string, set: (v: string) => void, opts: { v: string; label: string }[]) => (
+    <select value={val} onChange={e => set(e.target.value)} style={{ width: "100%", padding: "7px 10px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12, borderRadius: 3 }}>
+      {opts.map(o => <option key={o.v} value={o.v}>{o.label}</option>)}
+    </select>
+  );
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F4`, zIndex: 100, display: "flex", flexDirection: "column", fontFamily: J.fontMono }}>
+      {/* Header */}
+      <div style={{ padding: "12px 24px", borderBottom: `1px solid ${J.borderMid}`, background: J.bgPanel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 22, height: 22, borderRadius: "50%", background: J.bgCard, border: `1px solid ${J.ok}55`, display: "flex", alignItems: "center", justifyContent: "center", color: J.ok, fontSize: 11 }}>⏱</div>
+          <div>
+            <div style={{ color: J.ok, fontSize: 11, letterSpacing: "0.18em", fontFamily: J.fontHeader, fontWeight: 700 }}>SCHEDULER</div>
+            <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.12em" }}>SCHEDULED AI CALLS · COMMANDS / PYTHON SCRIPTS</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {view === "list" && (
+            <button onClick={openCreate} style={{ padding: "4px 14px", background: `${J.ok}0C`, border: `1px solid ${J.ok}55`, color: J.ok, borderRadius: 2, fontSize: 10, letterSpacing: "0.06em" }}>
+              + NEW TASK
+            </button>
+          )}
+          <button onClick={onClose} style={{ background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, padding: "4px 14px", borderRadius: 2, fontSize: 11 }}>✕</button>
+        </div>
+      </div>
+
+      {err && <div style={{ background: J.errDim, border: `1px solid ${J.err}44`, color: J.err, fontSize: 11, padding: "8px 28px" }}>⚠ {err}</div>}
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "20px 28px", maxWidth: 880, margin: "0 auto", width: "100%" }}>
+
+        {/* ── LIST ── */}
+        {view === "list" && (
+          loading
+            ? <div style={{ color: J.textSec, textAlign: "center", padding: 30, animation: "hud-pulse 1.5s infinite" }}>Loading scheduled tasks…</div>
+            : tasks.length === 0
+              ? <div style={{ color: J.textDim, textAlign: "center", padding: 30 }}>No scheduled tasks yet. Click + NEW TASK to add one.</div>
+              : tasks.map((t: any) => (
+                <div key={t.id} style={{ marginBottom: 8, padding: "12px 14px", background: J.bgCard, border: `1px solid ${J.border}`, borderLeft: `3px solid ${t.enabled ? J.ok : J.textDim}`, borderRadius: 3 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
+                    <div>
+                      <span style={{ color: J.textPri, fontSize: 13, fontFamily: J.fontHeader, fontWeight: 600 }}>{t.name}</span>
+                      <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+                        <Chip label={t.task_type === "ai_call" ? "◈ AI CALL" : "▸ COMMAND"} color={t.task_type === "ai_call" ? J.react : J.accent} />
+                        <Chip label={scheduleSummary(t)} color={J.textSec} />
+                        {t.last_status && <Chip label={`last: ${t.last_status}`} color={SCHED_STATUS_COLORS[t.last_status] || J.textSec} />}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                      <button onClick={() => toggle(t)} title={t.enabled ? "Disable" : "Enable"} style={{ padding: "4px 10px", background: "none", border: `1px solid ${t.enabled ? J.ok : J.borderMid}66`, color: t.enabled ? J.ok : J.textSec, borderRadius: 2, fontSize: 9 }}>
+                        {t.enabled ? "ON" : "OFF"}
+                      </button>
+                      <button onClick={() => runNow(t)} disabled={runningId === t.id} style={{ padding: "4px 10px", background: "none", border: `1px solid ${J.accent}55`, color: J.accent, borderRadius: 2, fontSize: 9 }}>
+                        {runningId === t.id ? "…" : "▶ RUN"}
+                      </button>
+                      <button onClick={() => viewRuns(t)} style={{ padding: "4px 10px", background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, borderRadius: 2, fontSize: 9 }}>
+                        HISTORY
+                      </button>
+                      <button onClick={() => openEdit(t)} style={{ padding: "4px 10px", background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, borderRadius: 2, fontSize: 9 }}>
+                        EDIT
+                      </button>
+                      <button onClick={() => remove(t.id)} style={{ padding: "4px 10px", background: "none", border: `1px solid ${J.err}55`, color: J.err, borderRadius: 2, fontSize: 9 }}>
+                        DEL
+                      </button>
+                    </div>
+                  </div>
+                  <div style={{ color: J.textDim, fontSize: 10, marginTop: 8 }}>
+                    {t.task_type === "ai_call" ? `"${(t.payload?.message || "").slice(0,90)}"` : t.payload?.command}
+                  </div>
+                  <div style={{ color: J.textDim, fontSize: 9, marginTop: 4 }}>
+                    next run: {t.next_run_at ? new Date(t.next_run_at).toLocaleString() : "—"}
+                    {t.last_run_at && <span style={{ marginLeft: 12 }}>last run: {new Date(t.last_run_at).toLocaleString()}</span>}
+                  </div>
+                  {lastRun?.taskId === t.id && (
+                    <div style={{ marginTop: 8, padding: "8px 10px", background: J.bgPanel, border: `1px solid ${SCHED_STATUS_COLORS[lastRun.status] || J.border}44`, borderRadius: 3, fontSize: 10, color: J.textSec, whiteSpace: "pre-wrap", maxHeight: 160, overflowY: "auto" }}>
+                      {lastRun.output}
+                    </div>
+                  )}
+                  {runsFor?.taskId === t.id && (
+                    <div style={{ marginTop: 8, padding: "8px 10px", background: J.bgPanel, border: `1px solid ${J.border}`, borderRadius: 3 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between" }}>
+                        <Lbl c={J.textSec}>Run history</Lbl>
+                        <button onClick={() => setRunsFor(null)} style={{ background: "none", border: "none", color: J.textSec, fontSize: 12, cursor: "pointer" }}>×</button>
+                      </div>
+                      {runsFor.runs.length === 0
+                        ? <div style={{ color: J.textDim, fontSize: 10, marginTop: 6 }}>No runs yet.</div>
+                        : runsFor.runs.map((r: any) => (
+                          <div key={r.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "4px 0", borderBottom: `1px solid ${J.border}`, fontSize: 10 }}>
+                            <span style={{ color: J.textDim }}>{new Date(r.started_at).toLocaleString()}</span>
+                            <Chip label={r.status} color={SCHED_STATUS_COLORS[r.status] || J.textSec} />
+                          </div>
+                        ))
+                      }
+                    </div>
+                  )}
+                </div>
+              ))
+        )}
+
+        {/* ── FORM ── */}
+        {view === "form" && (
+          <div>
+            {FLD("Name", INP(form.name, v => setF("name", v), "e.g. Nightly recon summary"))}
+            {FLD("Task Type", SEL(form.task_type, v => setF("task_type", v), [
+              { v: "ai_call", label: "AI Call — send a message/task to the agent" },
+              { v: "command", label: "Command — run a shell command or python script" },
+            ]))}
+
+            {form.task_type === "ai_call" ? (
+              <>
+                {FLD("Message / Task", INP(form.message, v => setF("message", v), "What should the agent do when this fires?", true))}
+                {FLD("Persona (optional)", INP(form.persona, v => setF("persona", v), "leave blank for default persona"))}
+              </>
+            ) : (
+              <>
+                {FLD("Command", INP(form.command, v => setF("command", v), "python3 /app/output/myscript.py arg1"))}
+                {FLD("Working directory (optional)", INP(form.cwd, v => setF("cwd", v), "/app/output"))}
+                {FLD("Timeout (seconds)", INP(form.timeout_seconds, v => setF("timeout_seconds", v), "300"))}
+              </>
+            )}
+
+            {FLD("Schedule", SEL(form.schedule_kind, v => setF("schedule_kind", v), [
+              { v: "interval", label: "Interval — repeat every N seconds" },
+              { v: "cron",     label: "Cron — 5-field expression (min hour dom month dow)" },
+              { v: "once",     label: "Once — run at a specific date/time" },
+            ]))}
+
+            {form.schedule_kind === "interval" &&
+              FLD("Repeat every (seconds)", INP(form.schedule_value, v => setF("schedule_value", v), "3600 = every hour"))}
+            {form.schedule_kind === "cron" &&
+              FLD("Cron expression", INP(form.schedule_value, v => setF("schedule_value", v), "0 9 * * 1-5  (9am on weekdays)"))}
+            {form.schedule_kind === "once" &&
+              FLD("Run at (ISO datetime, UTC)", INP(form.schedule_value, v => setF("schedule_value", v), "2026-06-20T09:00:00"))}
+
+            <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
+              <input type="checkbox" checked={form.enabled} onChange={e => setF("enabled", e.target.checked)} id="sched-enabled" />
+              <label htmlFor="sched-enabled" style={{ color: J.textSec, fontSize: 11 }}>Enabled</label>
+            </div>
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={save} disabled={saving} style={{ padding: "8px 20px", background: `${J.ok}0C`, border: `1px solid ${J.ok}66`, color: J.ok, borderRadius: 3, fontSize: 11, letterSpacing: "0.06em" }}>
+                {saving ? "SAVING…" : editingId ? "✓ SAVE CHANGES" : "✓ CREATE TASK"}
+              </button>
+              <button onClick={() => { setView("list"); setErr(""); }} style={{ padding: "8px 20px", background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, borderRadius: 3, fontSize: 11 }}>
+                CANCEL
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TELEMETRY PANEL — Token Usage + Command Log + Kali Audit
@@ -2259,7 +2582,7 @@ const WorkspaceSidebar = ({
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
       setEntries(d.entries || []);
-      setWsRoot(d.workspace_root || `/tmp/${userId}/${proj}/workspace`);
+      setWsRoot(d.workspace_root || `/app/workspace/${userId}/${proj}/workspace`);
     } catch (e: any) {
       setError(e.message || "Cannot load workspace");
     }
@@ -2464,7 +2787,7 @@ const WorkspaceSidebar = ({
 
         {/* Path display */}
         <div style={{ color: J.textDim, fontSize: 8, marginTop: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: "0.04em" }} title={wsRoot}>
-          /tmp/{userId}/{currentProject}/workspace
+          {_base_workspace}/{userId}/{currentProject}/workspace
         </div>
       </div>
 
@@ -2528,7 +2851,7 @@ const WorkspaceSidebar = ({
         {error && (
           <div style={{ padding: "10px 12px" }}>
             <div style={{ color: J.err, fontSize: 10, marginBottom: 4 }}>✗ {error}</div>
-            <div style={{ color: J.textDim, fontSize: 9 }}>Workspace: /tmp/{userId}/{currentProject}/workspace</div>
+            <div style={{ color: J.textDim, fontSize: 9 }}>Workspace: {_base_workspace}/{userId}/{currentProject}/workspace</div>
           </div>
         )}
         {!loading && !error && entries.length === 0 && (
@@ -4026,6 +4349,7 @@ export default function App() {
   const [memoryOpen,      setMemoryOpen]      = useState(false);
   const [experiencedOpen, setExperiencedOpen] = useState(false);
   const [evolutionOpen,   setEvolutionOpen]   = useState(false);
+  const [schedulerOpen,   setSchedulerOpen]   = useState(false);
   const [telemetryOpen,   setTelemetryOpen]   = useState(false);
   const [instructionsOpen, setInstructionsOpen] = useState(false);
   const [billingOpen,     setBillingOpen]     = useState(false);
@@ -4493,8 +4817,8 @@ export default function App() {
             <ArcReactor size={26} />
             <div>
               <div data-text={J.wordmark} className={persona !== "jarvis" ? "persona-glitch" : ""}
-                style={{ color: J.accent, fontSize: 12, letterSpacing: "0.2em", fontFamily: J.fontHeader, fontWeight: 700, lineHeight: 1.2 }}>🧠 S.I.R</div>
-              <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.15em", fontFamily: J.fontHeader, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>Super Intelligent Robot Platform</div>
+                style={{ color: J.accent, fontSize: 16, letterSpacing: "0.2em", fontFamily: J.fontHeader, fontWeight: 700, lineHeight: 1.2 }}>S.I.R Platform</div>
+              <div style={{ color: J.textDim, fontSize: 10, letterSpacing: "0.15em", fontFamily: J.fontHeader, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>Super Intelligent Robot</div>
             </div>
           </div>
           <Divider color={J.borderMid} />
@@ -4540,6 +4864,7 @@ export default function App() {
             { label: "◉ MEMORY",    action: () => setMemoryOpen(true),      color: J.gold },
             { label: "⬢ EXPERIENCED", action: () => setExperiencedOpen(true), color: J.react },
             { label: "◈ EVOLVE",    action: () => setEvolutionOpen(true),   color: J.warm },
+            { label: "⏱ SCHEDULER", action: () => setSchedulerOpen(true),   color: J.ok },
             { label: "⊕ TELEMETRY", action: () => setTelemetryOpen(true),   color: J.accent },
             { label: "◈ PERSONAS",  action: () => setPersonaMgrOpen(true),   color: J.react },
             { label: "$ BILLING",    action: () => setBillingOpen(true),      color: J.gold },
@@ -4608,7 +4933,7 @@ export default function App() {
               {provInfo.provider.toUpperCase()} / {provInfo.model} &nbsp;·&nbsp; {authedUser?.toUpperCase()} AUTHENTICATED
               <br />
               <span style={{ color: J.accent, opacity: 0.55 }}>
-                ◫ PROJECT: {currentProject} &nbsp;·&nbsp; /tmp/{authedUser}/{currentProject}/workspace
+                ◫ PROJECT: {currentProject} &nbsp;·&nbsp; {_base_workspace}/{authedUser}/{currentProject}/workspace
               </span>
             </div>
             <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
@@ -4708,7 +5033,7 @@ export default function App() {
           {/* Active workspace badge — always visible so operator knows where agent writes */}
           <span
             onClick={() => setWorkspaceOpen(o => !o)}
-            title={`/tmp/${authedUser}/${currentProject}/workspace — click to ${workspaceOpen ? "hide" : "show"} file browser`}
+            title={`/app/data/${authedUser}/${currentProject}/workspace — click to ${workspaceOpen ? "hide" : "show"} file browser`}
             style={{
               marginLeft: "auto", padding: "2px 8px", borderRadius: 2, cursor: "pointer",
               background: `${J.accent}08`, border: `1px solid ${J.accent}22`,
@@ -4716,7 +5041,7 @@ export default function App() {
               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 280,
               fontFamily: J.fontMono,
             }}>
-            ◫ /tmp/{authedUser}/{currentProject}/workspace
+            ◫ {_base_workspace}/{authedUser}/{currentProject}/workspace
           </span>
         </div>
 
@@ -4823,6 +5148,7 @@ export default function App() {
       {memoryOpen      && <MemoryPanel      onClose={() => setMemoryOpen(false)}      userId={authedUser || "default"} />}
       {experiencedOpen && <ExperiencedPanel onClose={() => setExperiencedOpen(false)} userId={authedUser || "default"} />}
       {evolutionOpen   && <EvolutionPanel   onClose={() => setEvolutionOpen(false)}   userId={authedUser || "default"} />}
+      {schedulerOpen   && <SchedulerPanel   onClose={() => setSchedulerOpen(false)}   userId={authedUser || "default"} />}
       {telemetryOpen   && (
         <TelemetryPanel
           onClose={() => setTelemetryOpen(false)}

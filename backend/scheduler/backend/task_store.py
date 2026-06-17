@@ -16,7 +16,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Optional, Any
 
-DB_PATH = os.environ.get("TASK_SCHEDULER_DB", "/tmp/workspace/scheduler/tasks.db")
+DB_PATH = os.environ.get("TASK_SCHEDULER_DB", "/app/workspace/scheduler/tasks.db")
 
 # Schema version for migration tracking
 SCHEMA_VERSION = 1
