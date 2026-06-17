@@ -80,9 +80,10 @@ RUN mkdir -p /app/data /app/experienced \
     && useradd -m -u 1001 sir \
     && mkdir -p /var/log/supervisor \
     && mkdir -p /app/workspace \
-    && chown -R sir:sir /app
+    && chown -R sir:sir /app \
+    && chown -R sir:sir /var/log/supervisor
 
-USER sir
+#USER sir
 
 # ── Health check ──────────────────────────────────────────────────────────────
 HEALTHCHECK --interval=15s --timeout=5s --start-period=25s --retries=5 \

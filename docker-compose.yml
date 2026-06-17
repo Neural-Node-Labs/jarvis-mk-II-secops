@@ -4,7 +4,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: jarvis-app
+    container_name: sir-app
     restart: unless-stopped
     env_file:
       - path: .env
@@ -22,13 +22,13 @@ services:
       PYTHONUNBUFFERED:   "1"
     volumes:
       - type: bind
-        source: ./jarvis/data
+        source: ./sir/data
         target: /app/data
       - type: bind
-        source: ./jarvis/experienced
+        source: ./sir/experienced
         target: /app/experienced
       - type: bind
-        source: ${HOST_OUTPUT:-./jarvis/output}
+        source: ${HOST_OUTPUT:-./sir/output}
         target: /app/output
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:80/health"]
@@ -36,14 +36,14 @@ services:
       timeout: 5s
       retries: 5
       start_period: 25s
-    depends_on:
-      ollama-init:
-        condition: service_completed_successfully
+#    depends_on:
+#      ollama-init:
+#        condition: service_completed_successfully
 
   # Pulls the model once, exits cleanly — app waits for this before starting
   ollama-init:
     image: ollama/ollama:latest
-    container_name: jarvis-ollama-init
+    container_name: sir-ollama-init
     restart: "no"
     entrypoint: >
       sh -c "
@@ -64,7 +64,7 @@ services:
 
   ollama:
     image: ollama/ollama:latest
-    container_name: jarvis-ollama
+    container_name: sir-ollama
     restart: unless-stopped
     ports:
       - "11434:11434"
