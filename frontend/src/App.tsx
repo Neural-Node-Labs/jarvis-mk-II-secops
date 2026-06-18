@@ -1487,6 +1487,7 @@ const EvolutionPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
   };
 
   const sendApproval = async (approved: boolean) => {
+      console.log('sendApproval')
     setApproved(approved);
     if (approved) {
       setLog(prev => [...prev, "\n── ✓ BLUEPRINT APPROVED — PROCEEDING TO PHASE 6 ──\n"]);
@@ -1499,6 +1500,7 @@ const EvolutionPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
           body: JSON.stringify({ message: "APPROVED — proceed with implementation", user_id: userId, react: true }),
         });
         if (r.ok) {
+            console.log('sendApproval ok')
           const reader = r.body!.getReader();
           const dec    = new TextDecoder();
           while (true) {
