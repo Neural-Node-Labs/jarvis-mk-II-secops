@@ -1,305 +1,101 @@
 """
-BlackboxBrain — Orchestrator Framework
-Blueprint: "Blackbox Brain" system architecture document
+Blackbox Brain — Central Nervous System
+Ported from: brain-solution-design.md + blackbox_brain.py (reference blueprint)
 
 Architecture:
-  User Input
+  User message
       │
-  [1. Classifier]  ─→ CHAT  → direct LLM response
+  [0. Attachment + memory injection]   (unchanged from the old Agent)
       │
-  [2. Planner]     ─→ TASK  → DAG of isolated Task objects
+  react=False ─────────────────────────────────────────────► [Quick mode]
+      │                                                       one LLM turn,
+      │                                                       tools allowed once,
+  react=True                                                  no classification.
+      │                                                       (cheap default path
+      │                                                        for plain /api/chat)
+      ▼
+  force_single_task=True ──────────────► [Deep task]  ONE isolated worker,
+      │                                   extended iteration cap. This is the
+      │                                   escape hatch for genuinely sequential,
+      │                                   stateful work (see note below) — used
+      │                                   by /api/evolve.
+      ▼
+  [1. Classifier] ──CHAT──► [2a. Chat path] single streamed LLM reply, no tools
       │
-  [3. SwarmWorker] ─→ multi-threaded, ReAct max 3 loops per task
+     TASK
       │
-  [4. Consolidator] → single unified report via LLM summary
+  [2b. Planner] → DAG of isolated Task objects (≤ max_parallel)
+      │
+  [3. Swarm] → asyncio tasks, dependency-ordered batches, ReAct loop capped at
+      │        re_act_max_loop per worker, concurrency capped at max_parallel
+      ▼
+  [4. Consolidation] → markdown report → LLM summary (streamed) → done
 
-Design principles:
-  - SwarmWorkers are ephemeral: they DO NOT persist their inner ReAct scratchpad
-  - The Orchestrator only stores final task artifacts (status + result)
-  - Cost-bounded: re_act_max_loop = 3 per worker thread
-  - Blackbox portable: process_message(str) → dict — wrappable behind any transport
+Why ported to asyncio instead of the reference blueprint's threading.Thread:
+  This whole codebase (FastAPI, LLMRouter, SkillRegistry) is async/httpx-based.
+  Spinning up real OS threads that each block on synchronous LLM/tool calls
+  would fight the event loop and the GIL for no benefit — asyncio tasks give
+  the same "isolated, concurrent, ephemeral" worker model the design doc
+  asks for, with proper non-blocking I/O instead.
+
+A known, deliberate trade-off vs. the reference design (flagged here, not
+hidden): the Planner decomposes a request into independent, parallel-safe
+tasks capped at a small ReAct loop (re_act_max_loop, default 3) — exactly
+as specified ("Predictable Cost & Time Bounds"). That's a poor fit for
+something like the Self-Evolution pipeline, which is one long, deeply
+SEQUENTIAL, stateful build (blueprint → approval → implement → test →
+deploy → verify) — it can't be meaningfully split into 8 independent
+parallel tasks. For that one case, `force_single_task=True` bypasses the
+Planner/Swarm entirely and runs a single worker with a much higher
+iteration cap, instead of silently degrading evolution's depth to 3 steps.
+See main.py's /api/evolve call site.
+
+This module IS the new central nervous system. core/agent.py is now a thin
+compatibility re-export (`Agent = BlackboxBrain`) so every existing call
+site — main.py's session registry, the JarvisMKII multi-task skill, the
+scheduler's ai_call tasks, the Telegram bridge, /api/evolve — keeps working
+unchanged: same constructor signature, same chat_stream()/confirm_action()
+event protocol (token / react_status / tool_call / tool_result /
+confirm_needed / done / error).
 
 version: 1.0.0
 """
 import json
-import uuid
 import logging
-import threading
 import asyncio
+import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, AsyncGenerator, Optional
+
+from core.llm_router import LLMRouter, LLMConfig
+from core.skill_registry import SkillRegistry
+from core.prompt_builder import build_system_prompt, DEFAULT_PERSONA
+from core.memory_manager import MemoryManager, detect_retrieval_request
 
 logger = logging.getLogger("blackbox_brain")
 
-# ── Task definition ────────────────────────────────────────────────────────────
+# ── Constants ─────────────────────────────────────────────────────────────────
+DEFAULT_RE_ACT_MAX_LOOP = 3     # per-worker ReAct cap — the design's cost/time bound
+DEEP_TASK_MAX_ITERATIONS = 30   # for force_single_task=True call sites (e.g. /api/evolve) —
+                                 # deliberately separate from DEFAULT_RE_ACT_MAX_LOOP above.
+                                 # NOTE: core/agent.py's facade re-exports DEFAULT_RE_ACT_MAX_LOOP
+                                 # as `REACT_MAX_ITERATIONS` purely so the NAME keeps resolving for
+                                 # old call sites — its VALUE is now 3, not the old single-track
+                                 # agent's 30. Anything that wants "the deep-task budget" must use
+                                 # THIS constant, not REACT_MAX_ITERATIONS.
+DEFAULT_MAX_PARALLEL    = 8     # planner task cap AND swarm concurrency cap
+SWARM_WORKER_TIMEOUT_S  = 300   # hard per-task timeout (ported from the reference
+                                 # blueprint's `w.join(timeout=300)`)
+MAX_CONVERSATION_TURNS  = 80    # same pruning bound as the old Agent
+TOOL_CALL_MARKER        = "TOOL_CALL:"
 
-@dataclass
-class Task:
-    task_id:              str
-    goal:                 str
-    context:              dict
-    validation_criteria:  str
-    status:               str = "PENDING"   # PENDING | RUNNING | COMPLETED | FAILED | SKIPPED
-    result:               Optional[str] = None
-    error:                Optional[str] = None
-    depends_on:           list = field(default_factory=list)   # task_ids this one waits for
-    iterations_used:      int  = 0
+COMPLETION_SIGNALS = {
+    "task_complete", "task complete", "task is complete", "task completed",
+    "all done", "i have completed", "successfully completed",
+    "the task is done", "work is complete",
+}
 
-# ── Swarm worker ──────────────────────────────────────────────────────────────
-
-class SwarmWorker(threading.Thread):
-    """
-    Isolated ephemeral execution unit.
-
-    Each worker:
-      - Receives exactly ONE Task with all context it needs (no shared state)
-      - Runs a ReAct loop capped at re_act_max_loop (default 3)
-      - Throws away inner scratchpad on completion — only result + status surfaced
-      - Calls the llm_fn synchronously (blocking) inside its own thread
-    """
-
-    def __init__(
-        self,
-        task:            Task,
-        llm_fn:          Callable[[list, str], str],   # (messages, system) → str
-        tool_fn:         Callable[[str, str, dict], dict],  # (skill, action, params) → result
-        re_act_max_loop: int = 3,
-    ):
-        super().__init__(daemon=True)
-        self.task            = task
-        self.llm_fn          = llm_fn
-        self.tool_fn         = tool_fn
-        self.re_act_max_loop = re_act_max_loop
-
-    def run(self):
-        self.task.status = "RUNNING"
-        logger.info("[swarm_worker] START task_id=%s goal=%.60s", self.task.task_id, self.task.goal)
-
-        system_prompt = f"""You are a focused task executor.
-
-TASK ID    : {self.task.task_id}
-GOAL       : {self.task.goal}
-CONTEXT    : {json.dumps(self.task.context, indent=2)}
-VALIDATION : {self.task.validation_criteria}
-
-Execute the task using TOOL_CALL blocks when needed.
-When the goal is achieved, write TASK_COMPLETE and your result summary.
-You have maximum {self.re_act_max_loop} reasoning iterations.
-Be concise — the orchestrator only needs your final result, not your thinking process.
-"""
-
-        # Local ephemeral conversation — NOT shared with the main agent conversation
-        local_conversation: list = [
-            {"role": "user", "content": f"Execute this task:\n\nGOAL: {self.task.goal}\n\nCONTEXT: {json.dumps(self.task.context)}\n\nVALIDATION: {self.task.validation_criteria}"}
-        ]
-
-        TOOL_CALL_MARKER = "TOOL_CALL:"
-
-        for iteration in range(1, self.re_act_max_loop + 1):
-            self.task.iterations_used = iteration
-
-            try:
-                # ── REASON ────────────────────────────────────────────────────
-                response = self.llm_fn(local_conversation, system_prompt)
-                local_conversation.append({"role": "assistant", "content": response})
-
-                # ── Completion check ───────────────────────────────────────────
-                if "TASK_COMPLETE" in response or "task_complete" in response.lower():
-                    self.task.result = self._extract_result(response)
-                    self.task.status = "COMPLETED"
-                    logger.info("[swarm_worker] COMPLETE task_id=%s iter=%d", self.task.task_id, iteration)
-                    return
-
-                # ── ACT — extract and execute tool calls ───────────────────────
-                tool_calls = self._extract_tool_calls(response, TOOL_CALL_MARKER)
-                if not tool_calls:
-                    # No tools — agent reached a natural end
-                    self.task.result = response.strip()
-                    self.task.status = "COMPLETED"
-                    logger.info("[swarm_worker] DONE (no tools) task_id=%s iter=%d", self.task.task_id, iteration)
-                    return
-
-                # ── OBSERVE — execute tools, build observation ──────────────────
-                observations = []
-                for call in tool_calls:
-                    skill  = call.get("skill", "")
-                    action = call.get("action", "")
-                    params = call.get("params", {})
-                    try:
-                        result = self.tool_fn(skill, action, params)
-                        if result.get("success"):
-                            obs = f"[TOOL ✓ {skill}.{action}]\n{json.dumps(result.get('output'), indent=2, default=str)}"
-                        else:
-                            obs = f"[TOOL ✗ {skill}.{action} FAILED]\nError: {result.get('error')}\nDiagnose and adjust approach."
-                    except Exception as tool_err:
-                        obs = f"[TOOL ✗ {skill}.{action} EXCEPTION]\n{tool_err}"
-                    observations.append(obs)
-
-                # Feed observations back as user message
-                obs_text = "\n\n".join(observations)
-                local_conversation.append({"role": "user", "content": obs_text})
-
-            except Exception as e:
-                logger.error("[swarm_worker] ERROR task_id=%s iter=%d err=%s", self.task.task_id, iteration, e)
-                local_conversation.append({"role": "user", "content": f"[ERROR]\n{e}\nAdapt and continue."})
-
-        # Max iterations reached — surface whatever the last response was
-        last_resp = local_conversation[-1].get("content", "") if local_conversation else "No result"
-        self.task.result = f"[MAX_ITERATIONS_REACHED after {self.re_act_max_loop} loops]\n{last_resp}"
-        self.task.status = "COMPLETED"
-        logger.warning("[swarm_worker] MAX_ITER task_id=%s", self.task.task_id)
-
-    def _extract_result(self, text: str) -> str:
-        """Strip the TASK_COMPLETE marker and return the clean result."""
-        for marker in ("TASK_COMPLETE", "task_complete"):
-            if marker in text:
-                idx = text.find(marker)
-                return text[idx + len(marker):].strip().lstrip(":").strip()
-        return text.strip()
-
-    def _extract_tool_calls(self, text: str, marker: str) -> list:
-        calls, seen, start = [], set(), 0
-        while True:
-            idx = text.find(marker, start)
-            if idx == -1:
-                break
-            brace_start = text.find("{", idx + len(marker))
-            if brace_start == -1:
-                break
-            depth, i = 0, brace_start
-            while i < len(text):
-                if text[i] == "{":
-                    depth += 1
-                elif text[i] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        try:
-                            call = json.loads(text[brace_start:i+1])
-                            if "skill" in call and "action" in call:
-                                key = f"{call['skill']}:{call['action']}"
-                                if key not in seen:
-                                    seen.add(key)
-                                    calls.append(call)
-                        except json.JSONDecodeError:
-                            pass
-                        break
-                i += 1
-            start = idx + 1
-        return calls
-
-
-# ── BlackboxBrain ─────────────────────────────────────────────────────────────
-
-class BlackboxBrain:
-    """
-    Stateful orchestrator blackbox.
-
-    External interface:
-        result = brain.process_message(message, user_id)
-        # result = {"type": "chat"|"task_report", "data": str, "tasks": list}
-
-    Internal state per instance:
-        - conversation_memory: short-term chat history
-        - task_registry:       all tasks ever submitted (status + result only)
-
-    SwarmWorkers run in daemon threads — they clean up automatically.
-    The brain never stores worker scratchpads, only final artifacts.
-    """
-
-    def __init__(
-        self,
-        llm_fn:          Callable[[list, str], str],
-        tool_fn:         Callable[[str, str, dict], dict],
-        re_act_max_loop: int = 3,
-        max_parallel:    int = 8,
-    ):
-        self.llm_fn          = llm_fn
-        self.tool_fn         = tool_fn
-        self.re_act_max_loop = re_act_max_loop
-        self.max_parallel    = max_parallel
-
-        self.conversation_memory: list = []     # short-term: last N turns
-        self.task_registry:       list = []     # all task artifacts (no scratchpads)
-        self._lock = threading.Lock()
-
-    # ── Public API ─────────────────────────────────────────────────────────────
-
-    def process_message(self, message: str, user_id: str = "default") -> dict:
-        """
-        Synchronous entry point.
-        Routes to CHAT or TASK path, returns unified output dict.
-        """
-        logger.info("[brain] process user=%s msg=%.80s", user_id, message)
-
-        # 1. Classify
-        category = self._classify(message)
-        logger.info("[brain] classified as: %s", category)
-
-        if category == "chat":
-            response = self._handle_chat(message)
-            self._update_memory("user", message)
-            self._update_memory("assistant", response)
-            return {"type": "chat", "data": response, "tasks": []}
-
-        # 2. Plan — generate DAG of Task objects
-        tasks = self._generate_plan(message, user_id)
-        if not tasks:
-            # Planner returned empty — fall back to chat
-            response = self._handle_chat(message)
-            return {"type": "chat", "data": response, "tasks": []}
-
-        logger.info("[brain] plan generated: %d tasks", len(tasks))
-
-        # 3. Execute swarm (multi-threaded, dependency-ordered)
-        executed = self._run_swarm(tasks)
-
-        # 4. Consolidate
-        report   = self._consolidate(executed)
-        summary  = self._llm_summarize(report, message)
-
-        with self._lock:
-            self.task_registry.extend(executed)
-
-        self._update_memory("user", message)
-        self._update_memory("assistant", summary)
-
-        return {
-            "type":  "task_report",
-            "data":  summary,
-            "tasks": [self._task_to_dict(t) for t in executed],
-        }
-
-    def get_task_registry(self) -> list:
-        with self._lock:
-            return [self._task_to_dict(t) for t in self.task_registry]
-
-    def get_active_tasks(self) -> list:
-        with self._lock:
-            return [self._task_to_dict(t) for t in self.task_registry if t.status == "RUNNING"]
-
-    def abort_task(self, task_id: str) -> bool:
-        """Mark a task as FAILED (threads are daemon — they'll terminate naturally)."""
-        with self._lock:
-            for t in self.task_registry:
-                if t.task_id == task_id and t.status == "RUNNING":
-                    t.status = "FAILED"
-                    t.error  = "Aborted by operator"
-                    return True
-        return False
-
-    def reset(self):
-        with self._lock:
-            self.conversation_memory = []
-            self.task_registry       = []
-
-    # ── Layer 1: Classifier ────────────────────────────────────────────────────
-
-    def _classify(self, message: str) -> str:
-        """
-        Lightweight LLM call to classify intent.
-        Returns 'chat' or 'task'.
-        """
-        system = """You are an intent classifier. Analyse the user message.
+CLASSIFIER_SYSTEM_PROMPT = """You are an intent classifier. Analyse the user message.
 Return ONLY a JSON object: {"category": "chat"} or {"category": "task"}
 
 Rules:
@@ -307,61 +103,294 @@ Rules:
              multi-step operations, research + produce output, build/test/deploy
 - "chat"  → questions, explanations, advice, conversation, single-sentence answers
 """
-        classify_conv = [{"role": "user", "content": message}]
-        try:
-            raw = self.llm_fn(classify_conv, system)
-            data = json.loads(raw.strip())
-            cat = data.get("category", "chat")
-            return cat if cat in ("chat", "task") else "chat"
-        except Exception:
-            # If classification fails, check heuristics
-            task_keywords = ["create", "build", "write", "run", "execute", "install",
-                             "scan", "test", "deploy", "generate", "search", "find and"]
-            lower = message.lower()
-            return "task" if any(k in lower for k in task_keywords) else "chat"
 
-    # ── Layer 2: Chat path ────────────────────────────────────────────────────
-
-    def _handle_chat(self, message: str) -> str:
-        conv = self.conversation_memory[-10:] + [{"role": "user", "content": message}]
-        system = "You are a helpful, concise AI assistant. Respond directly."
-        try:
-            return self.llm_fn(conv, system)
-        except Exception as e:
-            return f"[Error generating response: {e}]"
-
-    # ── Layer 3: Planner ──────────────────────────────────────────────────────
-
-    def _generate_plan(self, message: str, user_id: str) -> list:
-        """
-        LLM generates a structured execution plan: list of Task objects.
-        Each task is self-contained with explicit context + validation criteria.
-        """
-        system = f"""You are a task planner. Break down the user request into isolated, parallel-safe execution tasks.
+PLANNER_SYSTEM_PROMPT = """You are a task planner. Break down the user request into isolated, parallel-safe execution tasks.
 
 Return ONLY a JSON array — no markdown, no explanation:
 [
-  {{
+  {
     "task_id": "TSK-001",
     "goal": "Clear, actionable objective for one worker",
-    "context": {{"key": "any static data the worker needs"}},
+    "context": {"key": "any static data the worker needs"},
     "validation_criteria": "How to verify this specific task succeeded",
     "depends_on": []
-  }}
+  }
 ]
 
 Rules:
 - Each task MUST be self-contained — no task should assume another ran first unless listed in depends_on
-- Maximum 8 tasks per plan
-- depends_on lists task_ids that must complete first
-- context must include ALL data the worker needs (no shared state)
+- Maximum __MAX_PARALLEL__ tasks per plan
+- depends_on lists task_ids that must complete first — the orchestrator will hand that task's
+  result to you as dependency_results in your context, so it's safe to build on prior output
+- context must include ALL data the worker needs (no shared state between workers)
 - goal must be a single clear actionable statement
 """
-        conv = [{"role": "user", "content": f"Plan this: {message}"}]
+
+SUMMARY_SYSTEM_PROMPT = """You are a report synthesiser. Given a multi-task execution report,
+produce a clear, concise summary for the operator.
+Lead with the overall outcome. Then list key results per task.
+Be factual and direct. No filler."""
+
+CHAT_HEURISTIC_TASK_KEYWORDS = (
+    "create", "build", "write", "run", "execute", "install",
+    "scan", "test", "deploy", "generate", "search", "find and",
+)
+
+# ── Module-level memory (shared across all brains in this process, same as the old Agent) ──
+_memory = MemoryManager()
+
+
+# ── Attachment formatter (verbatim from the old Agent) ──────────────────────────
+
+def _format_attachment(att: dict) -> str:
+    name = att.get("name", "file")
+    mime = att.get("mime", "application/octet-stream")
+    size = att.get("size", 0)
+
+    if att.get("text"):
+        body = att["text"]
+        if len(body) > 8000:
+            body = body[:8000] + f"\n… [truncated — {len(att['text'])} chars total]"
+        return f"[FILE: {name} | type: {mime} | size: {size} bytes]\n{body}\n[/FILE]"
+
+    if att.get("b64"):
+        snippet = att["b64"][:200] + "…" if len(att["b64"]) > 200 else att["b64"]
+        return (
+            f"[FILE: {name} | type: {mime} | size: {size} bytes | encoding: base64]\n"
+            f"{snippet}\n[/FILE]\n"
+            f"(Full base64 available — treat as {mime} file)"
+        )
+
+    return f"[FILE: {name} | type: {mime} | size: {size} bytes | content: unavailable]"
+
+
+# ── Task definition ──────────────────────────────────────────────────────────
+
+@dataclass
+class Task:
+    task_id:              str
+    goal:                 str
+    context:              dict
+    validation_criteria:  str
+    status:               str = "PENDING"   # PENDING|RUNNING|COMPLETED|FAILED|SKIPPED
+    result:                Optional[str] = None
+    error:                 Optional[str] = None
+    depends_on:            list = field(default_factory=list)
+    iterations_used:       int  = 0
+
+
+# ── BlackboxBrain ─────────────────────────────────────────────────────────────
+
+class BlackboxBrain:
+    """
+    Drop-in replacement for the old single-track Agent. Same constructor,
+    same chat_stream()/confirm_action() contract — see core/agent.py.
+    """
+
+    def __init__(self, config: LLMConfig, registry: SkillRegistry, user_id: str = "default",
+                 re_act_max_loop: int = DEFAULT_RE_ACT_MAX_LOOP, max_parallel: int = DEFAULT_MAX_PARALLEL):
+        self.llm      = LLMRouter(config)
+        self.registry = registry
+        self.user_id  = user_id
+        self.re_act_max_loop_default = re_act_max_loop
+        self.max_parallel            = max_parallel
+
+        self.conversation:     list = []     # short-term chat memory (compat w/ old Agent)
+        self.pending_confirms: dict = {}     # confirm_id → (skill, action, params)
+        self._confirm_counter: int  = 0
+        self.persona:          str  = DEFAULT_PERSONA
+        self.task_registry:    list = []     # all task artifacts ever run — no scratchpads
+
+    def reset(self):
+        """Clear conversation + task state. Memory file on disk is preserved."""
+        self.conversation     = []
+        self.pending_confirms = {}
+        self._confirm_counter = 0
+        self.task_registry    = []
+
+    def _append(self, role: str, content: str):
+        self.conversation.append({"role": role, "content": content})
+        if len(self.conversation) > MAX_CONVERSATION_TURNS:
+            self.conversation = self.conversation[:1] + self.conversation[-(MAX_CONVERSATION_TURNS - 1):]
+
+    # ── Public entry points ────────────────────────────────────────────────────
+
+    async def chat_stream(
+        self,
+        user_message:      str,
+        react:              bool = False,
+        auto_confirm:       bool = False,
+        attachments:        Optional[list] = None,
+        memory_enabled:      bool = True,
+        persona:             str  = DEFAULT_PERSONA,
+        re_act_max_loop:     Optional[int] = None,
+        force_single_task:   bool = False,
+    ) -> AsyncGenerator[dict, None]:
+        """
+        react=False         → Quick mode: one LLM turn, tools allowed once (same
+                               as the old Agent's single-cycle — this is what plain
+                               /api/chat uses by default).
+        react=True           → Classifier decides chat vs. task. Chat → one
+                               streamed reply, no tools. Task → Planner + Swarm
+                               + Consolidation.
+        force_single_task=True → Skip the Planner; run ONE worker with an
+                               extended iteration cap (re_act_max_loop, e.g. 30).
+                               For deep, sequential, stateful work that can't be
+                               split into independent parallel tasks. Used by
+                               /api/evolve.
+        """
+        if attachments:
+            blocks = [_format_attachment(a) for a in attachments]
+            user_message = "\n\n".join(blocks) + "\n\n" + user_message
+
+        self.persona = persona
+
+        n = detect_retrieval_request(user_message) if memory_enabled else None
+        if memory_enabled and n is not None:
+            history = _memory.retrieve_last_n(self.user_id, n)
+            system_prompt = build_system_prompt(memory_context=history, persona=persona)
+            logger.info("[memory_injected] user=%s turns=%d persona=%s", self.user_id, n, persona)
+        else:
+            system_prompt = build_system_prompt(persona=persona)
+
+        if not react:
+            async for event in self._single_cycle(user_message, auto_confirm, system_prompt):
+                yield event
+            return
+
+        effective_cap = re_act_max_loop or self.re_act_max_loop_default
+
+        if force_single_task:
+            async for event in self._run_task_pipeline(
+                user_message, auto_confirm, persona, effective_cap, skip_planner=True
+            ):
+                yield event
+            return
+
+        yield {"type": "react_status", "data": {"iteration": 0, "max": 0, "phase": "classifying", "healing": False}}
+        category = await self._classify(user_message)
+        logger.info("[brain_classified] user=%s category=%s", self.user_id, category)
+
+        if category == "chat":
+            async for event in self._handle_chat_stream(user_message, system_prompt):
+                yield event
+        else:
+            async for event in self._run_task_pipeline(
+                user_message, auto_confirm, persona, effective_cap, skip_planner=False
+            ):
+                yield event
+
+    async def confirm_action(self, confirm_id: str) -> AsyncGenerator[dict, None]:
+        """Run a previously gated tool call now that the operator approved it.
+        Works the same whether the call came from Quick mode or a swarm worker —
+        both store the same (skill, action, params) tuple."""
+        if confirm_id not in self.pending_confirms:
+            yield {"type": "error", "data": "Confirmation ID not found or already used."}
+            return
+
+        skill_name, action, params = self.pending_confirms.pop(confirm_id)
+        yield {"type": "tool_call", "data": {"skill": skill_name, "action": action, "params": params, "confirmed": True}}
+
+        result      = await self.registry.execute(skill_name, action, params, confirmed=True)
+        result_dict = result.to_dict()
+        yield {"type": "tool_result", "data": {"skill": skill_name, "action": action, "params": params, **result_dict}}
+
+        ctx = f"[CONFIRMED TOOL RESULT: {skill_name}.{action}]\n{json.dumps(result_dict, indent=2, default=str)}"
+        self._append("user", ctx)
+
+        summary = ""
+        confirm_sp = build_system_prompt(persona=self.persona)
+        async for token in self.llm.chat_stream(self.conversation, system=confirm_sp):
+            summary += token
+            yield {"type": "token", "data": token}
+
+        self._append("assistant", summary or "✓")
+        _memory.save_turn(self.user_id, "assistant", summary or "✓")
+        yield {"type": "done", "data": {}}
+
+    # ── Quick mode (react=False) — identical semantics to the old single-cycle ──
+
+    async def _single_cycle(self, user_message: str, auto_confirm: bool, system_prompt: str) -> AsyncGenerator[dict, None]:
+        self._append("user", user_message)
+
+        full_response = ""
+        tool_calls_found: list = []
+        yield {"type": "token", "data": ""}
+
+        async for token in self.llm.chat_stream(self.conversation, system=system_prompt):
+            full_response += token
+            yield {"type": "token", "data": token}
+            for call in self._extract_tool_calls(full_response):
+                if call not in tool_calls_found:
+                    tool_calls_found.append(call)
+
+        self._append("assistant", full_response)
+        _memory.save_conversation_block(self.user_id, user_message, full_response)
+
+        for call in tool_calls_found:
+            skill_name = call.get("skill", "")
+            action     = call.get("action", "")
+            params     = call.get("params", {})
+
+            yield {"type": "tool_call", "data": {"skill": skill_name, "action": action, "params": params}}
+            result = await self.registry.execute(skill_name, action, params, confirmed=auto_confirm)
+
+            if result.requires_confirm and not auto_confirm:
+                self._confirm_counter += 1
+                confirm_id = f"{skill_name}:{action}:{self._confirm_counter}"
+                self.pending_confirms[confirm_id] = (skill_name, action, params)
+                yield {"type": "confirm_needed", "data": {
+                    "confirm_id": confirm_id, "prompt": result.confirm_prompt,
+                    "skill": skill_name, "action": action,
+                }}
+                yield {"type": "done", "data": {}}
+                return
+
+            result_dict = result.to_dict()
+            yield {"type": "tool_result", "data": {"skill": skill_name, "action": action, "params": params, **result_dict}}
+            ctx = f"[TOOL RESULT: {skill_name}.{action}]\n{json.dumps(result_dict, indent=2, default=str)}"
+            self._append("user", ctx)
+
+            summary = ""
+            async for token in self.llm.chat_stream(self.conversation, system=system_prompt):
+                summary += token
+                yield {"type": "token", "data": token}
+            self._append("assistant", summary or "✓")
+            _memory.save_turn(self.user_id, "assistant", summary or "✓")
+
+        yield {"type": "done", "data": {}}
+
+    # ── Layer 1: Classifier ───────────────────────────────────────────────────
+
+    async def _classify(self, message: str) -> str:
         try:
-            raw   = self.llm_fn(conv, system)
+            raw  = await self.llm.chat([{"role": "user", "content": message}], system=CLASSIFIER_SYSTEM_PROMPT)
+            data = json.loads(raw.strip())
+            cat  = data.get("category", "chat")
+            return cat if cat in ("chat", "task") else "chat"
+        except Exception:
+            lower = message.lower()
+            return "task" if any(k in lower for k in CHAT_HEURISTIC_TASK_KEYWORDS) else "chat"
+
+    # ── Layer 2a: Chat path — direct streamed reply, no tools ───────────────────
+
+    async def _handle_chat_stream(self, user_message: str, system_prompt: str) -> AsyncGenerator[dict, None]:
+        self._append("user", user_message)
+        full_response = ""
+        async for token in self.llm.chat_stream(self.conversation, system=system_prompt):
+            full_response += token
+            yield {"type": "token", "data": token}
+        self._append("assistant", full_response)
+        _memory.save_conversation_block(self.user_id, user_message, full_response)
+        yield {"type": "done", "data": {"react_complete": True, "category": "chat"}}
+
+    # ── Layer 2b: Planner ─────────────────────────────────────────────────────
+
+    async def _generate_plan(self, message: str) -> list:
+        system = PLANNER_SYSTEM_PROMPT.replace("__MAX_PARALLEL__", str(self.max_parallel))
+        try:
+            raw   = await self.llm.chat([{"role": "user", "content": f"Plan this: {message}"}], system=system)
             clean = raw.strip()
-            # Strip markdown fences if present
             if clean.startswith("```"):
                 clean = clean.split("```")[1]
                 if clean.startswith("json"):
@@ -376,76 +405,231 @@ Rules:
                     validation_criteria = item.get("validation_criteria", "Task completed successfully"),
                     depends_on          = item.get("depends_on", []),
                 ))
-            return tasks
-        except Exception as e:
-            logger.error("[brain] planner failed: %s", e)
-            # Fallback: single task
-            return [Task(
-                task_id             = "TSK-001",
-                goal                = message,
-                context             = {"user_id": user_id},
-                validation_criteria = "Request fulfilled",
-            )]
+            return tasks or [Task(task_id="TSK-001", goal=message, context={"user_id": self.user_id},
+                                   validation_criteria="Request fulfilled")]
+        except Exception as exc:
+            logger.error("[brain_planner_failed] err=%s", exc)
+            return [Task(task_id="TSK-001", goal=message, context={"user_id": self.user_id},
+                         validation_criteria="Request fulfilled")]
 
-    # ── Layer 4: Swarm execution ──────────────────────────────────────────────
+    # ── Task pipeline: plan (optional) → swarm → consolidate → summarize ───────
 
-    def _run_swarm(self, tasks: list) -> list:
-        """
-        Execute tasks in dependency order using daemon threads.
-        Tasks with no unmet dependencies run in parallel.
-        Tasks with dependencies wait for their prereqs to complete.
-        """
-        task_map    = {t.task_id: t for t in tasks}
-        completed   = set()
-        all_task_ids = set(task_map.keys())
+    async def _run_task_pipeline(self, message: str, auto_confirm: bool, persona: str,
+                                  re_act_max_loop: int, skip_planner: bool) -> AsyncGenerator[dict, None]:
+        self._append("user", message)
+        _memory.save_turn(self.user_id, "user", message)
 
-        while completed != all_task_ids:
-            # Find tasks ready to run (not started, deps all done)
-            ready = [
-                t for t in tasks
-                if t.status == "PENDING"
-                and all(dep in completed for dep in t.depends_on)
-            ]
+        if skip_planner:
+            tasks = [Task(task_id="TSK-001", goal=message, context={"user_id": self.user_id},
+                          validation_criteria="Request fulfilled")]
+            yield {"type": "react_status", "data": {
+                "iteration": 0, "max": re_act_max_loop,
+                "phase": f"deep task — 1 worker, up to {re_act_max_loop} iterations", "healing": False,
+            }}
+        else:
+            yield {"type": "react_status", "data": {"iteration": 0, "max": 0, "phase": "planning", "healing": False}}
+            tasks = await self._generate_plan(message)
+            yield {"type": "react_status", "data": {
+                "iteration": 0, "max": 0, "phase": f"plan ready — {len(tasks)} task(s)", "healing": False,
+            }}
 
+        async for event in self._run_swarm_streaming(tasks, auto_confirm, persona, re_act_max_loop):
+            yield event
+
+        self.task_registry.extend(tasks)
+        report = self._consolidate(tasks)
+
+        yield {"type": "react_status", "data": {"iteration": 0, "max": 0, "phase": "consolidating", "healing": False}}
+
+        summary = ""
+        summary_conv = [{"role": "user", "content": f"Original request: {message}\n\nExecution report:\n{report}"}]
+        async for token in self.llm.chat_stream(summary_conv, system=SUMMARY_SYSTEM_PROMPT):
+            summary += token
+            yield {"type": "token", "data": token}
+
+        self._append("assistant", summary or report)
+        _memory.save_turn(self.user_id, "assistant", summary or report)
+
+        needs_attention = any(t.status == "FAILED" and t.error == "requires_confirmation" for t in tasks)
+        yield {"type": "done", "data": {
+            "react_complete":  not needs_attention,
+            "iterations":      max((t.iterations_used for t in tasks), default=0),
+            "tasks":           [self._task_to_dict(t) for t in tasks],
+        }}
+
+    # ── Layer 3: Swarm execution (asyncio, dependency-ordered batches) ──────────
+
+    async def _run_swarm_streaming(self, tasks: list, auto_confirm: bool, persona: str,
+                                    re_act_max_loop: int) -> AsyncGenerator[dict, None]:
+        task_map  = {t.task_id: t for t in tasks}
+        completed: set = set()
+        all_ids        = set(task_map.keys())
+        sem = asyncio.Semaphore(max(1, self.max_parallel))
+
+        while completed != all_ids:
+            ready = [t for t in tasks if t.status == "PENDING" and all(d in completed for d in t.depends_on)]
             if not ready:
-                # Check for deadlock — no PENDING tasks but not all done
                 remaining = [t for t in tasks if t.status == "PENDING"]
                 if remaining:
-                    logger.warning("[brain] dependency deadlock — marking %d tasks SKIPPED", len(remaining))
+                    logger.warning("[brain_swarm] dependency deadlock — skipping %d task(s)", len(remaining))
                     for t in remaining:
-                        t.status = "SKIPPED"
-                        t.error  = "Dependency deadlock"
+                        t.status, t.error = "SKIPPED", "Dependency deadlock"
                 break
 
-            # Spawn worker threads for ready batch
-            workers = []
-            for task in ready:
-                w = SwarmWorker(task, self.llm_fn, self.tool_fn, self.re_act_max_loop)
-                workers.append(w)
-                w.start()
-                logger.info("[brain] spawned worker task_id=%s", task.task_id)
+            yield {"type": "react_status", "data": {
+                "iteration": 0, "max": re_act_max_loop,
+                "phase": f"swarm — {len(ready)} task(s) running (cap {re_act_max_loop} iter/worker)",
+                "healing": False,
+            }}
 
-            # Wait for this batch to complete
-            for w in workers:
-                w.join(timeout=300)  # 5-minute hard timeout per task
-                if w.is_alive():
-                    w.task.status = "FAILED"
-                    w.task.error  = "Worker timeout (300s)"
-                    logger.error("[brain] worker timeout task_id=%s", w.task.task_id)
+            queue: asyncio.Queue = asyncio.Queue()
 
-            # Mark batch as completed for dependency resolution
-            for task in ready:
-                completed.add(task.task_id)
+            async def _bounded_run(task: Task):
+                try:
+                    async with sem:
+                        await asyncio.wait_for(
+                            self._run_worker(task, task_map, auto_confirm, persona, re_act_max_loop, queue),
+                            timeout=SWARM_WORKER_TIMEOUT_S,
+                        )
+                except asyncio.TimeoutError:
+                    task.status, task.error = "FAILED", f"Worker timeout ({SWARM_WORKER_TIMEOUT_S}s)"
+                    logger.error("[brain_swarm] worker timeout task_id=%s", task.task_id)
+                except Exception as exc:
+                    task.status, task.error = "FAILED", str(exc)
+                    logger.error("[brain_swarm] worker error task_id=%s err=%s", task.task_id, exc)
+                finally:
+                    await queue.put(None)   # sentinel — guarantees the drain loop below never hangs
 
-        return tasks
+            runner_tasks = [asyncio.create_task(_bounded_run(t)) for t in ready]
 
-    # ── Layer 5: Consolidation ────────────────────────────────────────────────
+            remaining_workers = len(runner_tasks)
+            while remaining_workers > 0:
+                item = await queue.get()
+                if item is None:
+                    remaining_workers -= 1
+                    continue
+                yield item   # live tool_call / tool_result / confirm_needed from inside a worker
+
+            await asyncio.gather(*runner_tasks, return_exceptions=True)
+            for t in ready:
+                completed.add(t.task_id)
+
+    async def _run_worker(self, task: Task, task_map: dict, auto_confirm: bool, persona: str,
+                           re_act_max_loop: int, queue: asyncio.Queue):
+        """Isolated ephemeral worker. No shared state with the main conversation or
+        other workers — only `context` flows down, only `result`/`status` flows up."""
+        task.status = "RUNNING"
+        logger.info("[brain_swarm] start task_id=%s goal=%.60s", task.task_id, task.goal)
+
+        dep_results = {d: task_map[d].result for d in task.depends_on if d in task_map}
+        base_prompt = build_system_prompt(persona=persona)
+        system_prompt = (
+            f"You are a focused task executor inside an isolated swarm worker.\n\n"
+            f"TASK ID    : {task.task_id}\n"
+            f"GOAL       : {task.goal}\n"
+            f"CONTEXT    : {json.dumps(task.context, indent=2, default=str)}\n"
+            f"VALIDATION : {task.validation_criteria}\n\n"
+            f"Execute the task using TOOL_CALL blocks when needed.\n"
+            f"When the goal is achieved, write TASK_COMPLETE and your result summary.\n"
+            f"You have maximum {re_act_max_loop} reasoning iterations.\n"
+            f"Be concise — the orchestrator only needs your final result, not your thinking process.\n\n"
+            f"{base_prompt}"
+        )
+        local_conversation: list = [{
+            "role": "user",
+            "content": (
+                f"Execute this task:\n\nGOAL: {task.goal}\n\n"
+                f"CONTEXT: {json.dumps({**task.context, 'dependency_results': dep_results}, default=str)}\n\n"
+                f"VALIDATION: {task.validation_criteria}"
+            ),
+        }]
+
+        for iteration in range(1, re_act_max_loop + 1):
+            task.iterations_used = iteration
+            try:
+                response = await self.llm.chat(local_conversation, system=system_prompt)
+            except Exception as exc:
+                local_conversation.append({"role": "user", "content": f"[ERROR]\n{exc}\nAdapt and continue."})
+                continue
+            local_conversation.append({"role": "assistant", "content": response})
+
+            # Surface the worker's own reasoning text. This is what carries any
+            # "Phase N — ..." narration (e.g. /api/evolve's 9-phase protocol) —
+            # tool_call/tool_result only carry skill/action/output, never the
+            # model's own commentary, and the worker calls the LLM non-streamed
+            # (one full response per iteration, not token-by-token) so this is
+            # emitted as a single chunk per iteration rather than incrementally.
+            await queue.put({"type": "token", "data": f"\n── [{task.task_id} · iter {iteration}/{re_act_max_loop}] ──\n{response}\n"})
+
+            if self._is_complete(response):
+                task.result, task.status = self._extract_result(response), "COMPLETED"
+                logger.info("[brain_swarm] complete task_id=%s iter=%d", task.task_id, iteration)
+                return
+
+            calls = self._extract_tool_calls(response)
+            if not calls:
+                task.result, task.status = response.strip(), "COMPLETED"
+                logger.info("[brain_swarm] done (no tools) task_id=%s iter=%d", task.task_id, iteration)
+                return
+
+            observations: list = []
+            for call in calls:
+                skill_name = call.get("skill", "")
+                action     = call.get("action", "")
+                params     = call.get("params", {})
+                await queue.put({"type": "tool_call", "data": {
+                    "skill": skill_name, "action": action, "params": params, "task_id": task.task_id,
+                }})
+                try:
+                    result = await self.registry.execute(skill_name, action, params, confirmed=auto_confirm)
+                except Exception as tool_exc:
+                    observations.append(f"[TOOL ✗ {skill_name}.{action} EXCEPTION]\n{tool_exc}")
+                    continue
+
+                if result.requires_confirm and not auto_confirm:
+                    # Swarm workers don't pause-and-wait for a human (would block other
+                    # concurrent workers indefinitely) — surface confirm_needed for
+                    # visibility/logging, skip the action, and let the worker adapt or
+                    # report it. The operator can run it via confirm_action() afterwards.
+                    self._confirm_counter += 1
+                    confirm_id = f"{skill_name}:{action}:{self._confirm_counter}"
+                    self.pending_confirms[confirm_id] = (skill_name, action, params)
+                    await queue.put({"type": "confirm_needed", "data": {
+                        "confirm_id": confirm_id, "prompt": result.confirm_prompt,
+                        "skill": skill_name, "action": action, "task_id": task.task_id,
+                    }})
+                    observations.append(
+                        f"[TOOL ⏸ {skill_name}.{action} NEEDS OPERATOR CONFIRMATION — confirm_id={confirm_id}]\n"
+                        f"This action requires explicit approval and can't run unattended. "
+                        f"Skip it, try a non-destructive alternative, or note it in your result."
+                    )
+                    continue
+
+                result_dict = result.to_dict()
+                await queue.put({"type": "tool_result", "data": {
+                    "skill": skill_name, "action": action, "params": params, "task_id": task.task_id, **result_dict,
+                }})
+                if result_dict.get("success"):
+                    observations.append(f"[TOOL ✓ {skill_name}.{action}]\n{json.dumps(result_dict.get('output'), indent=2, default=str)}")
+                else:
+                    observations.append(
+                        f"[TOOL ✗ {skill_name}.{action} FAILED]\nError: {result_dict.get('error')}\n"
+                        f"Diagnose and adjust approach."
+                    )
+            local_conversation.append({"role": "user", "content": "\n\n".join(observations)})
+
+        last_resp = local_conversation[-1].get("content", "") if local_conversation else "No result"
+        task.result = f"[MAX_ITERATIONS_REACHED after {re_act_max_loop} loops]\n{last_resp}"
+        task.status = "COMPLETED"
+        logger.warning("[brain_swarm] max_iter task_id=%s", task.task_id)
+
+    # ── Layer 4: Consolidation ───────────────────────────────────────────────────
 
     def _consolidate(self, tasks: list) -> str:
         lines = ["# Swarm Execution Report\n"]
         for t in tasks:
-            status_icon = {"COMPLETED": "✓", "FAILED": "✗", "SKIPPED": "⊘"}.get(t.status, "?")
-            lines.append(f"## [{status_icon}] {t.task_id} — {t.goal}")
+            icon = {"COMPLETED": "✓", "FAILED": "✗", "SKIPPED": "⊘"}.get(t.status, "?")
+            lines.append(f"## [{icon}] {t.task_id} — {t.goal}")
             lines.append(f"**Status:** {t.status}  |  **Iterations:** {t.iterations_used}")
             if t.result:
                 lines.append(f"**Result:**\n{t.result}")
@@ -454,58 +638,59 @@ Rules:
             lines.append("")
         return "\n".join(lines)
 
-    def _llm_summarize(self, report: str, original_message: str) -> str:
-        system = """You are a report synthesiser. Given a multi-task execution report,
-produce a clear, concise summary for the operator.
-Lead with the overall outcome. Then list key results per task.
-Be factual and direct. No filler."""
-        conv = [
-            {"role": "user", "content": f"Original request: {original_message}\n\nExecution report:\n{report}"}
-        ]
-        try:
-            return self.llm_fn(conv, system)
-        except Exception as e:
-            return f"[Summary generation failed: {e}]\n\nRaw report:\n{report}"
+    # ── Shared helpers (same parsing contract as the old Agent) ──────────────────
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    def _is_complete(self, text: str) -> bool:
+        if "TASK_COMPLETE" in text or "task_complete" in text:
+            return True
+        lower = text.lower().strip()
+        return any(signal in lower for signal in COMPLETION_SIGNALS)
 
-    def _update_memory(self, role: str, content: str):
-        self.conversation_memory.append({"role": role, "content": content})
-        if len(self.conversation_memory) > 40:
-            self.conversation_memory = self.conversation_memory[-40:]
+    def _extract_result(self, text: str) -> str:
+        for marker in ("TASK_COMPLETE", "task_complete"):
+            if marker in text:
+                idx = text.find(marker)
+                return text[idx + len(marker):].strip().lstrip(":").strip()
+        return text.strip()
+
+    def _extract_tool_calls(self, text: str) -> list:
+        """Brace-counting TOOL_CALL: {...} parser — identical contract to the old Agent."""
+        calls: list = []
+        seen:  set  = set()
+        start = 0
+        while True:
+            idx = text.find(TOOL_CALL_MARKER, start)
+            if idx == -1:
+                break
+            brace_start = text.find("{", idx + len(TOOL_CALL_MARKER))
+            if brace_start == -1:
+                break
+            depth, i = 0, brace_start
+            while i < len(text):
+                ch = text[i]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        json_str = text[brace_start:i + 1]
+                        try:
+                            call = json.loads(json_str)
+                            if "skill" in call and "action" in call:
+                                key = f"{call['skill']}:{call['action']}:{json.dumps(call.get('params', {}), sort_keys=True)}"
+                                if key not in seen:
+                                    seen.add(key)
+                                    calls.append(call)
+                        except json.JSONDecodeError:
+                            pass
+                        break
+                i += 1
+            start = idx + 1
+        return calls
 
     def _task_to_dict(self, t: Task) -> dict:
         return {
-            "task_id":             t.task_id,
-            "goal":                t.goal,
-            "status":              t.status,
-            "result":              t.result,
-            "error":               t.error,
-            "iterations_used":     t.iterations_used,
-            "validation_criteria": t.validation_criteria,
-            "depends_on":          t.depends_on,
+            "task_id": t.task_id, "goal": t.goal, "status": t.status, "result": t.result,
+            "error": t.error, "iterations_used": t.iterations_used,
+            "validation_criteria": t.validation_criteria, "depends_on": t.depends_on,
         }
-
-
-# ── Brain registry (per user_id) ───────────────────────────────────────────────
-
-_BRAINS: dict[str, BlackboxBrain] = {}
-_BRAINS_LOCK = threading.Lock()
-
-
-def get_brain(user_id: str, llm_fn: Callable, tool_fn: Callable,
-              re_act_max_loop: int = 3) -> BlackboxBrain:
-    """Get or create a BlackboxBrain for a given user_id."""
-    with _BRAINS_LOCK:
-        if user_id not in _BRAINS:
-            _BRAINS[user_id] = BlackboxBrain(
-                llm_fn=llm_fn,
-                tool_fn=tool_fn,
-                re_act_max_loop=re_act_max_loop,
-            )
-        return _BRAINS[user_id]
-
-
-def destroy_brain(user_id: str):
-    with _BRAINS_LOCK:
-        _BRAINS.pop(user_id, None)

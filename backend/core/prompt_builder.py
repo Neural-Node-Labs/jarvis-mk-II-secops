@@ -2,7 +2,7 @@
 core/prompt_builder.py — shim re-exporting from top-level prompt_builder.py
 version: 2.0.0
 """
-from prompt_builder_ollama import (
+from prompt_builder import (
     build_system_prompt,
     AGENT_SYSTEM_PROMPT,
     list_personas,

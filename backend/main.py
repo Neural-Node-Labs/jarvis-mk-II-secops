@@ -36,7 +36,7 @@ from core.llm_router import LLMRouter, LLMConfig, get_model_max_tokens
 from core.skill_registry import SkillRegistry
 from core.prompt_builder import build_system_prompt, AGENT_SYSTEM_PROMPT, list_personas, DEFAULT_PERSONA, get_persona, save_persona, delete_persona, load_all_personas
 from core.memory_manager import MemoryManager, detect_retrieval_request
-from core.agent import Agent
+from core.agent import Agent, REACT_MAX_ITERATIONS, DEEP_TASK_MAX_ITERATIONS
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CBD COMPONENT 1 — Logging Subsystem
@@ -555,7 +555,7 @@ async def chat_websocket(ws: WebSocket, user_id: str):
                 await ws.send_json({"type": "error", "data": "Invalid JSON"})
                 continue
 
-            # Auth handshake — first message may carry token
+            # ── 1. Auth Handshake (Must come BEFORE empty message guard) ──
             if msg.get("type") == "auth":
                 token    = msg.get("token", "")
                 ws_user  = _validate_token(token)
@@ -563,8 +563,7 @@ async def chat_websocket(ws: WebSocket, user_id: str):
                     await ws.send_json({"type": "auth_failed", "data": "Invalid token"})
                     await ws.close()
                     return
-                # Build a throw-away config so the Ollama fallback resolves before
-                # we tell the UI which provider/model is actually active.
+
                 _probe_cfg = _build_llm_config()
                 from core.llm_router import LLMRouter as _LLMRouter
                 _probe_router = _LLMRouter(_probe_cfg)
@@ -578,27 +577,28 @@ async def chat_websocket(ws: WebSocket, user_id: str):
                 }})
                 continue
 
+            # Extract fields for functional loops
             message      = msg.get("message", "")
             react        = msg.get("react",        False)
             auto_confirm = msg.get("auto_confirm", False)
             model        = msg.get("model")
             provider     = msg.get("provider")
             attachments  = msg.get("attachments",  []) or []
-            instructions    = msg.get("instructions", "")   # Optional operator instruction block
+            instructions    = msg.get("instructions", "")
             halt            = msg.get("halt",          False)
-            memory_enabled  = msg.get("memory_enabled", True)   # False = skip memory injection
-            persona         = msg.get("persona", DEFAULT_PERSONA)  # "jarvis" | "omnikon" | "kraken"
-            project         = msg.get("project",  DEFAULT_PROJECT) # active UI project name
-            workspace_path  = _workspace_path(user_id, project)   # /app/workspace/{user}/{project}/workspace
+            memory_enabled  = msg.get("memory_enabled", True)
+            persona         = msg.get("persona", DEFAULT_PERSONA)
+            project         = msg.get("project",  DEFAULT_PROJECT)
+            workspace_path  = _workspace_path(user_id, project)
 
-            # ── HALT signal: destroy session so agent stops and forgets context ──
+            # ── 2. HALT signal processing ──
             if halt:
                 _destroy_session(user_id)
                 await ws.send_json({"type": "halted", "data": {"user_id": user_id}})
                 logger.info("[ws_halt] user=%s", user_id)
                 continue
 
-            # ── Confirm resume (destructive action gate) ───────────────────────
+            # ── 3. Confirm resume step ──
             confirm_id = msg.get("confirm_id", "")
             if confirm_id:
                 with _session_lock:
@@ -610,10 +610,9 @@ async def chat_websocket(ws: WebSocket, user_id: str):
                     await ws.send_json({"type": "error", "data": f"No session for {user_id}"})
                 continue
 
-            # ── Guard: ignore empty messages with no attachments ───────────────
-            # Previously this sent an error even on keep-alive pings from the client.
+            # ── 4. Guard Element (Now safely placed for pure message payloads) ──
             if not message and not attachments:
-                # Silently ignore — do NOT send error, do NOT echo back
+                # Silently ignore keep-alives / ping operations safely now
                 continue
 
             llm_trace.info("[WS] user=%s project=%s react=%s atts=%d msg=%.120s",
@@ -624,10 +623,7 @@ async def chat_websocket(ws: WebSocket, user_id: str):
             try:
                 agent = _get_session(user_id, model, provider)
 
-                # Build effective message with workspace context + operator instructions
-                # The workspace context tells the agent EXACTLY where to read/write files.
                 effective_msg = message
-
                 workspace_ctx = (
                     f"[WORKSPACE CONTEXT]\n"
                     f"Active Project  : {project}\n"
@@ -662,7 +658,6 @@ async def chat_websocket(ws: WebSocket, user_id: str):
         logger.info("[ws_disconnected] user=%s", user_id)
     except Exception as exc:
         logger.error("[ws_error] user=%s err=%s", user_id, exc)
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ROUTER COMPONENT 10 — File Upload + Chat
@@ -1045,7 +1040,15 @@ async def trigger_evolution(request: Request):
     logger.info("[evolve_request] user=%s slug=%s origin=%.60s", user_id, slug, origin_path)
     try:
         agent = _get_session(user_id)
-        gen   = agent.chat_stream(evolution_prompt, react=True, auto_confirm=False)
+        # Self-Evolution is one long, sequential, stateful build (blueprint → approval →
+        # implement → test → deploy → verify) — it can't be split into independent
+        # parallel tasks, so it bypasses the Brain's Planner/Swarm (which caps each
+        # worker at re_act_max_loop, default 3) via force_single_task=True and runs
+        # as a single worker with the old single-track agent's iteration budget instead.
+        gen = agent.chat_stream(
+            evolution_prompt, react=True, auto_confirm=False,
+            force_single_task=True, re_act_max_loop=DEEP_TASK_MAX_ITERATIONS,
+        )
         return StreamingResponse(_agent_to_sse(gen), media_type="text/event-stream", headers={
             "Cache-Control":     "no-cache",
             "X-Accel-Buffering": "no",
@@ -3447,10 +3450,21 @@ async def on_startup():
     logger.info("  Task Timeout: %s s", TASK_TIMEOUT_SECONDS)
     logger.info("═" * 60)
 
+    global _scheduler_task
+    _scheduler_task = asyncio.create_task(_scheduler_loop())
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
     logger.info("Mighty Jarvis MKII — graceful shutdown initiated")
+    global _scheduler_task
+    if _scheduler_task is not None:
+        _scheduler_task.cancel()
+        try:
+            await _scheduler_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Scheduler loop stopped.")
     with _session_lock:
         _sessions.clear()
     logger.info("All sessions cleared. Goodbye.")

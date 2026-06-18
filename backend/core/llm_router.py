@@ -150,7 +150,7 @@ PROVIDER_DEFAULTS: dict[str, dict] = {
         "key_env":  "DEEPSEEK_API_KEY",
     },
     "ollama": {
-        "base_url": os.getenv("OLLAMA_HOST", "http://localhost:11434/api/chat") ,
+        "base_url": os.getenv("OLLAMA_HOST", "http://localhost:11434"),
         "model":    "qwen2.5-coder:0.5b",
         "key_env":  None,
     },
@@ -278,6 +278,9 @@ class LLMRouter:
                 if chunk.get("type") == "content_block_delta":
                     return chunk.get("delta", {}).get("text", "")
                 return ""
+            elif self.config.provider == "ollama":
+                # Ollama NDJSON: {"message": {"role": "assistant", "content": "..."}, "done": false}
+                return chunk.get("message", {}).get("content") or ""
             else:
                 delta = chunk.get("choices", [{}])[0].get("delta", {})
                 return delta.get("content") or ""
@@ -348,17 +351,22 @@ class LLMRouter:
                             else:
                                 _err_yield = None
                                 async for line in response.aiter_lines():
-                                    if not line or line == "data: [DONE]":
-                                        continue
-                                    raw = line[6:] if line.startswith("data: ") else line
-                                    try:
-                                        chunk = json.loads(raw)
-                                        token = self._extract_token(chunk)
-                                        if token:
-                                            yield token
-                                    except json.JSONDecodeError:
-                                        traceback.print_exc()
-                                        continue
+                                     if not line or line == "data: [DONE]":
+                                         continue
+
+                                     # Ollama sends raw NDJSON — no "data: " prefix
+                                     if self.config.provider == "ollama":
+                                         raw = line
+                                     else:
+                                         raw = line[6:] if line.startswith("data: ") else line
+
+                                     try:
+                                         chunk = json.loads(raw)
+                                         token = self._extract_token(chunk)
+                                         if token:
+                                             yield token
+                                     except json.JSONDecodeError:
+                                         continue
 
                 # ── Outside the stream context manager ────────────────────────
                 if _retry_after_stream:
