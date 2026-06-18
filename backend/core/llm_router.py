@@ -20,7 +20,7 @@ import logging
 import asyncio
 from dataclasses import dataclass, field
 from typing import AsyncGenerator, Optional
-
+import traceback
 logger = logging.getLogger("llm_router")
 
 # ── Ollama auto-detection ──────────────────────────────────────────────────────
@@ -150,8 +150,8 @@ PROVIDER_DEFAULTS: dict[str, dict] = {
         "key_env":  "DEEPSEEK_API_KEY",
     },
     "ollama": {
-        "base_url": os.getenv("OLLAMA_HOST", "http://localhost:11434") + "/v1",
-        "model":    "llama3",
+        "base_url": os.getenv("OLLAMA_HOST", "http://localhost:11434/api/chat") ,
+        "model":    "qwen2.5-coder:0.5b",
         "key_env":  None,
     },
     "anthropic": {
@@ -170,8 +170,8 @@ PROVIDER_DEFAULTS: dict[str, dict] = {
 
 @dataclass
 class LLMConfig:
-    provider:      str           = "deepseek"
-    model:         str           = "deepseek-coder"
+    provider:      str           = "ollama"
+    model:         str           = "qwen2.5-coder:0.5b"
     api_key:       Optional[str] = None
     base_url:      Optional[str] = None
     temperature:   float         = 0.7
@@ -266,6 +266,8 @@ class LLMRouter:
     def _endpoint(self, stream: bool = True) -> str:
         if self.config.provider == "anthropic":
             return f"{self.base_url}/messages"
+        if self.config.provider == "ollama":
+            return f"{self.base_url}/api/chat"
         return f"{self.base_url}/chat/completions"
 
     # ── Token extractors ───────────────────────────────────────────────────────
@@ -307,7 +309,8 @@ class LLMRouter:
         payload    = self._build_payload(messages, system, stream=True)
         headers    = self._build_headers(request_id)
 
-        logger.debug("[llm_stream_start] req=%s provider=%s model=%s", request_id, self.config.provider, self.model)
+        logger.info("[llm_stream_start] endpoint=%s req=%s provider=%s model=%s", endpoint, request_id, self.config.provider, self.model)
+        #logger.debug("[llm_stream_start] endpoint=%s req=%s provider=%s model=%s", endpoint, request_id, self.config.provider, self.model)
 
         retries = 0
         while True:
@@ -354,6 +357,7 @@ class LLMRouter:
                                         if token:
                                             yield token
                                     except json.JSONDecodeError:
+                                        traceback.print_exc()
                                         continue
 
                 # ── Outside the stream context manager ────────────────────────
@@ -366,6 +370,7 @@ class LLMRouter:
                 return              # success
 
             except httpx.HTTPStatusError as exc:
+                traceback.print_exc()
                 # Fallback: raised by raise_for_status() if we missed it above.
                 # Body is likely gone at this point; surface what we can.
                 err_body = getattr(exc.response, "_content", None)
@@ -384,14 +389,17 @@ class LLMRouter:
                 return
 
             except httpx.ConnectError:
+                traceback.print_exc()
                 yield f"\n[LLM ERROR] Cannot connect to {self.base_url}. Provider running?"
                 return
 
             except httpx.TimeoutException:
+                traceback.print_exc()
                 yield f"\n[LLM ERROR] Request timed out after {self.config.timeout_s}s."
                 return
 
             except Exception as exc:
+                traceback.print_exc()
                 yield f"\n[LLM ERROR] {type(exc).__name__}: {exc}"
                 return
 
@@ -411,6 +419,7 @@ class LLMRouter:
                     resp.raise_for_status()
                     return self._extract_full(resp.json())
             except Exception as exc:
+                traceback.print_exc()
                 if attempt < self.config.max_retries:
                     await asyncio.sleep(2 ** (attempt + 1))
                     continue
