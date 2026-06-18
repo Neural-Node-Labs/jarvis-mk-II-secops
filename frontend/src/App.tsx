@@ -4817,7 +4817,7 @@ export default function App() {
             <ArcReactor size={26} />
             <div>
               <div data-text={J.wordmark} className={persona !== "jarvis" ? "persona-glitch" : ""}
-                style={{ color: J.accent, fontSize: 16, letterSpacing: "0.2em", fontFamily: J.fontHeader, fontWeight: 700, lineHeight: 1.2 }}>S.I.R Platform</div>
+                style={{ color: J.accent, fontSize: 16, letterSpacing: "0.2em", fontFamily: J.fontHeader, fontWeight: 700, lineHeight: 1.2 }}>J.A.R.V.I.S MK II — S.I.R Platform</div>
               <div style={{ color: J.textDim, fontSize: 10, letterSpacing: "0.15em", fontFamily: J.fontHeader, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>Super Intelligent Robot</div>
             </div>
           </div>
