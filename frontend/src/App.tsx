@@ -280,6 +280,292 @@ const AttBadge = ({ att, onRemove }: { att: any; onRemove?: () => void }) => (
   </div>
 );
 
+// ─── Code / File Renderer ─────────────────────────────────────────────────────
+
+// Maps language identifiers to a display label + accent colour inside the HUD palette.
+const LANG_META: Record<string, { label: string; color: string }> = {
+  python:     { label: "PY",   color: "#4EC9B0" },
+  py:         { label: "PY",   color: "#4EC9B0" },
+  javascript: { label: "JS",   color: "#FFB830" },
+  js:         { label: "JS",   color: "#FFB830" },
+  typescript: { label: "TS",   color: "#00C8FF" },
+  ts:         { label: "TS",   color: "#00C8FF" },
+  tsx:        { label: "TSX",  color: "#00C8FF" },
+  jsx:        { label: "JSX",  color: "#FFB830" },
+  bash:       { label: "SH",   color: "#FF5533" },
+  sh:         { label: "SH",   color: "#FF5533" },
+  shell:      { label: "SH",   color: "#FF5533" },
+  zsh:        { label: "SH",   color: "#FF5533" },
+  json:       { label: "JSON", color: "#7B68EE" },
+  yaml:       { label: "YAML", color: "#FF9F4A" },
+  yml:        { label: "YAML", color: "#FF9F4A" },
+  toml:       { label: "TOML", color: "#FF9F4A" },
+  dockerfile: { label: "🐳",   color: "#44BBFF" },
+  docker:     { label: "🐳",   color: "#44BBFF" },
+  html:       { label: "HTML", color: "#E44D26" },
+  css:        { label: "CSS",  color: "#2965F1" },
+  sql:        { label: "SQL",  color: "#00CC55" },
+  go:         { label: "GO",   color: "#00B8CC" },
+  rust:       { label: "RS",   color: "#FF5533" },
+  rs:         { label: "RS",   color: "#FF5533" },
+  java:       { label: "JAVA", color: "#F89820" },
+  c:          { label: "C",    color: "#A8B9CC" },
+  cpp:        { label: "C++",  color: "#A8B9CC" },
+  cs:         { label: "C#",   color: "#9B4F96" },
+  ruby:       { label: "RB",   color: "#CC342D" },
+  rb:         { label: "RB",   color: "#CC342D" },
+  php:        { label: "PHP",  color: "#777BB4" },
+  swift:      { label: "SWIFT",color: "#F05138" },
+  kotlin:     { label: "KT",   color: "#7F52FF" },
+  xml:        { label: "XML",  color: "#FF9F4A" },
+  markdown:   { label: "MD",   color: "#B8D8F0" },
+  md:         { label: "MD",   color: "#B8D8F0" },
+  text:       { label: "TXT",  color: "#3A6A8A" },
+  txt:        { label: "TXT",  color: "#3A6A8A" },
+  ini:        { label: "INI",  color: "#FF9F4A" },
+  env:        { label: "ENV",  color: "#FF9F4A" },
+  diff:       { label: "DIFF", color: "#FF5533" },
+  patch:      { label: "PATCH",color: "#FF5533" },
+};
+
+// Derive lang from a filename extension.
+function langFromFilename(name: string): string {
+  const ext = name.split(".").pop()?.toLowerCase() || "";
+  if (name.toLowerCase() === "dockerfile") return "dockerfile";
+  if (name.startsWith(".env")) return "env";
+  return ext || "text";
+}
+
+// Detect if the first non-empty line of a code block looks like a file path.
+// Matches patterns like: "# /path/to/file.py"  "// src/foo.ts"  "## filename.json"
+// OR a bare relative/absolute path: "src/components/Foo.tsx"
+function detectFilename(firstLine: string): string | null {
+  // Comment-style: # path, // path, ## path
+  const commentMatch = firstLine.trim().match(/^(?:\/\/|##+?|\/\*)\s*([\w.\-/\\@]+\.\w+)\s*\*?\/?\s*$/);
+  if (commentMatch) return commentMatch[1];
+  // Bare path with at least one slash or a recognisable extension
+  const bareMatch = firstLine.trim().match(/^((?:\.\.?\/|\/)?[\w.\-/\\@]+\.\w+)\s*$/);
+  if (bareMatch) return bareMatch[1];
+  return null;
+}
+
+// Syntax-coloured token pass — lightweight, no external dep.
+// Handles keywords, strings, comments, numbers, and operators for most langs.
+function tokeniseLine(line: string, lang: string): React.ReactNode[] {
+  // For langs where we just want plain mono, return as-is.
+  if (["text", "txt", "md", "markdown"].includes(lang)) return [line];
+
+  // Diff colouring
+  if (lang === "diff" || lang === "patch") {
+    const colour = line.startsWith("+") ? "#00FF88" : line.startsWith("-") ? "#FF4455" : line.startsWith("@") ? "#00C8FF" : undefined;
+    return colour ? [<span key={0} style={{ color: colour }}>{line}</span>] : [line];
+  }
+
+  // JSON quick pass
+  if (lang === "json") {
+    return [<span key={0} dangerouslySetInnerHTML={{ __html:
+      line
+        .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+        .replace(/("(?:[^"\\]|\\.)*")\s*:/g, `<span style="color:#00C8FF">$1</span>:`)
+        .replace(/:\s*("(?:[^"\\]|\\.)*")/g, `: <span style="color:#CE9178">$1</span>`)
+        .replace(/:\s*(\d+\.?\d*)/g, `: <span style="color:#B5CEA8">$1</span>`)
+        .replace(/:\s*(true|false|null)/g, `: <span style="color:#569CD6">$1</span>`)
+    }} />];
+  }
+
+  // Shell / bash: highlight flags, paths, builtins
+  if (["bash","sh","shell","zsh"].includes(lang)) {
+    return [<span key={0} dangerouslySetInnerHTML={{ __html:
+      line
+        .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+        .replace(/(#.*)$/, `<span style="color:#6A9955">$1</span>`)
+        .replace(/\b(sudo|apt|pip|npm|yarn|docker|git|cd|ls|mkdir|rm|cp|mv|cat|echo|export|source|chmod|chown|curl|wget|grep|awk|sed|find|xargs|kill|ps|env|which|alias)\b/g, `<span style="color:#569CD6">$1</span>`)
+        .replace(/(--?[\w-]+)/g, `<span style="color:#9CDCFE">$1</span>`)
+        .replace(/('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")/g, `<span style="color:#CE9178">$1</span>`)
+    }} />];
+  }
+
+  // Generic: keywords, strings, comments, numbers
+  const keywords: Record<string, string[]> = {
+    python: ["def","class","import","from","return","if","elif","else","for","while","in","not","and","or","is","None","True","False","try","except","finally","with","as","pass","break","continue","raise","yield","lambda","async","await","self","super","global","nonlocal","del","assert"],
+    javascript: ["const","let","var","function","return","if","else","for","while","in","of","class","new","this","import","export","default","from","async","await","try","catch","finally","throw","typeof","instanceof","null","undefined","true","false","=>"," extends","super","static"],
+    typescript: ["const","let","var","function","return","if","else","for","while","in","of","class","new","this","import","export","default","from","async","await","try","catch","finally","throw","typeof","instanceof","null","undefined","true","false","=>","extends","super","static","interface","type","enum","implements","declare","namespace","readonly","abstract","private","public","protected"],
+    go: ["func","package","import","return","if","else","for","range","switch","case","default","var","const","type","struct","interface","map","chan","go","defer","select","break","continue","fallthrough","nil","true","false","make","new","len","cap","append","copy","delete","panic","recover","print","println"],
+    rust: ["fn","let","mut","use","mod","pub","struct","enum","impl","trait","return","if","else","match","for","while","loop","break","continue","true","false","None","Some","Ok","Err","self","Self","super","crate","move","ref","in","as","where","type","const","static","unsafe","extern","async","await","dyn","Box","Vec","String","Option","Result"],
+    sql: ["SELECT","FROM","WHERE","JOIN","LEFT","RIGHT","INNER","OUTER","ON","GROUP","BY","ORDER","HAVING","INSERT","INTO","VALUES","UPDATE","SET","DELETE","CREATE","TABLE","DROP","ALTER","INDEX","PRIMARY","KEY","FOREIGN","REFERENCES","NOT","NULL","AND","OR","IN","EXISTS","DISTINCT","AS","WITH","UNION","ALL","LIMIT","OFFSET"],
+  };
+  const kws = keywords[lang] || keywords["javascript"];
+
+  // Escape HTML then apply colour passes — order matters (comments first).
+  const escaped = line.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  const result = escaped
+    // Single-line comments
+    .replace(/(\/\/.*$|#.*$|--.*$)/g, `<span style="color:#6A9955">$1</span>`)
+    // Strings
+    .replace(/('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`)/g, `<span style="color:#CE9178">$1</span>`)
+    // Numbers
+    .replace(/\b(\d+\.?\d*)\b/g, `<span style="color:#B5CEA8">$1</span>`)
+    // Keywords
+    .replace(new RegExp(`\\b(${kws.join("|")})\\b`, "g"), `<span style="color:#569CD6">$1</span>`);
+
+  return [<span key={0} dangerouslySetInnerHTML={{ __html: result }} />];
+}
+
+// Individual code block — with lang badge, optional filename chip, copy button.
+const CodeBlock = ({ lang, code, filename }: { lang: string; code: string; filename?: string | null }) => {
+  const [copied, setCopied] = useState(false);
+  const [expanded, setExpanded] = useState(!filename); // auto-expand if no filename
+
+  const lmeta = LANG_META[lang.toLowerCase()] || { label: lang.toUpperCase() || "CODE", color: J.accent };
+  const lines = code.split("\n");
+
+  const copy = () => {
+    navigator.clipboard?.writeText(code).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1800); });
+  };
+
+  return (
+    <div style={{
+      margin: "8px 0",
+      border: `1px solid ${lmeta.color}30`,
+      borderLeft: `2px solid ${lmeta.color}99`,
+      borderRadius: 3,
+      overflow: "hidden",
+      background: "#050A10",
+    }}>
+      {/* Header bar */}
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "5px 10px",
+        background: `${lmeta.color}10`,
+        borderBottom: expanded ? `1px solid ${lmeta.color}20` : "none",
+        cursor: filename ? "pointer" : "default",
+        userSelect: "none",
+      }} onClick={filename ? () => setExpanded(e => !e) : undefined}>
+        {/* Left: lang badge + filename/line count */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{
+            fontSize: 9, fontFamily: J.fontHeader, fontWeight: 700,
+            letterSpacing: "0.12em", color: lmeta.color,
+            background: `${lmeta.color}18`, padding: "1px 6px", borderRadius: 2,
+          }}>{lmeta.label}</span>
+          {filename
+            ? <span style={{ fontSize: 11, color: J.textPri, fontFamily: J.fontMono }}>{filename}</span>
+            : <span style={{ fontSize: 9, color: J.textDim, fontFamily: J.fontHeader, letterSpacing: "0.1em" }}>{lines.length} LINE{lines.length !== 1 ? "S" : ""}</span>
+          }
+          {filename && (
+            <span style={{ fontSize: 9, color: J.textDim, fontFamily: J.fontHeader, letterSpacing: "0.1em" }}>
+              {expanded ? "▾ COLLAPSE" : "▸ EXPAND"}
+            </span>
+          )}
+        </div>
+        {/* Right: copy button */}
+        <button onClick={e => { e.stopPropagation(); copy(); }} style={{
+          fontSize: 9, fontFamily: J.fontHeader, fontWeight: 700, letterSpacing: "0.1em",
+          color: copied ? J.ok : J.textDim,
+          background: "transparent", border: "none", padding: "2px 6px",
+          cursor: "pointer", transition: "color 0.15s",
+        }}>{copied ? "✓ COPIED" : "⧉ COPY"}</button>
+      </div>
+
+      {/* Code body */}
+      {expanded && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 11.5, lineHeight: 1.6 }}>
+            <tbody>
+              {lines.map((line, i) => (
+                <tr key={i} style={{ background: i % 2 === 0 ? "transparent" : `${lmeta.color}04` }}>
+                  <td style={{
+                    textAlign: "right", paddingRight: 10, paddingLeft: 10,
+                    color: J.textDim, fontFamily: J.fontMono,
+                    fontSize: 9, userSelect: "none", minWidth: 32,
+                    borderRight: `1px solid ${lmeta.color}15`,
+                    verticalAlign: "top", paddingTop: 1, paddingBottom: 1,
+                  }}>{i + 1}</td>
+                  <td style={{
+                    paddingLeft: 12, paddingRight: 12, paddingTop: 1, paddingBottom: 1,
+                    fontFamily: J.fontMono, color: J.textPri, whiteSpace: "pre",
+                    verticalAlign: "top",
+                  }}>
+                    {tokeniseLine(line, lang.toLowerCase())}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Segment types produced by parseMessage()
+type Segment =
+  | { kind: "text";  content: string }
+  | { kind: "code";  lang: string; code: string; filename: string | null };
+
+// Parse raw LLM output into alternating text / code segments.
+function parseMessage(raw: string): Segment[] {
+  const segments: Segment[] = [];
+  // Matches ```lang\n...code...\n``` with optional whitespace
+  const FENCE = /```([\w.+\-]*)\n?([\s\S]*?)```/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = FENCE.exec(raw)) !== null) {
+    // Text before this fence
+    if (match.index > cursor) {
+      segments.push({ kind: "text", content: raw.slice(cursor, match.index) });
+    }
+
+    const lang = match[1].trim().toLowerCase() || "text";
+    const body = match[2];
+
+    // Check if first non-empty line of code is a filename comment
+    const lines = body.split("\n");
+    const firstLine = lines.find(l => l.trim() !== "") || "";
+    const filename = detectFilename(firstLine);
+    // If detected as filename, strip that comment line from the code body
+    const codeBody = filename
+      ? lines.slice(lines.findIndex(l => l.trim() !== "") + 1).join("\n").replace(/^\n/, "")
+      : body;
+
+    // Also try to derive lang from filename extension if lang was omitted
+    const resolvedLang = (lang === "text" && filename) ? langFromFilename(filename) : lang;
+
+    segments.push({ kind: "code", lang: resolvedLang, code: codeBody, filename });
+    cursor = match.index + match[0].length;
+  }
+
+  // Remaining text after last fence
+  if (cursor < raw.length) {
+    segments.push({ kind: "text", content: raw.slice(cursor) });
+  }
+
+  return segments.length ? segments : [{ kind: "text", content: raw }];
+}
+
+// Renders the assistant message: plain text segments + rich code/file blocks.
+const MessageRenderer = ({ content }: { content: string }) => {
+  const segments = parseMessage(content);
+  return (
+    <div style={{ fontSize: 13, lineHeight: 1.75, color: J.textPri }}>
+      {segments.map((seg, i) => {
+        if (seg.kind === "text") {
+          // Trim leading/trailing blank lines around code blocks but preserve interior newlines
+          const trimmed = seg.content.replace(/^\n+/, "").replace(/\n+$/, "");
+          if (!trimmed) return null;
+          return (
+            <div key={i} style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", marginBottom: 4 }}>
+              {trimmed}
+            </div>
+          );
+        }
+        return <CodeBlock key={i} lang={seg.lang} code={seg.code} filename={seg.filename} />;
+      })}
+    </div>
+  );
+};
+
 // ─── MessageBubble ────────────────────────────────────────────────────────────
 const Bubble = ({ msg }: { msg: any }) => {
   if (msg.role === "user") return (
@@ -364,10 +650,9 @@ const Bubble = ({ msg }: { msg: any }) => {
         borderLeft: `2px solid ${J.accent}30`,
         borderRadius: "2px 5px 5px 2px",
         padding: "10px 15px", maxWidth: "84%",
-        color: J.textPri, fontSize: 13, lineHeight: 1.75,
-        wordBreak: "break-word", whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
       }}>
-        {msg.content}
+        <MessageRenderer content={msg.content} />
         {msg.streaming && <span style={{ animation: "hud-blink 1s infinite", color: J.accent, marginLeft: 2 }}>▋</span>}
       </div>
     </div>

@@ -166,6 +166,83 @@ PROVIDER_DEFAULTS: dict[str, dict] = {
     },
 }
 
+# ── Lightweight model detection ───────────────────────────────────────────────
+# Small Ollama models (≤ ~2 B params) choke on the full persona + memory prompt.
+# Detection uses three tiers, checked in order:
+#
+#   1. Env override  — LIGHTWEIGHT_MODEL=1 forces lightweight regardless of name.
+#                      LIGHTWEIGHT_MODEL=0 forces full prompt regardless of name.
+#                      Unset → auto-detect via tiers 2 and 3.
+#
+#   2. Known-aliases — custom Modelfile names that don't carry a size suffix
+#                      (e.g. the "obedient-coder" alias built in docker-compose
+#                      from qwen2.5-coder:0.5b).  Add any new aliases here.
+#
+#   3. Size-suffix   — parses the ":Nb" / "-Nb" tag in standard Ollama model
+#                      names (qwen2.5-coder:0.5b, llama3.2:1b, etc.) and
+#                      treats anything ≤ 2 B as lightweight.
+#
+# Only fires for provider == "ollama". All other providers always return False.
+
+import re as _re
+
+_LIGHTWEIGHT_PARAM_CAP_B = 2.0   # ≤ 2 B parameters → lightweight
+
+# Tier-2: model names that are known aliases for sub-2B models.
+# These typically come from custom Modelfiles (ollama create <alias> -f Modelfile)
+# and carry no size suffix in their name.
+_KNOWN_LIGHTWEIGHT_ALIASES: set[str] = {
+    "obedient-coder",       # qwen2.5-coder:0.5b alias built in docker-compose
+    "obedient-coder:latest",
+}
+
+# Tier-3 regex: ":0.5b", "-1b", "_1.5b", etc.
+_TINY_SIZE_RE = _re.compile(r"[:\-_](\d+(?:\.\d+)?)b\b", _re.IGNORECASE)
+
+
+def is_lightweight_model(provider: str, model: str) -> bool:
+    """
+    Return True when the model is a small Ollama model that cannot handle
+    large system prompts without context overflow.
+
+    Tier 1 — env override (LIGHTWEIGHT_MODEL=1 / 0):
+      Lets operators hard-pin the behaviour for any custom alias without
+      touching code.
+
+    Tier 2 — known aliases:
+      Custom Modelfile names built from tiny base models (no size in name).
+      Edit _KNOWN_LIGHTWEIGHT_ALIASES above to add new ones.
+
+    Tier 3 — size-suffix regex:
+      Standard Ollama tag format:  qwen2.5-coder:0.5b → 0.5 B → True
+                                   llama3.2:1b         → 1 B   → True
+                                   llama3.2:3b         → 3 B   → False
+    """
+    if provider != "ollama":
+        return False
+
+    # Tier 1 — explicit env override
+    env_flag = os.getenv("LIGHTWEIGHT_MODEL", "").strip()
+    if env_flag == "1":
+        return True
+    if env_flag == "0":
+        return False
+
+    # Tier 2 — known aliases (covers custom Modelfile names)
+    if model.lower() in _KNOWN_LIGHTWEIGHT_ALIASES:
+        return True
+
+    # Tier 3 — size suffix in model tag
+    m = _TINY_SIZE_RE.search(model)
+    if m:
+        try:
+            return float(m.group(1)) <= _LIGHTWEIGHT_PARAM_CAP_B
+        except ValueError:
+            pass
+
+    return False
+
+
 # ── LLMConfig — pure dataclass, no Pydantic ────────────────────────────────────
 
 @dataclass
@@ -186,6 +263,11 @@ class LLMConfig:
     def effective_max_tokens(self) -> int:
         """Cap requested max_tokens at the model's known limit."""
         return min(self.max_tokens, get_model_max_tokens(self.model))
+
+    @property
+    def lightweight(self) -> bool:
+        """True when this is a small Ollama model that needs minimal prompting."""
+        return is_lightweight_model(self.provider, self.model)
 
 
 # ── LLMRouter ─────────────────────────────────────────────────────────────────
@@ -222,6 +304,9 @@ class LLMRouter:
         if not resolved_key:
             resolved_key = "ollama" if config.provider == "ollama" else f"MISSING_{defaults.get('key_env') or 'API_KEY'}"
         self.api_key = resolved_key
+
+        # Convenience flag — checked by BlackboxBrain to select minimal prompting
+        self.lightweight: bool = config.lightweight
 
     # ── Header builders ────────────────────────────────────────────────────────
 
@@ -351,22 +436,21 @@ class LLMRouter:
                             else:
                                 _err_yield = None
                                 async for line in response.aiter_lines():
-                                     if not line or line == "data: [DONE]":
-                                         continue
-
-                                     # Ollama sends raw NDJSON — no "data: " prefix
-                                     if self.config.provider == "ollama":
-                                         raw = line
-                                     else:
-                                         raw = line[6:] if line.startswith("data: ") else line
-
-                                     try:
-                                         chunk = json.loads(raw)
-                                         token = self._extract_token(chunk)
-                                         if token:
-                                             yield token
-                                     except json.JSONDecodeError:
-                                         continue
+                                    if not line or line == "data: [DONE]":
+                                        continue
+                                    # Ollama sends raw NDJSON — no "data: " prefix
+                                    if self.config.provider == "ollama":
+                                        raw = line
+                                    else:
+                                        raw = line[6:] if line.startswith("data: ") else line
+                                    try:
+                                        chunk = json.loads(raw)
+                                        token = self._extract_token(chunk)
+                                        if token:
+                                            yield token
+                                    except json.JSONDecodeError:
+                                        traceback.print_exc()
+                                        continue
 
                 # ── Outside the stream context manager ────────────────────────
                 if _retry_after_stream:

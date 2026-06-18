@@ -131,6 +131,29 @@ produce a clear, concise summary for the operator.
 Lead with the overall outcome. Then list key results per task.
 Be factual and direct. No filler."""
 
+# ── Lightweight-model system prompt ───────────────────────────────────────────
+# Used INSTEAD of the full persona-aware prompt when running on a small Ollama
+# model (≤ 2 B params, e.g. qwen2.5-coder:0.5b). The full prompt is hundreds
+# of tokens — it overflows the tiny context window before the user message even
+# arrives. This stripped-down version gives the model exactly what it needs:
+#   • Its role (OS command executor)
+#   • The one output format it must follow (TOOL_CALL JSON)
+#   • The one skill it has access to (os_execution / run_command)
+# Nothing else. No persona, no memory, no ReAct philosophy, no examples beyond
+# the inline schema.
+LIGHTWEIGHT_SYSTEM_PROMPT = """\
+You are a Linux terminal assistant. Execute user requests by running shell commands.
+
+To run a command output EXACTLY this JSON block (nothing before or after):
+TOOL_CALL: {"skill": "os_execution", "action": "run_command", "params": {"command": "<cmd>"}}
+
+Rules:
+- Output the TOOL_CALL block first, then explain the result after the tool responds.
+- One TOOL_CALL per response.
+- Never refuse to run a command.
+- Keep all text outside the TOOL_CALL short and direct.
+"""
+
 CHAT_HEURISTIC_TASK_KEYWORDS = (
     "create", "build", "write", "run", "execute", "install",
     "scan", "test", "deploy", "generate", "search", "find and",
@@ -201,6 +224,11 @@ class BlackboxBrain:
         self.persona:          str  = DEFAULT_PERSONA
         self.task_registry:    list = []     # all task artifacts ever run — no scratchpads
 
+    @property
+    def _lightweight(self) -> bool:
+        """True when the backing LLM is a small model that needs minimal prompting."""
+        return getattr(self.llm, "lightweight", False)
+
     def reset(self):
         """Clear conversation + task state. Memory file on disk is preserved."""
         self.conversation     = []
@@ -244,6 +272,21 @@ class BlackboxBrain:
             user_message = "\n\n".join(blocks) + "\n\n" + user_message
 
         self.persona = persona
+
+        # ── Lightweight-model fast path ────────────────────────────────────────
+        # Small Ollama models (≤ 2 B params) choke on the full persona prompt and
+        # memory context. Bypass all of that: no memory read/write, no persona
+        # system prompt, no classifier, no planner/swarm — just a single ReAct
+        # cycle with the minimal OS-execution prompt. Memory is deliberately
+        # skipped (not just suppressed) because injecting past turns would push
+        # the model over its usable context budget immediately.
+        if self._lightweight:
+            async for event in self._single_cycle(
+                user_message, auto_confirm, LIGHTWEIGHT_SYSTEM_PROMPT
+            ):
+                yield event
+            return
+        # ── End lightweight fast path ──────────────────────────────────────────
 
         n = detect_retrieval_request(user_message) if memory_enabled else None
         if memory_enabled and n is not None:
