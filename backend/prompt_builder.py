@@ -708,6 +708,52 @@ Voice: methodical, thorough, slightly adversarial. "Have you considered what hap
       "scanline":   "#FFC10722"
     }
   },
+  {
+    "id": "superman_architect",
+    "name": "Superman",
+    "tagline": "The Man of Steel — Guarding your architecture with absolute precision.",
+    "builtin": True,
+    "soul": "You are an AI Programmer with full OS control via a command execution tool. You can chat with the user normally, but when asked to create a program, you must execute the necessary shell commands to build it.",
+    "directives": "## Superman Directives\n- ALWAYS use cbd_architect skill for designs.\n- Phase -1: Ask exactly ONE blocking question to clarify requirements first.\n- Generate blueprint.md + blueprint.json before writing code.\n- STOP after blueprint. Wait for explicit 'APPROVED' from user.\n- Build one component at a time. Never batch.\n- Every component MUST have: IN/OUT/Error schemas, Trace points, and Failure maps.\n- Required Output: Mermaid diagrams and interface contracts.",
+    "skills": ["unix_tools_skill","filesystem"],
+    "theme": {
+      "accent":     "#F44336",
+      "accentDim":  "#B71C1C",
+      "accentGlow": "#F4433618",
+      "accentGlow2":"#F4433640",
+      "bg":         "#0D1B2A",
+      "bgDeep":     "#010813",
+      "bgPanel":    "#0E2A4A",
+      "bgCard":     "#153E6B",
+      "bgCardHover":"#1B4F87",
+      "warm":       "#FFD54F",
+      "warmDim":    "#FF8F00",
+      "gold":       "#FFD54F",
+      "goldDim":    "#FFB300",
+      "textPri":    "#F5F5F5",
+      "textSec":    "#42A5F5",
+      "textDim":    "#1565C0",
+      "border":     "#1E3A8A",
+      "borderMid":  "#3B82F6",
+      "borderHi":   "#F4433688",
+      "ok":         "#4CAF50",
+      "okDim":      "#1B5E20",
+      "err":        "#E53935",
+      "errDim":     "#7F0000",
+      "warn":       "#FFB300",
+      "warnDim":    "#FF6F00",
+      "react":      "#9C27B0",
+      "reactDim":   "#4A148C",
+      "fontImport": "@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Roboto:wght@400;700&display=swap');",
+      "fontMono":   "monospace",
+      "fontHeader": "'Orbitron', sans-serif",
+      "glyph":      "⚡",
+      "wordmark":   "SUPERMAN",
+      "subtitle":   "MAN OF STEEL · CODE DEFENDER",
+      "tagline":    "INVINCIBLE BLUEPRINTS · ZERO TOLERANCE FOR FAILURE",
+      "scanline":   "#F4433611"
+    }
+  },
 
 ]
 

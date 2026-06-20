@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import VoiceIO, { type VoiceIOHandle } from "./components/VoiceIO";
 
 // ─── Dynamic URLs ──────────────────────────────────────────────────────────────
 const _base_workspace = "/app/workspace"
@@ -4419,16 +4420,13 @@ const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => v
       } else if (res.status === 401) {
         setErr(data.detail || "Invalid credentials. Default: admin / admin123");
         setShaking(true); setTimeout(() => setShaking(false), 500);
-      } else if (res.status === 405 || res.status === 404) {
-        storeAuth(`dev-${u}-${Date.now()}`, u);
-        onAuth(u, persona);
       } else {
         setErr(data.detail || `Server error ${res.status}`);
         setShaking(true); setTimeout(() => setShaking(false), 500);
       }
     } catch {
-      storeAuth(`offline-${u}-${Date.now()}`, u);
-      onAuth(u, persona);
+      setErr("Connection failed. Verify the backend is running.");
+      setShaking(true); setTimeout(() => setShaking(false), 500);
     }
     setLoading(false);
   };
@@ -4437,7 +4435,7 @@ const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => v
     const u = regUser.trim().toLowerCase();
     if (!u || !regPass) { setErr("Username and password required."); return; }
     if (regPass !== regPass2) { setErr("Passwords do not match."); return; }
-    if (regPass.length < 6) { setErr("Password must be at least 6 characters."); return; }
+    if (regPass.length < 8) { setErr("Password must be at least 8 characters."); return; }
     setRegLoading(true); setErr("");
     try {
       const hashedRegPass = await sha256hex(regPass);
@@ -4600,7 +4598,7 @@ const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => v
             </div>
             <div style={{ marginBottom: 10 }}>
               <Lbl>Password</Lbl>
-              <input type="password" value={regPass} onChange={e => setRegPass(e.target.value)} style={{ ...inp, marginTop: 5 }} placeholder="Min 6 characters" />
+              <input type="password" value={regPass} onChange={e => setRegPass(e.target.value)} style={{ ...inp, marginTop: 5 }} placeholder="Min 8 characters" />
             </div>
             <div style={{ marginBottom: 14 }}>
               <Lbl>Confirm Password</Lbl>
@@ -4689,6 +4687,7 @@ export default function App() {
 
   const fileRef        = useRef<HTMLInputElement>(null);
   const wsRef          = useRef<WebSocket | null>(null);
+  const voiceRef       = useRef<VoiceIOHandle>(null);
   const bottomRef      = useRef<HTMLDivElement>(null);
   const evtHandlerRef  = useRef<((e: any) => void) | null>(null);
   const reconnDelay    = useRef(1000);
@@ -4819,9 +4818,15 @@ export default function App() {
     } else if (type === "halted") {
       // Server confirmed HALT — already handled client-side but clear streaming flag
       setStreaming(false);
+      voiceRef.current?.stopSpeaking();
     } else if (type === "done") {
       setStreaming(false);
-      setMessages(prev => prev.map(m => m.streaming ? { ...m, streaming: false } : m));
+      setMessages(prev => {
+        const settled = prev.map(m => m.streaming ? { ...m, streaming: false } : m);
+        const last = settled.filter(m => m.role === "assistant").at(-1);
+        if (last?.content) voiceRef.current?.speak(last.content);
+        return settled;
+      });
     } else if (type === "tool_call") {
       setMessages(prev => [...prev, { role: "tool_call", ...data }]);
     } else if (type === "tool_result") {
@@ -5361,6 +5366,21 @@ export default function App() {
               style={{ display: "none" }}
               onChange={e => { handleFiles(e.target.files); e.target.value = ""; }} />
 
+            {/* ── Voice I/O — STT mic + TTS speaker ── */}
+            <VoiceIO
+              ref={voiceRef}
+              onTranscript={t => {
+                setInput(t);
+                // Auto-send after voice input — remove the setTimeout lines to land in textarea instead
+                setTimeout(() => {
+                  if (reactMode) startClientReact(t);
+                  else send(t);
+                }, 80);
+              }}
+              J={J}
+              disabled={streaming}
+            />
+
             {/* Textarea */}
             <div style={{
               flex: 1, border: `1px solid ${reactMode ? `${J.react}44` : J.border}`,
@@ -5423,7 +5443,7 @@ export default function App() {
           </div>
 
           <div style={{ color: J.textDim, fontSize: 9, marginTop: 5, display: "flex", gap: 14, flexWrap: "wrap", letterSpacing: "0.06em", fontFamily: J.fontHeader }}>
-            <span>Enter — send · Shift+Enter — newline · drag & drop to attach</span>
+            <span>Enter — send · Shift+Enter — newline · drag & drop to attach · 🎙 voice input</span>
             {reactMode && <span style={{ color: `${J.react}55` }}>↺ REACT MODE — AI continues autonomously until TASK_COMPLETE</span>}
             {autoConfirm && <span style={{ color: `${J.warm}55` }}>⚡ AUTO-CONFIRM ACTIVE</span>}
           </div>

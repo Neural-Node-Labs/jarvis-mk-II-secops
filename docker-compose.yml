@@ -14,8 +14,9 @@ services:
     environment:
       LLM_PROVIDER:       ${LLM_PROVIDER:-ollama}
       # This points the application directly to your customized engine
-      LLM_MODEL:          ${LLM_MODEL:-obedient-coder}
-      LIGHTWEIGHT_MODEL:  ${LIGHTWEIGHT_MODEL:-1}
+      LLM_MODEL:          ${LLM_MODEL:-qwen2.5-coder:0.5b}
+      #LLM_MODEL:          ${LLM_MODEL:-obedient-coder}
+      LIGHTWEIGHT_MODEL:  ${LIGHTWEIGHT_MODEL:-0}
       DEEPSEEK_API_KEY:   ${DEEPSEEK_API_KEY:-}
       ANTHROPIC_API_KEY:  ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY:     ${OPENAI_API_KEY:-}
