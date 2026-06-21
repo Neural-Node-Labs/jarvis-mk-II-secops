@@ -4384,32 +4384,40 @@ const FxWidget = () => {
 
 // ─── Login Screen ─────────────────────────────────────────────────────────────
 const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => void; personas: PersonaData[] }) => {
-  const [user, setUser] = useState("");
-  const [pass, setPass] = useState("");
-  const [err, setErr]   = useState("");
-  const [loading, setLoading] = useState(false);
-  const [shaking, setShaking] = useState(false);
-  const [persona, setPersona] = useState<string>(() => loadPersona());
+  const [user,     setUser]     = useState("");
+  const [pass,     setPass]     = useState("");
+  const [err,      setErr]      = useState("");
+  const [loading,  setLoading]  = useState(false);
+  const [shaking,  setShaking]  = useState(false);
+  const [persona,  setPersona]  = useState<string>(() => loadPersona());
+
+  // Setup wizard state
+  const [mode,        setMode]        = useState<"checking"|"login"|"setup">("checking");
+  const [setupUser,   setSetupUser]   = useState("");
+  const [setupPass,   setSetupPass]   = useState("");
+  const [setupPass2,  setSetupPass2]  = useState("");
+  const [setupLoading,setSetupLoading]= useState(false);
+
+  // ── Check first-boot status on mount ──────────────────────────────────────
+  useEffect(() => {
+    fetch(`${API_URL}/system/setup-status`)
+      .then(r => r.json())
+      .then(d => setMode(d.setup_required ? "setup" : "login"))
+      .catch(() => setMode("login"));   // if endpoint unreachable, fall to login
+  }, []);
 
   const switchPersona = (id: string, themeData?: Partial<Theme>) => {
-    applyTheme(id, themeData);
-    savePersona(id);
-    setPersona(id);
+    applyTheme(id, themeData); savePersona(id); setPersona(id);
   };
 
-  const [mode, setMode] = useState<"login"|"register">("login");
-  const [regUser, setRegUser] = useState("");
-  const [regPass, setRegPass] = useState("");
-  const [regPass2, setRegPass2] = useState("");
-  const [regLoading, setRegLoading] = useState(false);
-
+  // ── Login ──────────────────────────────────────────────────────────────────
   const go = async () => {
     const u = user.trim().toLowerCase();
     if (!u) { setErr("Operator ID is required."); return; }
     setLoading(true); setErr("");
     try {
       const hashedPass = await sha256hex(pass);
-      const res = await fetch(`${API_URL}/auth/login`, {
+      const res  = await fetch(`${API_URL}/auth/login`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: u, password: hashedPass }),
       });
@@ -4418,7 +4426,7 @@ const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => v
         storeAuth(data.access_token, data.username || u);
         onAuth(data.username || u, persona);
       } else if (res.status === 401) {
-        setErr(data.detail || "Invalid credentials. Default: admin / admin123");
+        setErr(data.detail || "Invalid credentials.");
         setShaking(true); setTimeout(() => setShaking(false), 500);
       } else {
         setErr(data.detail || `Server error ${res.status}`);
@@ -4431,63 +4439,56 @@ const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => v
     setLoading(false);
   };
 
-  const register = async () => {
-    const u = regUser.trim().toLowerCase();
-    if (!u || !regPass) { setErr("Username and password required."); return; }
-    if (regPass !== regPass2) { setErr("Passwords do not match."); return; }
-    if (regPass.length < 8) { setErr("Password must be at least 8 characters."); return; }
-    if (!/^[a-z0-9_\-]{2,32}$/.test(u)) {
-      setErr("Username must be 2-32 chars: letters, numbers, _ or -"); return;
-    }
-    setRegLoading(true); setErr("");
+  // ── First-boot setup ───────────────────────────────────────────────────────
+  const runSetup = async () => {
+    const u = setupUser.trim().toLowerCase();
+    if (!u)                                       { setErr("Username is required.");                                return; }
+    if (!setupPass)                               { setErr("Password is required.");                               return; }
+    if (setupPass !== setupPass2)                 { setErr("Passwords do not match.");                             return; }
+    if (setupPass.length < 8)                    { setErr("Password must be at least 8 characters.");             return; }
+    if (!/^[a-z0-9_\-]{2,32}$/.test(u))         { setErr("Username: 2-32 chars, a-z 0-9 _ -");                  return; }
+
+    setSetupLoading(true); setErr("");
     try {
-      const hashedRegPass = await sha256hex(regPass);
-      // Use /api/auth/self-register — the open self-registration endpoint (no token required).
-      // Falls back to /api/auth/register if self-register isn't available (older backend).
-      let res = await fetch(`${API_URL}/auth/self-register`, {
+      const hashedPass = await sha256hex(setupPass);
+      const res  = await fetch(`${API_URL}/system/setup`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: u, password: hashedRegPass }),
+        body: JSON.stringify({
+          username:         u,
+          password:         hashedPass,
+          confirm_password: hashedPass,
+        }),
       });
-      // Fallback: if self-register returns 404, try the standard register endpoint
-      if (res.status === 404) {
-        res = await fetch(`${API_URL}/auth/register`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username: u, password: hashedRegPass }),
-        });
-      }
       const data = await res.json().catch(() => ({}));
-      if (res.ok) {
-        setErr("");
-        // Auto-login with the same pre-hashed password
-        const res2 = await fetch(`${API_URL}/auth/login`, {
+      if (res.ok && data.success) {
+        // Auto-login immediately after setup
+        const res2  = await fetch(`${API_URL}/auth/login`, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username: u, password: hashedRegPass }),
+          body: JSON.stringify({ username: u, password: hashedPass }),
         });
         const data2 = await res2.json().catch(() => ({}));
         if (res2.ok && data2.access_token) {
           storeAuth(data2.access_token, data2.username || u);
           onAuth(data2.username || u, persona);
         } else {
-          // Registration succeeded but auto-login failed — drop to login mode
+          // Setup succeeded but auto-login failed — drop to login screen
           setUser(u);
           setMode("login");
-          setErr("Account created. Please log in.");
+          setErr("Admin account created. Please log in.");
         }
-      } else if (res.status === 403 || res.status === 401) {
-        setErr("Self-registration is disabled. Contact an administrator.");
-        setShaking(true); setTimeout(() => setShaking(false), 500);
       } else if (res.status === 409) {
-        setErr(data.detail || "Username already exists.");
-        setShaking(true); setTimeout(() => setShaking(false), 500);
+        // Already set up — switch to login
+        setMode("login");
+        setErr("Setup already complete. Please log in.");
       } else {
-        setErr(data.detail || `Registration failed (${res.status})`);
+        setErr(data.detail || `Setup failed (${res.status})`);
         setShaking(true); setTimeout(() => setShaking(false), 500);
       }
-    } catch (e: any) {
+    } catch {
       setErr("Connection failed. Verify the backend is running.");
       setShaking(true); setTimeout(() => setShaking(false), 500);
     }
-    setRegLoading(false);
+    setSetupLoading(false);
   };
 
   const inp: React.CSSProperties = {
@@ -4496,150 +4497,139 @@ const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => v
     color: J.textPri, fontSize: 13, boxSizing: "border-box",
   };
 
+  // ── Shared chrome ──────────────────────────────────────────────────────────
   return (
     <div style={{ minHeight: "100vh", background: J.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
       <style>{buildGlobalCSS(persona)}</style>
-
-      {/* Ambient scan line */}
       <div style={{ position: "fixed", left: 0, right: 0, height: 1, background: `linear-gradient(90deg,transparent,${J.accent}33,transparent)`, animation: "hud-scan 6s linear infinite", pointerEvents: "none", zIndex: 9999 }} />
-
-      {/* Background grid */}
-      <div style={{
-        position: "fixed", inset: 0, pointerEvents: "none",
-        backgroundImage: `linear-gradient(${J.border} 1px, transparent 1px), linear-gradient(90deg, ${J.border} 1px, transparent 1px)`,
-        backgroundSize: "40px 40px", opacity: 0.4,
-      }} />
+      <div style={{ position: "fixed", inset: 0, pointerEvents: "none", backgroundImage: `linear-gradient(${J.border} 1px, transparent 1px), linear-gradient(90deg, ${J.border} 1px, transparent 1px)`, backgroundSize: "40px 40px", opacity: 0.4 }} />
 
       <div style={{
         width: 400, padding: "44px 40px", position: "relative",
-        background: J.bgPanel,
-        border: `1px solid ${J.borderMid}`,
-        borderTop: `2px solid ${J.accent}55`,
-        borderRadius: 6,
+        background: J.bgPanel, border: `1px solid ${J.borderMid}`,
+        borderTop: `2px solid ${J.accent}55`, borderRadius: 6,
         animation: shaking ? "hud-shake 0.4s ease" : "none",
         boxShadow: `0 0 60px ${J.accentGlow}, 0 0 120px ${J.bgDeep}`,
       }}>
         <Corners color={J.accent} size={12} />
 
         {/* Arc reactor header */}
-        <div style={{ textAlign: "center", marginBottom: 36 }}>
+        <div style={{ textAlign: "center", marginBottom: 30 }}>
           <div style={{ position: "relative", width: 64, height: 64, margin: "0 auto 18px" }}>
-            {/* Spinning rings */}
-            <div className="arc-ring" style={{
-              position: "absolute", inset: 0, borderRadius: "50%",
-              border: `1px solid ${J.accent}33`, borderTop: `1px solid ${J.accent}88`,
-            }} />
-            <div className="arc-ring-slow" style={{
-              position: "absolute", inset: 4, borderRadius: "50%",
-              border: `1px solid ${J.accent}22`, borderRight: `1px solid ${J.accent}66`,
-            }} />
-            <div style={{
-              position: "absolute", inset: 0, borderRadius: "50%",
-              background: `radial-gradient(circle, ${J.accent}25 0%, ${J.bgCard} 65%)`,
-              border: `1px solid ${J.accent}66`,
-              boxShadow: `0 0 24px ${J.accentGlow2}, inset 0 0 16px ${J.accentGlow}`,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 24, color: J.accent,
-              animation: "hud-glow 3s ease-in-out infinite",
-            }}>{J.glyph}</div>
+            <div className="arc-ring" style={{ position:"absolute",inset:0,borderRadius:"50%",border:`1px solid ${J.accent}33`,borderTop:`1px solid ${J.accent}88` }} />
+            <div className="arc-ring-slow" style={{ position:"absolute",inset:4,borderRadius:"50%",border:`1px solid ${J.accent}22`,borderRight:`1px solid ${J.accent}66` }} />
+            <div style={{ position:"absolute",inset:0,borderRadius:"50%",background:`radial-gradient(circle, ${J.accent}25 0%, ${J.bgCard} 65%)`,border:`1px solid ${J.accent}66`,boxShadow:`0 0 24px ${J.accentGlow2}, inset 0 0 16px ${J.accentGlow}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,color:J.accent,animation:"hud-glow 3s ease-in-out infinite" }}>{J.glyph}</div>
           </div>
-          <div data-text={J.wordmark} className={persona !== "jarvis" ? "persona-glitch" : ""}
-            style={{ color: J.accent, fontSize: 22, letterSpacing: "0.22em", fontFamily: J.fontHeader, fontWeight: 700 }}>{J.wordmark}</div>
-          <div style={{ color: J.textDim, fontSize: 9, marginTop: 5, letterSpacing: "0.28em", fontFamily: J.fontHeader }}>{J.subtitle}</div>
+          <div data-text={J.wordmark} className={persona !== "jarvis" ? "persona-glitch" : ""} style={{ color:J.accent,fontSize:22,letterSpacing:"0.22em",fontFamily:J.fontHeader,fontWeight:700 }}>{J.wordmark}</div>
+          <div style={{ color:J.textDim,fontSize:9,marginTop:5,letterSpacing:"0.28em",fontFamily:J.fontHeader }}>{J.subtitle}</div>
           <Divider color={J.borderMid} />
-          <div style={{ color: J.textDim, fontSize: 8, marginTop: 6, letterSpacing: "0.2em" }}>{J.tagline}</div>
+          {mode === "setup" && (
+            <div style={{ color:J.warn,fontSize:9,marginTop:6,letterSpacing:"0.15em",fontFamily:J.fontHeader }}>
+              ◈ FIRST BOOT — SETUP REQUIRED
+            </div>
+          )}
+          {mode === "login" && (
+            <div style={{ color:J.textDim,fontSize:8,marginTop:6,letterSpacing:"0.2em" }}>{J.tagline}</div>
+          )}
+          {mode === "checking" && (
+            <div style={{ color:J.textDim,fontSize:8,marginTop:6,letterSpacing:"0.2em",animation:"hud-pulse 1s infinite" }}>INITIALISING…</div>
+          )}
         </div>
 
-        {/* ── Persona Selector ── */}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 5, justifyContent: "center", marginBottom: 20 }}>
-          {(personas.length > 0 ? personas : _personaRegistry).map(p => {
-            const color = (p.theme as any)?.accent || J.accent;
-            const glyph = (p.theme as any)?.glyph || p.icon || "◈";
-            return (
-              <button key={p.id} onClick={() => switchPersona(p.id, p.theme)}
-                title={p.tagline} style={{
-                  flex: "0 1 calc(33% - 4px)", minWidth: 70,
-                  padding: "7px 4px", borderRadius: 3,
-                  background: persona === p.id ? `${color}15` : J.bgCard,
-                  border: `1px solid ${persona === p.id ? color : J.border}`,
-                  color: persona === p.id ? color : J.textDim,
-                  fontSize: 9, letterSpacing: "0.06em", fontFamily: J.fontHeader, fontWeight: 600,
-                  display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
+        {/* Persona selector — shown on login only */}
+        {mode === "login" && (
+          <div style={{ display:"flex",flexWrap:"wrap",gap:5,justifyContent:"center",marginBottom:20 }}>
+            {(personas.length > 0 ? personas : _personaRegistry).map(p => {
+              const color = (p.theme as any)?.accent || J.accent;
+              const glyph = (p.theme as any)?.glyph || p.icon || "◈";
+              return (
+                <button key={p.id} onClick={() => switchPersona(p.id, p.theme)} title={p.tagline} style={{
+                  flex:"0 1 calc(33% - 4px)",minWidth:70,padding:"7px 4px",borderRadius:3,
+                  background: persona===p.id ? `${color}15` : J.bgCard,
+                  border: `1px solid ${persona===p.id ? color : J.border}`,
+                  color: persona===p.id ? color : J.textDim,
+                  fontSize:9,letterSpacing:"0.06em",fontFamily:J.fontHeader,fontWeight:600,
+                  display:"flex",flexDirection:"column",alignItems:"center",gap:3,
                 }}>
-                <span style={{ fontSize: 13 }}>{glyph}</span>
-                <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"100%" }}>{p.name}</span>
-              </button>
-            );
-          })}
-        </div>
-
-        <div style={{ marginBottom: 14 }}>
-          <Lbl>Operator ID</Lbl>
-          <input value={user} onChange={e => { setUser(e.target.value); setErr(""); }}
-            onKeyDown={e => e.key === "Enter" && go()} autoFocus style={{ ...inp, marginTop: 6 }} />
-        </div>
-        <div style={{ marginBottom: 22 }}>
-          <Lbl>Access Code</Lbl>
-          <input type="password" value={pass} onChange={e => { setPass(e.target.value); setErr(""); }}
-            onKeyDown={e => e.key === "Enter" && go()} style={{ ...inp, marginTop: 6 }} />
-        </div>
-
-        {err && (
-          <div style={{ color: J.err, fontSize: 11, marginBottom: 14, padding: "7px 12px", background: J.errDim, border: `1px solid ${J.err}33`, borderRadius: 2 }}>
-            ✕ {err}
-            {err.includes("admin123") && (
-              <div style={{ color: J.textSec, fontSize: 10, marginTop: 6 }}>
-                💡 Tip: First boot default is <span style={{ color: J.accent }}>admin</span> / <span style={{ color: J.accent }}>admin123</span>
-                {" — or "}
-                <button onClick={() => { setErr(""); setMode("register"); }} style={{ background: "none", border: "none", color: J.accent, cursor: "pointer", textDecoration: "underline", fontSize: 10 }}>create a new account</button>
-              </div>
-            )}
+                  <span style={{ fontSize:13 }}>{glyph}</span>
+                  <span style={{ overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:"100%" }}>{p.name}</span>
+                </button>
+              );
+            })}
           </div>
         )}
 
-        {mode === "login" ? (
+        {/* Error banner */}
+        {err && (
+          <div style={{ color:J.err,fontSize:11,marginBottom:14,padding:"7px 12px",background:J.errDim,border:`1px solid ${J.err}33`,borderRadius:2 }}>
+            ✕ {err}
+          </div>
+        )}
+
+        {/* ── LOGIN FORM ── */}
+        {mode === "login" && (
           <>
+            <div style={{ marginBottom:14 }}>
+              <Lbl>Operator ID</Lbl>
+              <input value={user} onChange={e => { setUser(e.target.value); setErr(""); }}
+                onKeyDown={e => e.key === "Enter" && go()} autoFocus style={{ ...inp, marginTop:6 }} />
+            </div>
+            <div style={{ marginBottom:22 }}>
+              <Lbl>Access Code</Lbl>
+              <input type="password" value={pass} onChange={e => { setPass(e.target.value); setErr(""); }}
+                onKeyDown={e => e.key === "Enter" && go()} style={{ ...inp, marginTop:6 }} />
+            </div>
             <button onClick={go} disabled={loading} style={{
-              width: "100%", padding: "11px", borderRadius: 3,
+              width:"100%", padding:"11px", borderRadius:3,
               background: loading ? J.bgCard : `${J.accent}0C`,
               border: `1px solid ${loading ? J.borderMid : J.accent}`,
               color: loading ? J.textSec : J.accent,
-              fontSize: 12, fontWeight: "bold", letterSpacing: "0.18em",
-              transition: "all 0.2s", fontFamily: J.fontHeader,
+              fontSize:12, fontWeight:"bold", letterSpacing:"0.18em", fontFamily:J.fontHeader,
             }}>{loading ? `${J.glyph} AUTHENTICATING…` : "▶ INITIALIZE SEQUENCE"}</button>
-            <div style={{ textAlign: "center", marginTop: 12 }}>
-              <button onClick={() => { setMode("register"); setErr(""); }} style={{
-                background: "none", border: "none", color: J.textSec, cursor: "pointer", fontSize: 10,
-              }}>No account? Register →</button>
-            </div>
           </>
-        ) : (
-          <div>
-            <div style={{ color: J.accent, fontSize: 10, letterSpacing: "0.12em", marginBottom: 12, fontFamily: J.fontHeader }}>◈ CREATE OPERATOR ACCOUNT</div>
-            <div style={{ marginBottom: 10 }}>
-              <Lbl>Username</Lbl>
-              <input value={regUser} onChange={e => setRegUser(e.target.value)} style={{ ...inp, marginTop: 5 }} placeholder="Choose a username" />
+        )}
+
+        {/* ── FIRST-BOOT SETUP WIZARD ── */}
+        {mode === "setup" && (
+          <>
+            <div style={{ color:J.textSec,fontSize:11,marginBottom:18,lineHeight:1.6 }}>
+              No accounts exist yet. Create the <span style={{ color:J.accent }}>administrator</span> account
+              to complete setup. Additional users can be added from the admin settings panel.
             </div>
-            <div style={{ marginBottom: 10 }}>
-              <Lbl>Password</Lbl>
-              <input type="password" value={regPass} onChange={e => setRegPass(e.target.value)} style={{ ...inp, marginTop: 5 }} placeholder="Min 8 characters" />
+            <div style={{ marginBottom:12 }}>
+              <Lbl>Admin Username</Lbl>
+              <input value={setupUser} onChange={e => { setSetupUser(e.target.value); setErr(""); }}
+                autoFocus placeholder="e.g. admin" style={{ ...inp, marginTop:5 }} />
             </div>
-            <div style={{ marginBottom: 14 }}>
+            <div style={{ marginBottom:12 }}>
+              <Lbl>Password <span style={{ color:J.textDim }}>(min 8 characters)</span></Lbl>
+              <input type="password" value={setupPass} onChange={e => { setSetupPass(e.target.value); setErr(""); }}
+                style={{ ...inp, marginTop:5 }} />
+            </div>
+            <div style={{ marginBottom:18 }}>
               <Lbl>Confirm Password</Lbl>
-              <input type="password" value={regPass2} onChange={e => setRegPass2(e.target.value)} onKeyDown={e => e.key === "Enter" && register()} style={{ ...inp, marginTop: 5 }} />
+              <input type="password" value={setupPass2} onChange={e => { setSetupPass2(e.target.value); setErr(""); }}
+                onKeyDown={e => e.key === "Enter" && runSetup()}
+                style={{ ...inp, marginTop:5 }} />
             </div>
-            <button onClick={register} disabled={regLoading} style={{
-              width: "100%", padding: "10px", borderRadius: 3,
-              background: `${J.ok}0C`, border: `1px solid ${J.ok}`,
-              color: J.ok, fontSize: 12, letterSpacing: "0.15em", fontFamily: J.fontHeader,
-            }}>{regLoading ? "CREATING…" : "⊞ CREATE ACCOUNT"}</button>
-            <div style={{ textAlign: "center", marginTop: 10 }}>
-              <button onClick={() => { setMode("login"); setErr(""); }} style={{ background: "none", border: "none", color: J.textSec, cursor: "pointer", fontSize: 10 }}>← Back to login</button>
-            </div>
+            <button onClick={runSetup} disabled={setupLoading} style={{
+              width:"100%", padding:"11px", borderRadius:3,
+              background: setupLoading ? J.bgCard : `${J.ok}0C`,
+              border: `1px solid ${setupLoading ? J.borderMid : J.ok}`,
+              color: setupLoading ? J.textSec : J.ok,
+              fontSize:12, fontWeight:"bold", letterSpacing:"0.18em", fontFamily:J.fontHeader,
+            }}>{setupLoading ? "◈ CREATING ACCOUNT…" : "⊞ COMPLETE SETUP"}</button>
+          </>
+        )}
+
+        {/* ── CHECKING ── */}
+        {mode === "checking" && (
+          <div style={{ textAlign:"center", color:J.textDim, fontSize:11, padding:"20px 0" }}>
+            Connecting to system…
           </div>
         )}
 
-        <div style={{ color: J.textDim, fontSize: 8, textAlign: "center", marginTop: 20, letterSpacing: "0.08em", lineHeight: 2 }}>
+        <div style={{ color:J.textDim,fontSize:8,textAlign:"center",marginTop:20,letterSpacing:"0.08em",lineHeight:2 }}>
           ALL ACCESS IS MONITORED · UNAUTHORISED USE IS PROHIBITED
         </div>
       </div>
@@ -5133,7 +5123,7 @@ export default function App() {
             <ArcReactor size={26} />
             <div>
               <div data-text={J.wordmark} className={persona !== "jarvis" ? "persona-glitch" : ""}
-                style={{ color: J.accent, fontSize: 16, letterSpacing: "0.2em", fontFamily: J.fontHeader, fontWeight: 700, lineHeight: 1.2 }}>J.A.R.V.I.S MK II — S.I.R Platform</div>
+                style={{ color: J.accent, fontSize: 16, letterSpacing: "0.2em", fontFamily: J.fontHeader, fontWeight: 700, lineHeight: 1.2 }}>S.I.R Platform</div>
               <div style={{ color: J.textDim, fontSize: 10, letterSpacing: "0.15em", fontFamily: J.fontHeader, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>Super Intelligent Robot</div>
             </div>
           </div>

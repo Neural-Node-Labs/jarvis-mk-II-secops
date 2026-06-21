@@ -609,6 +609,113 @@ _init_db()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# CBD COMPONENT — First-Boot Setup (public, one-shot, self-sealing)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/system/setup-status", tags=["System"])
+async def setup_status():
+    """
+    Public probe — tells the frontend whether first-boot setup is required.
+    Returns {"setup_required": true}  when zero users exist in the DB.
+    Returns {"setup_required": false} once any user has been created.
+
+    No token required — must be reachable before any accounts exist.
+    The frontend calls this on every page load before showing the login screen.
+    """
+    return {"setup_required": _is_setup_required()}
+
+
+@app.post("/api/system/setup", tags=["System"])
+async def system_setup(request: Request):
+    """
+    First-boot admin account creation.
+    PUBLIC · ONE-SHOT · SELF-SEALING
+
+    Only works when zero users exist in the DB.
+    Once called successfully this endpoint returns 409 on every subsequent
+    call — permanently sealed, no restart needed.
+
+    Body: { username, password, confirm_password }
+    Password arrives pre-hashed (SHA-256 hex, 64 chars) from the frontend
+    so the plaintext is never transmitted over the wire.
+
+    Security properties
+    -------------------
+    - Rate-limited per IP (reuses the login rate bucket)
+    - TOCTOU-safe: the zero-users check runs inside the DB write lock
+    - Role is set to 'admin' unconditionally — only valid for first user
+    - Sealed immediately after first successful call
+    - Full audit log: username + IP + timestamp
+    """
+    ip = get_client_ip(request)
+    check_login_rate(ip)
+
+    # Fast-path seal check before reading the body
+    if not _is_setup_required():
+        raise HTTPException(
+            status_code=409,
+            detail="Setup already completed. Use admin login to manage accounts.",
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+
+    username = (body.get("username") or "").strip().lower()
+    password =  body.get("password", "")
+    confirm  =  body.get("confirm_password", "")
+
+    if not username:
+        raise HTTPException(status_code=400, detail="username is required.")
+    if not re.match(r"^[a-z0-9_\-]{2,32}$", username):
+        raise HTTPException(status_code=400, detail="Username must be 2-32 chars: a-z 0-9 _ -")
+
+    is_pre_hashed = len(password) == 64 and all(c in "0123456789abcdef" for c in password)
+    if not password:
+        raise HTTPException(status_code=400, detail="password is required.")
+    if not is_pre_hashed and len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    if confirm and confirm != password:
+        raise HTTPException(status_code=400, detail="Passwords do not match.")
+
+    # TOCTOU guard — zero-user check + insert inside the same DB lock
+    with _DB_LOCK:
+        conn = _get_db()
+        if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] > 0:
+            conn.close()
+            raise HTTPException(
+                status_code=409,
+                detail="Setup already completed. Use admin login to manage accounts.",
+            )
+        if is_pre_hashed:
+            salt = secrets.token_hex(16)
+            dk   = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260_000)
+            ph   = f"pbkdf2:{salt}:{dk.hex()}"
+        else:
+            ph = _hash_password(password)
+
+        conn.execute(
+            "INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')",
+            (username, ph),
+        )
+        conn.commit()
+        conn.close()
+
+    logger.warning(
+        "[system_setup_complete] Admin '%s' created from ip=%s — "
+        "setup endpoint permanently sealed.",
+        username, ip,
+    )
+    return {
+        "success":  True,
+        "username": username,
+        "role":     "admin",
+        "message":  "Admin account created. Setup is now complete. Please log in.",
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # CBD COMPONENT 8 — Health & Info
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1287,69 +1394,6 @@ async def auth_register(request: Request):
     return {"registered": True, "username": username}
 
 
-@app.post("/api/auth/self-register", tags=["Auth"])
-async def auth_self_register(request: Request):
-    """
-    Self-registration — always open (no admin token required).
-    Controlled by JARVIS_ALLOW_SELF_REGISTRATION env var (default: true).
-    Rate-limited per IP via the login rate bucket.
-
-    The frontend uses this endpoint from the login screen.
-    Unlike /api/auth/register (which requires admin when JARVIS_OPEN_REGISTRATION=false),
-    this endpoint is explicitly for end-user self sign-up and is independently toggled.
-
-    Password arrives pre-hashed (SHA-256 hex, 64 chars) from the frontend
-    so the raw password is never transmitted over the wire.
-    """
-    allow = os.getenv("JARVIS_ALLOW_SELF_REGISTRATION", "true").lower() == "true"
-    if not allow:
-        raise HTTPException(
-            status_code=403,
-            detail="Self-registration is disabled. Contact an administrator.",
-        )
-
-    # Rate-limit self-registration per IP (reuse login bucket)
-    ip = get_client_ip(request)
-    check_login_rate(ip)
-
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body.")
-
-    username = (body.get("username") or "").strip().lower()
-    password =  body.get("password", "")
-
-    if not username or not password:
-        raise HTTPException(status_code=400, detail="username and password are required.")
-    if not re.match(r"^[a-z0-9_\-]{2,32}$", username):
-        raise HTTPException(status_code=400, detail="Username must be 2-32 chars: a-z 0-9 _ -")
-
-    is_pre_hashed = len(password) == 64 and all(c in "0123456789abcdef" for c in password)
-    if not is_pre_hashed and len(password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
-
-    with _DB_LOCK:
-        conn = _get_db()
-        if conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
-            conn.close()
-            raise HTTPException(status_code=409, detail=f"Username '{username}' already exists.")
-        if is_pre_hashed:
-            salt = secrets.token_hex(16)
-            dk   = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260_000)
-            conn.execute(
-                "INSERT OR IGNORE INTO users (username, password_hash) VALUES (?, ?)",
-                (username, f"pbkdf2:{salt}:{dk.hex()}")
-            )
-            conn.commit()
-        else:
-            _create_user_internal(conn, username, password)
-        conn.close()
-
-    logger.info("[auth_self_register] user=%s ip=%s", username, ip)
-    return {"registered": True, "username": username}
-
-
 @app.get("/api/auth/users", tags=["Auth"])
 async def auth_list_users(request: Request):
     _require_admin(request)
@@ -1507,7 +1551,12 @@ async def auth_reset_admin(request: Request):
 
 @app.post("/api/auth/wipe-and-reseed", tags=["Auth"])
 async def wipe_and_reseed(request: Request):
-    """EMERGENCY: wipe all users/tokens and reseed admin. Localhost only."""
+    """
+    EMERGENCY: wipe all users and tokens. Localhost only.
+    After wipe the system returns to first-boot SETUP MODE —
+    use the UI setup wizard or POST /api/system/setup to create a new admin.
+    No default password is seeded (eliminates the admin123 footgun).
+    """
     client_ip = get_client_ip(request)
     if client_ip not in ("127.0.0.1", "::1", "localhost"):
         raise HTTPException(status_code=403, detail="Only accessible from localhost.")
@@ -1516,10 +1565,13 @@ async def wipe_and_reseed(request: Request):
         conn.execute("DELETE FROM auth_tokens")
         conn.execute("DELETE FROM users")
         conn.commit()
-        _create_user_internal(conn, "admin", "admin123")
         conn.close()
-    logger.warning("[wipe_reseed] DB wiped and reseeded from %s", client_ip)
-    return {"wiped": True, "reseeded": True, "username": "admin"}   # no password in response
+    logger.warning("[wipe_reseed] DB wiped from %s — system returned to SETUP MODE", client_ip)
+    return {
+        "wiped":         True,
+        "setup_required": True,
+        "message":       "All accounts removed. Use /api/system/setup or the UI to create a new admin.",
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
