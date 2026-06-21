@@ -25,6 +25,9 @@ output/*
 /archive/*
 /sir/*
 /.idea/*
-/backend/venv/
+/backend/venv
 /sir/
 /ollama_models/
+
+/.venv/
+/backend/frontend_dist/

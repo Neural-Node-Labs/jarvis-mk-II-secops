@@ -6,6 +6,13 @@
 :: production-ready Windows .exe distribution.
 :: ==============================================================================
 
+python -m venv .venv
+./.venv/Script/active
+
+pip install setuptools cython pyinstaller webview
+
+
+
 set REPO_ROOT=%CD%
 set BACKEND_DIR=%REPO_ROOT%\backend
 set FRONTEND_DIR=%REPO_ROOT%\frontend
@@ -19,6 +26,8 @@ if exist "%BACKEND_DIR%\dist" rmdir /s /q "%BACKEND_DIR%\dist"
 if exist "%BACKEND_DIR%\api_logic.c" del /f /q "%BACKEND_DIR%\api_logic.c"
 if exist "%BACKEND_DIR%\api_logic.cp*.pyd" del /f /q "%BACKEND_DIR%\api_logic.cp*.pyd"
 mkdir "%BUILD_DIR%"
+
+
 
 echo.
 echo [2/6] Building and Minifying React Production Assets...
