@@ -839,7 +839,7 @@ const SettingsPanel = ({ onClose, onSaved, authedUser }: {
   const saveUser = async () => {
     if (!selected) return;
     if (editPass && editPass !== editPass2) { setUsersErr("Passwords do not match"); return; }
-    if (editPass && editPass.length < 6)    { setUsersErr("Password must be ≥ 6 chars"); return; }
+    if (editPass && editPass.length < 8)    { setUsersErr("Password must be ≥ 8 chars"); return; }
     setEditSaving(true); setUsersErr(""); setEditSaved(false);
     try {
       const body: any = { is_active: editActive };
@@ -860,7 +860,7 @@ const SettingsPanel = ({ onClose, onSaved, authedUser }: {
     const u = newUser.trim().toLowerCase();
     if (!u || !newPass) { setUsersErr("Username and password required"); return; }
     if (newPass !== newPass2) { setUsersErr("Passwords do not match"); return; }
-    if (newPass.length < 6)  { setUsersErr("Password must be ≥ 6 chars"); return; }
+    if (newPass.length < 8)  { setUsersErr("Password must be ≥ 8 chars"); return; }
     setCreating(true); setUsersErr("");
     try {
       const r = await api(`${API_URL}/auth/register`, {
@@ -985,7 +985,7 @@ const SettingsPanel = ({ onClose, onSaved, authedUser }: {
                 <div style={{ padding: "12px 14px", borderBottom: `1px solid ${J.border}`, background: J.bgDeep }}>
                   <Lbl c={J.ok}>⊞ NEW USER</Lbl>
                   <input value={newUser} onChange={e => setNewUser(e.target.value)} placeholder="Username" style={{ ...INP, marginTop: 6, marginBottom: 5 }} />
-                  <input type="password" value={newPass} onChange={e => setNewPass(e.target.value)} placeholder="Password (min 6)" style={{ ...INP, marginBottom: 5 }} />
+                  <input type="password" value={newPass} onChange={e => setNewPass(e.target.value)} placeholder="Password (min 8)" style={{ ...INP, marginBottom: 5 }} />
                   <input type="password" value={newPass2} onChange={e => setNewPass2(e.target.value)} placeholder="Confirm password" onKeyDown={e => e.key === "Enter" && createUser()} style={{ ...INP, marginBottom: 8 }} />
                   <button onClick={createUser} disabled={creating || !newUser.trim() || !newPass} style={{ width: "100%", padding: "6px", background: `${J.ok}0C`, border: `1px solid ${J.ok}55`, color: J.ok, borderRadius: 3, fontSize: 10, letterSpacing: "0.08em" }}>
                     {creating ? "CREATING…" : "⊞ CREATE USER"}
@@ -4436,19 +4436,29 @@ const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => v
     if (!u || !regPass) { setErr("Username and password required."); return; }
     if (regPass !== regPass2) { setErr("Passwords do not match."); return; }
     if (regPass.length < 8) { setErr("Password must be at least 8 characters."); return; }
+    if (!/^[a-z0-9_\-]{2,32}$/.test(u)) {
+      setErr("Username must be 2-32 chars: letters, numbers, _ or -"); return;
+    }
     setRegLoading(true); setErr("");
     try {
       const hashedRegPass = await sha256hex(regPass);
-      const res = await fetch(`${API_URL}/auth/register`, {
+      // Use /api/auth/self-register — the open self-registration endpoint (no token required).
+      // Falls back to /api/auth/register if self-register isn't available (older backend).
+      let res = await fetch(`${API_URL}/auth/self-register`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: u, password: hashedRegPass }),
       });
+      // Fallback: if self-register returns 404, try the standard register endpoint
+      if (res.status === 404) {
+        res = await fetch(`${API_URL}/auth/register`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: u, password: hashedRegPass }),
+        });
+      }
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
-        setUser(u); setPass(regPass);
-        setMode("login");
         setErr("");
-        // auto-login after register
+        // Auto-login with the same pre-hashed password
         const res2 = await fetch(`${API_URL}/auth/login`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username: u, password: hashedRegPass }),
@@ -4457,12 +4467,26 @@ const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => v
         if (res2.ok && data2.access_token) {
           storeAuth(data2.access_token, data2.username || u);
           onAuth(data2.username || u, persona);
+        } else {
+          // Registration succeeded but auto-login failed — drop to login mode
+          setUser(u);
+          setMode("login");
+          setErr("Account created. Please log in.");
         }
+      } else if (res.status === 403 || res.status === 401) {
+        setErr("Self-registration is disabled. Contact an administrator.");
+        setShaking(true); setTimeout(() => setShaking(false), 500);
+      } else if (res.status === 409) {
+        setErr(data.detail || "Username already exists.");
+        setShaking(true); setTimeout(() => setShaking(false), 500);
       } else {
-        setErr(data.detail || `Registration failed: ${res.status}`);
+        setErr(data.detail || `Registration failed (${res.status})`);
         setShaking(true); setTimeout(() => setShaking(false), 500);
       }
-    } catch (e: any) { setErr(`Error: ${e.message}`); }
+    } catch (e: any) {
+      setErr("Connection failed. Verify the backend is running.");
+      setShaking(true); setTimeout(() => setShaking(false), 500);
+    }
     setRegLoading(false);
   };
 

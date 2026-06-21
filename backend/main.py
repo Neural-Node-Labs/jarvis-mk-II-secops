@@ -494,11 +494,20 @@ def _init_db():
             CREATE INDEX IF NOT EXISTS idx_tokens_expires  ON auth_tokens(expires_at);
         """)
         conn.commit()
-        cur = conn.execute("SELECT COUNT(*) FROM users WHERE username = 'admin'")
-        if cur.fetchone()[0] == 0:
-            _create_user_internal(conn, "admin", "admin123")
-            logger.info("[db_init] admin account seeded — CHANGE THE PASSWORD IMMEDIATELY")
+        count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         conn.close()
+    if count == 0:
+        logger.warning("[db_init] No users found — system is in SETUP MODE. "
+                       "Visit the UI or POST /api/system/setup to create the first admin account.")
+
+
+def _is_setup_required() -> bool:
+    """Return True when the DB has zero users — first-boot setup mode."""
+    with _DB_LOCK:
+        conn  = _get_db()
+        count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        conn.close()
+    return count == 0
 
 
 def _sha256_hex(value: str) -> str:
@@ -1275,6 +1284,69 @@ async def auth_register(request: Request):
         conn.close()
 
     logger.info("[auth_register] user=%s", username)
+    return {"registered": True, "username": username}
+
+
+@app.post("/api/auth/self-register", tags=["Auth"])
+async def auth_self_register(request: Request):
+    """
+    Self-registration — always open (no admin token required).
+    Controlled by JARVIS_ALLOW_SELF_REGISTRATION env var (default: true).
+    Rate-limited per IP via the login rate bucket.
+
+    The frontend uses this endpoint from the login screen.
+    Unlike /api/auth/register (which requires admin when JARVIS_OPEN_REGISTRATION=false),
+    this endpoint is explicitly for end-user self sign-up and is independently toggled.
+
+    Password arrives pre-hashed (SHA-256 hex, 64 chars) from the frontend
+    so the raw password is never transmitted over the wire.
+    """
+    allow = os.getenv("JARVIS_ALLOW_SELF_REGISTRATION", "true").lower() == "true"
+    if not allow:
+        raise HTTPException(
+            status_code=403,
+            detail="Self-registration is disabled. Contact an administrator.",
+        )
+
+    # Rate-limit self-registration per IP (reuse login bucket)
+    ip = get_client_ip(request)
+    check_login_rate(ip)
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+
+    username = (body.get("username") or "").strip().lower()
+    password =  body.get("password", "")
+
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="username and password are required.")
+    if not re.match(r"^[a-z0-9_\-]{2,32}$", username):
+        raise HTTPException(status_code=400, detail="Username must be 2-32 chars: a-z 0-9 _ -")
+
+    is_pre_hashed = len(password) == 64 and all(c in "0123456789abcdef" for c in password)
+    if not is_pre_hashed and len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+
+    with _DB_LOCK:
+        conn = _get_db()
+        if conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
+            conn.close()
+            raise HTTPException(status_code=409, detail=f"Username '{username}' already exists.")
+        if is_pre_hashed:
+            salt = secrets.token_hex(16)
+            dk   = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260_000)
+            conn.execute(
+                "INSERT OR IGNORE INTO users (username, password_hash) VALUES (?, ?)",
+                (username, f"pbkdf2:{salt}:{dk.hex()}")
+            )
+            conn.commit()
+        else:
+            _create_user_internal(conn, username, password)
+        conn.close()
+
+    logger.info("[auth_self_register] user=%s ip=%s", username, ip)
     return {"registered": True, "username": username}
 
 
