@@ -708,68 +708,6 @@ Voice: methodical, thorough, slightly adversarial. "Have you considered what hap
       "scanline":   "#FFC10722"
     }
   },
-  {
-    "id": "superman",
-    "name": "Superman",
-    "tagline": "The Man of Steel — Guarding your architecture with absolute precision.",
-    "builtin": True,
-    "soul": """
-You are a helpful Assistant with full OS control via a os_execution skill.
-You are an Expert in Unix command specially sed, awk, grep, cut, tr, head, tail, find, xargs for text processing and stream manipulation.
-You can chat with the user normally, but when asked to create a program, You must immediately convert the user's request into this exact JSON schema:
-                TOOL_CALL: {"skill": "os_execution", "action": "run_command", "params": {"command": "<shell_command_here>"}}.
-    """,
-    "directives": """
-
-## Directives
-1. Use the workspace to save the required program.
-2. Use tool "os_execution" to execute command line like touch, sed, awk
-
-Example ONLY Use to formulate your response when the user ask you to create a program:
-
-TOOL_CALL: {"skill": "os_execution", "action": "run_command", "params": {"command": "cat > /app/workspace/admin4/default/workspace/hello.sh << 'EOF'\\n#!/bin/bash\\necho 'hello'\\nEOF\\nchmod +x /app/workspace/admin4/default/workspace/hello.sh"}}
-
-
-    """,
-    "skills": ["unix_tools_skill"],
-    "theme": {
-      "accent":     "#F44336",
-      "accentDim":  "#B71C1C",
-      "accentGlow": "#F4433618",
-      "accentGlow2":"#F4433640",
-      "bg":         "#0D1B2A",
-      "bgDeep":     "#010813",
-      "bgPanel":    "#0E2A4A",
-      "bgCard":     "#153E6B",
-      "bgCardHover":"#1B4F87",
-      "warm":       "#FFD54F",
-      "warmDim":    "#FF8F00",
-      "gold":       "#FFD54F",
-      "goldDim":    "#FFB300",
-      "textPri":    "#F5F5F5",
-      "textSec":    "#42A5F5",
-      "textDim":    "#1565C0",
-      "border":     "#1E3A8A",
-      "borderMid":  "#3B82F6",
-      "borderHi":   "#F4433688",
-      "ok":         "#4CAF50",
-      "okDim":      "#1B5E20",
-      "err":        "#E53935",
-      "errDim":     "#7F0000",
-      "warn":       "#FFB300",
-      "warnDim":    "#FF6F00",
-      "react":      "#9C27B0",
-      "reactDim":   "#4A148C",
-      "fontImport": "@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Roboto:wght@400;700&display=swap');",
-      "fontMono":   "monospace",
-      "fontHeader": "'Orbitron', sans-serif",
-      "glyph":      "⚡",
-      "wordmark":   "SUPERMAN",
-      "subtitle":   "MAN OF STEEL · CODE DEFENDER",
-      "tagline":    "INVINCIBLE BLUEPRINTS · ZERO TOLERANCE FOR FAILURE",
-      "scanline":   "#F4433611"
-    }
-  },
 
 ]
 
@@ -925,21 +863,12 @@ def build_system_prompt(
 
 """
 
-    #base = f"{soul}\n\n{directives}\n{shared}"
-    base = f"{soul}\n\n{directives}"
+    base = f"{soul}"
     if memory_context:
         base += f"\n\n## Conversation History (user-requested retrieval):\n{memory_context}\n"
 
-    print(f"""
 
-############### PROMPT ASSEMBLY ###############
-
-{base}
-
-
-############### PROMPT ASSEMBLY ###############
-    """)
-    return base
+    return "You are now operating as SIR , an Expert in Programming and Cybersecurity"
 
 
 def list_personas() -> list[dict]:

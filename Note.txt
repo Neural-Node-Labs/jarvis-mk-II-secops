@@ -4,8 +4,17 @@ Enhancement:
 - Add react capability and a checked box to turn it on or off, to ensure if On the task will be completed with selfhealing capability/ self correction.
 
 
+# Download ollama image
+docker compose exec ollama ollama pull llama3.2:1b
+docker compose exec ollama ollama list
+# Deploy the image to the agent backend container
+docker compose up -d
+docker compose up -d --force-recreate app
+docker exec -it sir-ollama ollama run qwen2.5-coder:0.5b
 
+docker exec -it sir-ollama "ls /app/workspace/admin4/default/workspace"
 
+https://deepwiki.com/QwenLM/Qwen2.5-Coder/2-model-usage
 
 
  docker cp agent-backend:/tmp ./agent-app-docker/tmp
@@ -41,72 +50,3 @@ docker exec -it <jarvis-app> ls -la /tmp
 
 Max Token Issued: 4096
 
-# TODO SJMN
-
-def adjust_max_tokens(config: ConfigUpdate):
-    if "deepseek" in config.provider.lower():
-        if config.model == "deepseek-chat":
-            # Cap it so the official older DeepSeek endpoints don't throw an error
-            return min(config.max_tokens or 8000, 8000)
-        elif config.model == "deepseek-reasoner":
-            # Expand it drastically so thinking tokens don't eat your file space
-            return config.max_tokens or 32768
-    return config.max_tokens
-
-
-
-from typing import Optional
-
-def get_optimal_max_tokens(provider: str, model: Optional[str], requested_max: Optional[int] = None) -> int:
-    """
-    Determines the optimal max_tokens configuration for a given LLM provider and model.
-    Ensures reasoning models get enough padding, avoids API validation crashes for restricted models,
-    and scales safely for large file generation.
-    """
-    # 1. Standardize inputs
-    provider_clean = provider.strip().lower()
-    model_clean = (model.strip().lower() if model else "").split(":")[0]  # Extracts base from formats like openrouter/provider:model
-
-    # Fallback to current config value if provided, otherwise assume a baseline
-    user_default = requested_max if requested_max is not None else 4096
-
-    # 2. Map DeepSeek Models
-    if "deepseek" in provider_clean:
-        # DeepSeek-R1 (Reasoning models use a shared pool for thinking + answering)
-        if "reasoner" in model_clean or "r1" in model_clean:
-            return max(user_default, 32768)
-        # DeepSeek-V4 (Newer high-limit generations)
-        elif "v4" in model_clean:
-            return max(user_default, 16384)
-        # DeepSeek-V3 / Standard Chat (Enforces an exact hard ceiling on standard endpoints)
-        elif "chat" in model_clean or "v3" in model_clean:
-            return min(user_default if requested_max is not None else 8000, 8000)
-        return min(user_default, 8000)
-
-    # 3. Map Anthropic (Claude) Models
-    if "anthropic" in provider_clean or "claude" in provider_clean:
-        # Claude 3.5 Sonnet / Opus support extended output ranges up to 8k tokens
-        if "3-5" in model_clean or "3.5" in model_clean or "opus" in model_clean:
-            return max(user_default, 8192)
-        # Older Claude 3 Haiku / Legacy models
-        return min(user_default if requested_max is not None else 4096, 4096)
-
-    # 4. Map OpenAI Models
-    if "openai" in provider_clean or "gpt" in model_clean:
-        # o1 / o3 reasoning models (Require high token allocations for hidden reasoning steps)
-        if model_clean.startswith("o1") or model_clean.startswith("o3"):
-            return max(user_default, 16384)
-        # GPT-4o / GPT-4-turbo with expanded output support
-        elif "4o" in model_clean or "turbo" in model_clean:
-            return max(user_default, 4096)
-        return min(user_default, 4096)
-
-    # 5. Map Google (Gemini) Models
-    if "google" in provider_clean or "gemini" in model_clean:
-        # Gemini 1.5 Pro and Flash natively support massive native output thresholds
-        if "1.5" in model_clean or "2.0" in model_clean or "pro" in model_clean:
-            return max(user_default, 8192)
-        return user_default
-
-    # 6. Catch-all fallback for unrecognized/open-source models
-    return user_default

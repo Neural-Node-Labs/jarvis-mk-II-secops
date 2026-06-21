@@ -40,7 +40,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         npm \
         python3-venv \
         python3 \
-            python3-pip \
+        python3-pip \
+        chromium \
+        chromium-driver \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Python dependencies ───────────────────────────────────────────────────────
@@ -54,9 +56,12 @@ RUN python3 -m venv /opt/venv
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN pip install --no-cache-dir -r requirements.txt
-
+RUN pip install --no-cache-dir selenium
+RUN pip install --no-cache-dir pytest
+RUN pip install --no-cache-dir webdriver-manager
 # ── Backend source ────────────────────────────────────────────────────────────
 COPY backend/ ./
+
 
 # ── Frontend build artifacts → nginx root ────────────────────────────────────
 COPY --from=frontend-builder /app/dist /usr/share/nginx/html
@@ -72,11 +77,27 @@ COPY deploy/supervisord.conf /etc/supervisor/conf.d/agent.conf
 # /app/data  — settings.json (provider config)
 # /app/experienced — Experienced knowledge base entries + index.md
 RUN mkdir -p /app/data /app/experienced \
-    && useradd -m -u 1001 jarvis \
+    && useradd -m -u 1001 sir \
     && mkdir -p /var/log/supervisor \
-    && chown -R jarvis:jarvis /app
+    && mkdir -p /app/workspace \
+    && chown -R sir:sir /app \
+    && chown -R sir:sir /var/log/supervisor
 
 # USER jarvis
+
+# ── Entrypoint: fixes bind-mount ownership on every container start ──────────
+# /app/data, /app/experienced, /app/output are bind-mounted from the host
+# (docker-compose.yml) at RUNTIME, which overrides the `chown -R jarvis:jarvis
+# /app` above — that chown only ever touches the image's own layers. If those
+# host folders don't already exist, Docker creates them owned by root, and the
+# FastAPI app (run as the unprivileged `jarvis` user via supervisord) then
+# can't write into them — this is the "workspace becomes root, agent can't
+# write to it" bug. The entrypoint runs as root, before supervisord starts,
+# and re-chowns those paths every time the container boots so this can't
+# silently regress. See deploy/docker-entrypoint.sh for the full explanation.
+COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 # ── Health check ──────────────────────────────────────────────────────────────
 HEALTHCHECK --interval=15s --timeout=5s --start-period=25s --retries=5 \

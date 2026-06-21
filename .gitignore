@@ -23,7 +23,11 @@ output/*
 
 *_OLD/*
 /archive/*
-/jarvis/*
+/sir/*
 /.idea/*
-/backend/venv/
-/jarvis/
+/backend/venv
+/sir/
+/ollama_models/
+
+/.venv/
+/backend/frontend_dist/

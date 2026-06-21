@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import VoiceIO, { type VoiceIOHandle } from "./components/VoiceIO";
 
 // ─── Dynamic URLs ──────────────────────────────────────────────────────────────
+const _base_workspace = "/app/workspace"
 const _base = (import.meta as any).env?.VITE_API_URL || "";
 const _wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
 function buildWsUrl(userId: string): string {
@@ -279,6 +281,292 @@ const AttBadge = ({ att, onRemove }: { att: any; onRemove?: () => void }) => (
   </div>
 );
 
+// ─── Code / File Renderer ─────────────────────────────────────────────────────
+
+// Maps language identifiers to a display label + accent colour inside the HUD palette.
+const LANG_META: Record<string, { label: string; color: string }> = {
+  python:     { label: "PY",   color: "#4EC9B0" },
+  py:         { label: "PY",   color: "#4EC9B0" },
+  javascript: { label: "JS",   color: "#FFB830" },
+  js:         { label: "JS",   color: "#FFB830" },
+  typescript: { label: "TS",   color: "#00C8FF" },
+  ts:         { label: "TS",   color: "#00C8FF" },
+  tsx:        { label: "TSX",  color: "#00C8FF" },
+  jsx:        { label: "JSX",  color: "#FFB830" },
+  bash:       { label: "SH",   color: "#FF5533" },
+  sh:         { label: "SH",   color: "#FF5533" },
+  shell:      { label: "SH",   color: "#FF5533" },
+  zsh:        { label: "SH",   color: "#FF5533" },
+  json:       { label: "JSON", color: "#7B68EE" },
+  yaml:       { label: "YAML", color: "#FF9F4A" },
+  yml:        { label: "YAML", color: "#FF9F4A" },
+  toml:       { label: "TOML", color: "#FF9F4A" },
+  dockerfile: { label: "🐳",   color: "#44BBFF" },
+  docker:     { label: "🐳",   color: "#44BBFF" },
+  html:       { label: "HTML", color: "#E44D26" },
+  css:        { label: "CSS",  color: "#2965F1" },
+  sql:        { label: "SQL",  color: "#00CC55" },
+  go:         { label: "GO",   color: "#00B8CC" },
+  rust:       { label: "RS",   color: "#FF5533" },
+  rs:         { label: "RS",   color: "#FF5533" },
+  java:       { label: "JAVA", color: "#F89820" },
+  c:          { label: "C",    color: "#A8B9CC" },
+  cpp:        { label: "C++",  color: "#A8B9CC" },
+  cs:         { label: "C#",   color: "#9B4F96" },
+  ruby:       { label: "RB",   color: "#CC342D" },
+  rb:         { label: "RB",   color: "#CC342D" },
+  php:        { label: "PHP",  color: "#777BB4" },
+  swift:      { label: "SWIFT",color: "#F05138" },
+  kotlin:     { label: "KT",   color: "#7F52FF" },
+  xml:        { label: "XML",  color: "#FF9F4A" },
+  markdown:   { label: "MD",   color: "#B8D8F0" },
+  md:         { label: "MD",   color: "#B8D8F0" },
+  text:       { label: "TXT",  color: "#3A6A8A" },
+  txt:        { label: "TXT",  color: "#3A6A8A" },
+  ini:        { label: "INI",  color: "#FF9F4A" },
+  env:        { label: "ENV",  color: "#FF9F4A" },
+  diff:       { label: "DIFF", color: "#FF5533" },
+  patch:      { label: "PATCH",color: "#FF5533" },
+};
+
+// Derive lang from a filename extension.
+function langFromFilename(name: string): string {
+  const ext = name.split(".").pop()?.toLowerCase() || "";
+  if (name.toLowerCase() === "dockerfile") return "dockerfile";
+  if (name.startsWith(".env")) return "env";
+  return ext || "text";
+}
+
+// Detect if the first non-empty line of a code block looks like a file path.
+// Matches patterns like: "# /path/to/file.py"  "// src/foo.ts"  "## filename.json"
+// OR a bare relative/absolute path: "src/components/Foo.tsx"
+function detectFilename(firstLine: string): string | null {
+  // Comment-style: # path, // path, ## path
+  const commentMatch = firstLine.trim().match(/^(?:\/\/|##+?|\/\*)\s*([\w.\-/\\@]+\.\w+)\s*\*?\/?\s*$/);
+  if (commentMatch) return commentMatch[1];
+  // Bare path with at least one slash or a recognisable extension
+  const bareMatch = firstLine.trim().match(/^((?:\.\.?\/|\/)?[\w.\-/\\@]+\.\w+)\s*$/);
+  if (bareMatch) return bareMatch[1];
+  return null;
+}
+
+// Syntax-coloured token pass — lightweight, no external dep.
+// Handles keywords, strings, comments, numbers, and operators for most langs.
+function tokeniseLine(line: string, lang: string): React.ReactNode[] {
+  // For langs where we just want plain mono, return as-is.
+  if (["text", "txt", "md", "markdown"].includes(lang)) return [line];
+
+  // Diff colouring
+  if (lang === "diff" || lang === "patch") {
+    const colour = line.startsWith("+") ? "#00FF88" : line.startsWith("-") ? "#FF4455" : line.startsWith("@") ? "#00C8FF" : undefined;
+    return colour ? [<span key={0} style={{ color: colour }}>{line}</span>] : [line];
+  }
+
+  // JSON quick pass
+  if (lang === "json") {
+    return [<span key={0} dangerouslySetInnerHTML={{ __html:
+      line
+        .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+        .replace(/("(?:[^"\\]|\\.)*")\s*:/g, `<span style="color:#00C8FF">$1</span>:`)
+        .replace(/:\s*("(?:[^"\\]|\\.)*")/g, `: <span style="color:#CE9178">$1</span>`)
+        .replace(/:\s*(\d+\.?\d*)/g, `: <span style="color:#B5CEA8">$1</span>`)
+        .replace(/:\s*(true|false|null)/g, `: <span style="color:#569CD6">$1</span>`)
+    }} />];
+  }
+
+  // Shell / bash: highlight flags, paths, builtins
+  if (["bash","sh","shell","zsh"].includes(lang)) {
+    return [<span key={0} dangerouslySetInnerHTML={{ __html:
+      line
+        .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+        .replace(/(#.*)$/, `<span style="color:#6A9955">$1</span>`)
+        .replace(/\b(sudo|apt|pip|npm|yarn|docker|git|cd|ls|mkdir|rm|cp|mv|cat|echo|export|source|chmod|chown|curl|wget|grep|awk|sed|find|xargs|kill|ps|env|which|alias)\b/g, `<span style="color:#569CD6">$1</span>`)
+        .replace(/(--?[\w-]+)/g, `<span style="color:#9CDCFE">$1</span>`)
+        .replace(/('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")/g, `<span style="color:#CE9178">$1</span>`)
+    }} />];
+  }
+
+  // Generic: keywords, strings, comments, numbers
+  const keywords: Record<string, string[]> = {
+    python: ["def","class","import","from","return","if","elif","else","for","while","in","not","and","or","is","None","True","False","try","except","finally","with","as","pass","break","continue","raise","yield","lambda","async","await","self","super","global","nonlocal","del","assert"],
+    javascript: ["const","let","var","function","return","if","else","for","while","in","of","class","new","this","import","export","default","from","async","await","try","catch","finally","throw","typeof","instanceof","null","undefined","true","false","=>"," extends","super","static"],
+    typescript: ["const","let","var","function","return","if","else","for","while","in","of","class","new","this","import","export","default","from","async","await","try","catch","finally","throw","typeof","instanceof","null","undefined","true","false","=>","extends","super","static","interface","type","enum","implements","declare","namespace","readonly","abstract","private","public","protected"],
+    go: ["func","package","import","return","if","else","for","range","switch","case","default","var","const","type","struct","interface","map","chan","go","defer","select","break","continue","fallthrough","nil","true","false","make","new","len","cap","append","copy","delete","panic","recover","print","println"],
+    rust: ["fn","let","mut","use","mod","pub","struct","enum","impl","trait","return","if","else","match","for","while","loop","break","continue","true","false","None","Some","Ok","Err","self","Self","super","crate","move","ref","in","as","where","type","const","static","unsafe","extern","async","await","dyn","Box","Vec","String","Option","Result"],
+    sql: ["SELECT","FROM","WHERE","JOIN","LEFT","RIGHT","INNER","OUTER","ON","GROUP","BY","ORDER","HAVING","INSERT","INTO","VALUES","UPDATE","SET","DELETE","CREATE","TABLE","DROP","ALTER","INDEX","PRIMARY","KEY","FOREIGN","REFERENCES","NOT","NULL","AND","OR","IN","EXISTS","DISTINCT","AS","WITH","UNION","ALL","LIMIT","OFFSET"],
+  };
+  const kws = keywords[lang] || keywords["javascript"];
+
+  // Escape HTML then apply colour passes — order matters (comments first).
+  const escaped = line.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  const result = escaped
+    // Single-line comments
+    .replace(/(\/\/.*$|#.*$|--.*$)/g, `<span style="color:#6A9955">$1</span>`)
+    // Strings
+    .replace(/('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`)/g, `<span style="color:#CE9178">$1</span>`)
+    // Numbers
+    .replace(/\b(\d+\.?\d*)\b/g, `<span style="color:#B5CEA8">$1</span>`)
+    // Keywords
+    .replace(new RegExp(`\\b(${kws.join("|")})\\b`, "g"), `<span style="color:#569CD6">$1</span>`);
+
+  return [<span key={0} dangerouslySetInnerHTML={{ __html: result }} />];
+}
+
+// Individual code block — with lang badge, optional filename chip, copy button.
+const CodeBlock = ({ lang, code, filename }: { lang: string; code: string; filename?: string | null }) => {
+  const [copied, setCopied] = useState(false);
+  const [expanded, setExpanded] = useState(!filename); // auto-expand if no filename
+
+  const lmeta = LANG_META[lang.toLowerCase()] || { label: lang.toUpperCase() || "CODE", color: J.accent };
+  const lines = code.split("\n");
+
+  const copy = () => {
+    navigator.clipboard?.writeText(code).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1800); });
+  };
+
+  return (
+    <div style={{
+      margin: "8px 0",
+      border: `1px solid ${lmeta.color}30`,
+      borderLeft: `2px solid ${lmeta.color}99`,
+      borderRadius: 3,
+      overflow: "hidden",
+      background: "#050A10",
+    }}>
+      {/* Header bar */}
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "5px 10px",
+        background: `${lmeta.color}10`,
+        borderBottom: expanded ? `1px solid ${lmeta.color}20` : "none",
+        cursor: filename ? "pointer" : "default",
+        userSelect: "none",
+      }} onClick={filename ? () => setExpanded(e => !e) : undefined}>
+        {/* Left: lang badge + filename/line count */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{
+            fontSize: 9, fontFamily: J.fontHeader, fontWeight: 700,
+            letterSpacing: "0.12em", color: lmeta.color,
+            background: `${lmeta.color}18`, padding: "1px 6px", borderRadius: 2,
+          }}>{lmeta.label}</span>
+          {filename
+            ? <span style={{ fontSize: 11, color: J.textPri, fontFamily: J.fontMono }}>{filename}</span>
+            : <span style={{ fontSize: 9, color: J.textDim, fontFamily: J.fontHeader, letterSpacing: "0.1em" }}>{lines.length} LINE{lines.length !== 1 ? "S" : ""}</span>
+          }
+          {filename && (
+            <span style={{ fontSize: 9, color: J.textDim, fontFamily: J.fontHeader, letterSpacing: "0.1em" }}>
+              {expanded ? "▾ COLLAPSE" : "▸ EXPAND"}
+            </span>
+          )}
+        </div>
+        {/* Right: copy button */}
+        <button onClick={e => { e.stopPropagation(); copy(); }} style={{
+          fontSize: 9, fontFamily: J.fontHeader, fontWeight: 700, letterSpacing: "0.1em",
+          color: copied ? J.ok : J.textDim,
+          background: "transparent", border: "none", padding: "2px 6px",
+          cursor: "pointer", transition: "color 0.15s",
+        }}>{copied ? "✓ COPIED" : "⧉ COPY"}</button>
+      </div>
+
+      {/* Code body */}
+      {expanded && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 11.5, lineHeight: 1.6 }}>
+            <tbody>
+              {lines.map((line, i) => (
+                <tr key={i} style={{ background: i % 2 === 0 ? "transparent" : `${lmeta.color}04` }}>
+                  <td style={{
+                    textAlign: "right", paddingRight: 10, paddingLeft: 10,
+                    color: J.textDim, fontFamily: J.fontMono,
+                    fontSize: 9, userSelect: "none", minWidth: 32,
+                    borderRight: `1px solid ${lmeta.color}15`,
+                    verticalAlign: "top", paddingTop: 1, paddingBottom: 1,
+                  }}>{i + 1}</td>
+                  <td style={{
+                    paddingLeft: 12, paddingRight: 12, paddingTop: 1, paddingBottom: 1,
+                    fontFamily: J.fontMono, color: J.textPri, whiteSpace: "pre",
+                    verticalAlign: "top",
+                  }}>
+                    {tokeniseLine(line, lang.toLowerCase())}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Segment types produced by parseMessage()
+type Segment =
+  | { kind: "text";  content: string }
+  | { kind: "code";  lang: string; code: string; filename: string | null };
+
+// Parse raw LLM output into alternating text / code segments.
+function parseMessage(raw: string): Segment[] {
+  const segments: Segment[] = [];
+  // Matches ```lang\n...code...\n``` with optional whitespace
+  const FENCE = /```([\w.+\-]*)\n?([\s\S]*?)```/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = FENCE.exec(raw)) !== null) {
+    // Text before this fence
+    if (match.index > cursor) {
+      segments.push({ kind: "text", content: raw.slice(cursor, match.index) });
+    }
+
+    const lang = match[1].trim().toLowerCase() || "text";
+    const body = match[2];
+
+    // Check if first non-empty line of code is a filename comment
+    const lines = body.split("\n");
+    const firstLine = lines.find(l => l.trim() !== "") || "";
+    const filename = detectFilename(firstLine);
+    // If detected as filename, strip that comment line from the code body
+    const codeBody = filename
+      ? lines.slice(lines.findIndex(l => l.trim() !== "") + 1).join("\n").replace(/^\n/, "")
+      : body;
+
+    // Also try to derive lang from filename extension if lang was omitted
+    const resolvedLang = (lang === "text" && filename) ? langFromFilename(filename) : lang;
+
+    segments.push({ kind: "code", lang: resolvedLang, code: codeBody, filename });
+    cursor = match.index + match[0].length;
+  }
+
+  // Remaining text after last fence
+  if (cursor < raw.length) {
+    segments.push({ kind: "text", content: raw.slice(cursor) });
+  }
+
+  return segments.length ? segments : [{ kind: "text", content: raw }];
+}
+
+// Renders the assistant message: plain text segments + rich code/file blocks.
+const MessageRenderer = ({ content }: { content: string }) => {
+  const segments = parseMessage(content);
+  return (
+    <div style={{ fontSize: 13, lineHeight: 1.75, color: J.textPri }}>
+      {segments.map((seg, i) => {
+        if (seg.kind === "text") {
+          // Trim leading/trailing blank lines around code blocks but preserve interior newlines
+          const trimmed = seg.content.replace(/^\n+/, "").replace(/\n+$/, "");
+          if (!trimmed) return null;
+          return (
+            <div key={i} style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", marginBottom: 4 }}>
+              {trimmed}
+            </div>
+          );
+        }
+        return <CodeBlock key={i} lang={seg.lang} code={seg.code} filename={seg.filename} />;
+      })}
+    </div>
+  );
+};
+
 // ─── MessageBubble ────────────────────────────────────────────────────────────
 const Bubble = ({ msg }: { msg: any }) => {
   if (msg.role === "user") return (
@@ -363,10 +651,9 @@ const Bubble = ({ msg }: { msg: any }) => {
         borderLeft: `2px solid ${J.accent}30`,
         borderRadius: "2px 5px 5px 2px",
         padding: "10px 15px", maxWidth: "84%",
-        color: J.textPri, fontSize: 13, lineHeight: 1.75,
-        wordBreak: "break-word", whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
       }}>
-        {msg.content}
+        <MessageRenderer content={msg.content} />
         {msg.streaming && <span style={{ animation: "hud-blink 1s infinite", color: J.accent, marginLeft: 2 }}>▋</span>}
       </div>
     </div>
@@ -552,7 +839,7 @@ const SettingsPanel = ({ onClose, onSaved, authedUser }: {
   const saveUser = async () => {
     if (!selected) return;
     if (editPass && editPass !== editPass2) { setUsersErr("Passwords do not match"); return; }
-    if (editPass && editPass.length < 6)    { setUsersErr("Password must be ≥ 6 chars"); return; }
+    if (editPass && editPass.length < 8)    { setUsersErr("Password must be ≥ 8 chars"); return; }
     setEditSaving(true); setUsersErr(""); setEditSaved(false);
     try {
       const body: any = { is_active: editActive };
@@ -573,7 +860,7 @@ const SettingsPanel = ({ onClose, onSaved, authedUser }: {
     const u = newUser.trim().toLowerCase();
     if (!u || !newPass) { setUsersErr("Username and password required"); return; }
     if (newPass !== newPass2) { setUsersErr("Passwords do not match"); return; }
-    if (newPass.length < 6)  { setUsersErr("Password must be ≥ 6 chars"); return; }
+    if (newPass.length < 8)  { setUsersErr("Password must be ≥ 8 chars"); return; }
     setCreating(true); setUsersErr("");
     try {
       const r = await api(`${API_URL}/auth/register`, {
@@ -698,7 +985,7 @@ const SettingsPanel = ({ onClose, onSaved, authedUser }: {
                 <div style={{ padding: "12px 14px", borderBottom: `1px solid ${J.border}`, background: J.bgDeep }}>
                   <Lbl c={J.ok}>⊞ NEW USER</Lbl>
                   <input value={newUser} onChange={e => setNewUser(e.target.value)} placeholder="Username" style={{ ...INP, marginTop: 6, marginBottom: 5 }} />
-                  <input type="password" value={newPass} onChange={e => setNewPass(e.target.value)} placeholder="Password (min 6)" style={{ ...INP, marginBottom: 5 }} />
+                  <input type="password" value={newPass} onChange={e => setNewPass(e.target.value)} placeholder="Password (min 8)" style={{ ...INP, marginBottom: 5 }} />
                   <input type="password" value={newPass2} onChange={e => setNewPass2(e.target.value)} placeholder="Confirm password" onKeyDown={e => e.key === "Enter" && createUser()} style={{ ...INP, marginBottom: 8 }} />
                   <button onClick={createUser} disabled={creating || !newUser.trim() || !newPass} style={{ width: "100%", padding: "6px", background: `${J.ok}0C`, border: `1px solid ${J.ok}55`, color: J.ok, borderRadius: 3, fontSize: 10, letterSpacing: "0.08em" }}>
                     {creating ? "CREATING…" : "⊞ CREATE USER"}
@@ -1408,6 +1695,22 @@ const EvolutionPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
     const autoSlug = slug.trim() || taskDesc.trim().toLowerCase().replace(/\s+/g,"-").slice(0,30);
     setErr(""); setLaunching(true); setLog([]); setPhase("running"); setCurrentPhaseNum(0);
 
+    // Live accumulator — `log` (React state) is stale inside this closure for the
+    // duration of the stream, so approval-gate / phase detection must read from
+    // here, not from `log`.
+    let fullText = "";
+    const bumpPhaseFromText = (text: string) => {
+      // The agent narrates progress as "Phase N — ..." per the prompt built in
+      // POST /api/evolve. react_status.phase is a generic ReAct-loop label
+      // ("acting — 2 tool call(s)", "complete", ...) and never contains this,
+      // so we scan the model's own text instead of relying on that field.
+      const matches = [...text.matchAll(/phase\s+(\d+)/gi)];
+      if (matches.length) {
+        const highest = Math.max(...matches.map(m => parseInt(m[1], 10)));
+        setCurrentPhaseNum(prev => Math.max(prev, highest));
+      }
+    };
+
     try {
       const r = await api(`${API_URL}/evolve`, {
         method: "POST",
@@ -1431,23 +1734,30 @@ const EvolutionPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
           try {
             const ev = JSON.parse(line.slice(5).trim());
             if (ev.type === "token" && ev.data) {
+              fullText += ev.data;
+              bumpPhaseFromText(ev.data);
               setLog(prev => {
                 const last = prev[prev.length - 1] || "";
                 return [...prev.slice(0,-1), last + ev.data];
               });
             } else if (ev.type === "react_status") {
               const phaseMatch = ev.data?.phase?.match(/phase\s*(\d)/i);
-              if (phaseMatch) setCurrentPhaseNum(parseInt(phaseMatch[1]));
-              setLog(prev => [...prev, `\n── REACT [${ev.data?.iteration || "?"}] ${ev.data?.phase?.toUpperCase()} ──\n`]);
+              if (phaseMatch) setCurrentPhaseNum(prev => Math.max(prev, parseInt(phaseMatch[1])));
+              const line = `\n── REACT [${ev.data?.iteration || "?"}] ${ev.data?.phase?.toUpperCase()} ──\n`;
+              fullText += line;
+              setLog(prev => [...prev, line]);
             } else if (ev.type === "tool_result") {
               const output = ev.data?.output;
-              if (output && typeof output === "object") setLog(prev => [...prev, `  → ${JSON.stringify(output).slice(0,200)}\n`]);
+              if (output && typeof output === "object") {
+                const line = `  → ${JSON.stringify(output).slice(0,200)}\n`;
+                fullText += line;
+                setLog(prev => [...prev, line]);
+              }
             } else if (ev.type === "done") {
-              const allText = log.join("") ;
-              // Check if agent stopped for blueprint approval
-              if (allText.toLowerCase().includes("approval") || allText.toLowerCase().includes("awaiting")) {
+              // Use the LIVE accumulator, not the stale `log` state.
+              if (fullText.toLowerCase().includes("approval") || fullText.toLowerCase().includes("awaiting")) {
                 setPhase("approval");
-                setApproval(allText);
+                setApproval(fullText);
               } else {
                 setPhase("done");
               }
@@ -1463,6 +1773,7 @@ const EvolutionPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
   };
 
   const sendApproval = async (approved: boolean) => {
+      console.log('sendApproval')
     setApproved(approved);
     if (approved) {
       setLog(prev => [...prev, "\n── ✓ BLUEPRINT APPROVED — PROCEEDING TO PHASE 6 ──\n"]);
@@ -1475,6 +1786,7 @@ const EvolutionPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
           body: JSON.stringify({ message: "APPROVED — proceed with implementation", user_id: userId, react: true }),
         });
         if (r.ok) {
+            console.log('sendApproval ok')
           const reader = r.body!.getReader();
           const dec    = new TextDecoder();
           while (true) {
@@ -1486,7 +1798,14 @@ const EvolutionPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
               if (!line.startsWith("data:")) continue;
               try {
                 const ev = JSON.parse(line.slice(5).trim());
-                if (ev.type === "token" && ev.data) setLog(prev => { const last = prev[prev.length-1]||""; return [...prev.slice(0,-1), last+ev.data]; });
+                if (ev.type === "token" && ev.data) {
+                  setLog(prev => { const last = prev[prev.length-1]||""; return [...prev.slice(0,-1), last+ev.data]; });
+                  const matches = [...String(ev.data).matchAll(/phase\s+(\d+)/gi)];
+                  if (matches.length) {
+                    const highest = Math.max(...matches.map(m => parseInt(m[1], 10)));
+                    setCurrentPhaseNum(prev => Math.max(prev, highest));
+                  }
+                }
                 if (ev.type === "done") { setPhase("done"); return; }
               } catch {}
             }
@@ -1701,6 +2020,298 @@ function fmtTs(ts: string) {
   try { return new Date(ts).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
   catch { return ts.slice(11,19); }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCHEDULER PANEL — Create / edit / delete / run scheduled AI calls and commands
+// Backend: GET/POST /api/scheduler/tasks, PUT/DELETE .../tasks/{id},
+//          POST .../tasks/{id}/toggle, POST .../tasks/{id}/run, GET .../tasks/{id}/runs
+// ═══════════════════════════════════════════════════════════════════════════════
+const SCHED_STATUS_COLORS: Record<string,string> = {
+  success: "#3DDC84", failed: "#FF5C5C", timeout: "#FFB454", unknown: "#8B96A5",
+};
+
+const SchedulerPanel = ({ onClose, userId }: { onClose: () => void; userId: string }) => {
+  const [tasks,    setTasks]    = useState<any[]>([]);
+  const [loading,  setLoading]  = useState(true);
+  const [err,      setErr]      = useState("");
+  const [view,     setView]     = useState<"list"|"form">("list");
+  const [editingId,setEditingId]= useState<string | null>(null);
+  const [saving,   setSaving]   = useState(false);
+  const [runningId,setRunningId]= useState<string | null>(null);
+  const [runsFor,  setRunsFor]  = useState<{ taskId: string; runs: any[] } | null>(null);
+  const [lastRun,  setLastRun]  = useState<{ taskId: string; status: string; output: string } | null>(null);
+
+  const blankForm = {
+    name: "", user_id: userId, task_type: "ai_call" as "ai_call" | "command",
+    schedule_kind: "interval" as "interval" | "cron" | "once", schedule_value: "3600",
+    message: "", persona: "", command: "", cwd: "", timeout_seconds: "300", enabled: true,
+  };
+  const [form, setForm] = useState(blankForm);
+  const setF = (k: string, v: any) => setForm(prev => ({ ...prev, [k]: v }));
+
+  const load = async () => {
+    setLoading(true); setErr("");
+    try {
+      const r = await api(`${API_URL}/scheduler/tasks?user_id=${encodeURIComponent(userId)}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      setTasks(d.output?.tasks || []);
+    } catch (e: any) { setErr(`Failed to load: ${e.message}`); }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); const t = setInterval(load, 20000); return () => clearInterval(t); }, []);
+
+  const openCreate = () => { setForm(blankForm); setEditingId(null); setView("form"); };
+
+  const openEdit = (t: any) => {
+    setForm({
+      name: t.name, user_id: t.user_id, task_type: t.task_type,
+      schedule_kind: t.schedule_kind, schedule_value: String(t.schedule_value),
+      message: t.payload?.message || "", persona: t.payload?.persona || "",
+      command: t.payload?.command || "", cwd: t.payload?.cwd || "",
+      timeout_seconds: String(t.payload?.timeout_seconds || 300), enabled: t.enabled,
+    });
+    setEditingId(t.id); setView("form");
+  };
+
+  const buildPayload = () => {
+    const schedule = {
+      kind: form.schedule_kind,
+      value: form.schedule_kind === "interval" ? parseInt(form.schedule_value, 10) || 0 : form.schedule_value,
+    };
+    const payload = form.task_type === "ai_call"
+      ? { message: form.message, ...(form.persona ? { persona: form.persona } : {}) }
+      : { command: form.command, ...(form.cwd ? { cwd: form.cwd } : {}), timeout_seconds: parseInt(form.timeout_seconds, 10) || 300 };
+    return { name: form.name, user_id: form.user_id || userId, task_type: form.task_type, schedule, payload, enabled: form.enabled };
+  };
+
+  const save = async () => {
+    if (!form.name.trim()) { setErr("Name is required."); return; }
+    if (form.task_type === "ai_call" && !form.message.trim()) { setErr("Message is required for AI call tasks."); return; }
+    if (form.task_type === "command" && !form.command.trim()) { setErr("Command is required for command tasks."); return; }
+    setSaving(true); setErr("");
+    try {
+      const body = buildPayload();
+      const url = editingId ? `${API_URL}/scheduler/tasks/${editingId}` : `${API_URL}/scheduler/tasks`;
+      const r = await api(url, { method: editingId ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const d = await r.json();
+      if (!r.ok || d.success === false) throw new Error(d.error || d.detail || `HTTP ${r.status}`);
+      setView("list"); load();
+    } catch (e: any) { setErr(`Save failed: ${e.message}`); }
+    setSaving(false);
+  };
+
+  const remove = async (id: string) => {
+    if (!window.confirm("Delete this scheduled task and its run history? This can't be undone.")) return;
+    try {
+      const r = await api(`${API_URL}/scheduler/tasks/${id}`, { method: "DELETE" });
+      const d = await r.json();
+      if (!r.ok || d.success === false) throw new Error(d.error || `HTTP ${r.status}`);
+      load();
+    } catch (e: any) { setErr(`Delete failed: ${e.message}`); }
+  };
+
+  const toggle = async (t: any) => {
+    try {
+      await api(`${API_URL}/scheduler/tasks/${t.id}/toggle`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: !t.enabled }) });
+      load();
+    } catch (e: any) { setErr(`Toggle failed: ${e.message}`); }
+  };
+
+  const runNow = async (t: any) => {
+    setRunningId(t.id); setErr(""); setLastRun(null);
+    try {
+      const r = await api(`${API_URL}/scheduler/tasks/${t.id}/run`, { method: "POST" });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      setLastRun({ taskId: t.id, status: d.run?.status, output: d.run?.output || d.run?.error || "" });
+      load();
+    } catch (e: any) { setErr(`Run failed: ${e.message}`); }
+    setRunningId(null);
+  };
+
+  const viewRuns = async (t: any) => {
+    try {
+      const r = await api(`${API_URL}/scheduler/tasks/${t.id}/runs?limit=20`);
+      const d = await r.json();
+      setRunsFor({ taskId: t.id, runs: d.output?.runs || [] });
+    } catch (e: any) { setErr(`Failed to load run history: ${e.message}`); }
+  };
+
+  const scheduleSummary = (t: any) => {
+    if (t.schedule_kind === "interval") {
+      const s = parseInt(t.schedule_value, 10);
+      if (s % 3600 === 0) return `every ${s / 3600}h`;
+      if (s % 60 === 0) return `every ${s / 60}m`;
+      return `every ${s}s`;
+    }
+    if (t.schedule_kind === "cron") return `cron: ${t.schedule_value}`;
+    return `once: ${new Date(t.schedule_value).toLocaleString()}`;
+  };
+
+  const FLD = (label: string, el: any) => (
+    <div style={{ marginBottom: 12 }}>
+      <Lbl>{label}</Lbl>
+      <div style={{ marginTop: 5 }}>{el}</div>
+    </div>
+  );
+  const INP = (val: string, set: (v: string) => void, ph = "", multi = false): any => multi
+    ? <textarea value={val} onChange={e => set(e.target.value)} placeholder={ph} rows={3} style={{ width: "100%", padding: "7px 10px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12, borderRadius: 3, resize: "vertical" }} />
+    : <input value={val} onChange={e => set(e.target.value)} placeholder={ph} style={{ width: "100%", padding: "7px 10px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12, borderRadius: 3 }} />;
+  const SEL = (val: string, set: (v: string) => void, opts: { v: string; label: string }[]) => (
+    <select value={val} onChange={e => set(e.target.value)} style={{ width: "100%", padding: "7px 10px", background: J.bgCard, border: `1px solid ${J.borderMid}`, color: J.textPri, fontSize: 12, borderRadius: 3 }}>
+      {opts.map(o => <option key={o.v} value={o.v}>{o.label}</option>)}
+    </select>
+  );
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: `${J.bgDeep}F4`, zIndex: 100, display: "flex", flexDirection: "column", fontFamily: J.fontMono }}>
+      {/* Header */}
+      <div style={{ padding: "12px 24px", borderBottom: `1px solid ${J.borderMid}`, background: J.bgPanel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 22, height: 22, borderRadius: "50%", background: J.bgCard, border: `1px solid ${J.ok}55`, display: "flex", alignItems: "center", justifyContent: "center", color: J.ok, fontSize: 11 }}>⏱</div>
+          <div>
+            <div style={{ color: J.ok, fontSize: 11, letterSpacing: "0.18em", fontFamily: J.fontHeader, fontWeight: 700 }}>SCHEDULER</div>
+            <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.12em" }}>SCHEDULED AI CALLS · COMMANDS / PYTHON SCRIPTS</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {view === "list" && (
+            <button onClick={openCreate} style={{ padding: "4px 14px", background: `${J.ok}0C`, border: `1px solid ${J.ok}55`, color: J.ok, borderRadius: 2, fontSize: 10, letterSpacing: "0.06em" }}>
+              + NEW TASK
+            </button>
+          )}
+          <button onClick={onClose} style={{ background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, padding: "4px 14px", borderRadius: 2, fontSize: 11 }}>✕</button>
+        </div>
+      </div>
+
+      {err && <div style={{ background: J.errDim, border: `1px solid ${J.err}44`, color: J.err, fontSize: 11, padding: "8px 28px" }}>⚠ {err}</div>}
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "20px 28px", maxWidth: 880, margin: "0 auto", width: "100%" }}>
+
+        {/* ── LIST ── */}
+        {view === "list" && (
+          loading
+            ? <div style={{ color: J.textSec, textAlign: "center", padding: 30, animation: "hud-pulse 1.5s infinite" }}>Loading scheduled tasks…</div>
+            : tasks.length === 0
+              ? <div style={{ color: J.textDim, textAlign: "center", padding: 30 }}>No scheduled tasks yet. Click + NEW TASK to add one.</div>
+              : tasks.map((t: any) => (
+                <div key={t.id} style={{ marginBottom: 8, padding: "12px 14px", background: J.bgCard, border: `1px solid ${J.border}`, borderLeft: `3px solid ${t.enabled ? J.ok : J.textDim}`, borderRadius: 3 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
+                    <div>
+                      <span style={{ color: J.textPri, fontSize: 13, fontFamily: J.fontHeader, fontWeight: 600 }}>{t.name}</span>
+                      <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+                        <Chip label={t.task_type === "ai_call" ? "◈ AI CALL" : "▸ COMMAND"} color={t.task_type === "ai_call" ? J.react : J.accent} />
+                        <Chip label={scheduleSummary(t)} color={J.textSec} />
+                        {t.last_status && <Chip label={`last: ${t.last_status}`} color={SCHED_STATUS_COLORS[t.last_status] || J.textSec} />}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                      <button onClick={() => toggle(t)} title={t.enabled ? "Disable" : "Enable"} style={{ padding: "4px 10px", background: "none", border: `1px solid ${t.enabled ? J.ok : J.borderMid}66`, color: t.enabled ? J.ok : J.textSec, borderRadius: 2, fontSize: 9 }}>
+                        {t.enabled ? "ON" : "OFF"}
+                      </button>
+                      <button onClick={() => runNow(t)} disabled={runningId === t.id} style={{ padding: "4px 10px", background: "none", border: `1px solid ${J.accent}55`, color: J.accent, borderRadius: 2, fontSize: 9 }}>
+                        {runningId === t.id ? "…" : "▶ RUN"}
+                      </button>
+                      <button onClick={() => viewRuns(t)} style={{ padding: "4px 10px", background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, borderRadius: 2, fontSize: 9 }}>
+                        HISTORY
+                      </button>
+                      <button onClick={() => openEdit(t)} style={{ padding: "4px 10px", background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, borderRadius: 2, fontSize: 9 }}>
+                        EDIT
+                      </button>
+                      <button onClick={() => remove(t.id)} style={{ padding: "4px 10px", background: "none", border: `1px solid ${J.err}55`, color: J.err, borderRadius: 2, fontSize: 9 }}>
+                        DEL
+                      </button>
+                    </div>
+                  </div>
+                  <div style={{ color: J.textDim, fontSize: 10, marginTop: 8 }}>
+                    {t.task_type === "ai_call" ? `"${(t.payload?.message || "").slice(0,90)}"` : t.payload?.command}
+                  </div>
+                  <div style={{ color: J.textDim, fontSize: 9, marginTop: 4 }}>
+                    next run: {t.next_run_at ? new Date(t.next_run_at).toLocaleString() : "—"}
+                    {t.last_run_at && <span style={{ marginLeft: 12 }}>last run: {new Date(t.last_run_at).toLocaleString()}</span>}
+                  </div>
+                  {lastRun?.taskId === t.id && (
+                    <div style={{ marginTop: 8, padding: "8px 10px", background: J.bgPanel, border: `1px solid ${SCHED_STATUS_COLORS[lastRun.status] || J.border}44`, borderRadius: 3, fontSize: 10, color: J.textSec, whiteSpace: "pre-wrap", maxHeight: 160, overflowY: "auto" }}>
+                      {lastRun.output}
+                    </div>
+                  )}
+                  {runsFor?.taskId === t.id && (
+                    <div style={{ marginTop: 8, padding: "8px 10px", background: J.bgPanel, border: `1px solid ${J.border}`, borderRadius: 3 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between" }}>
+                        <Lbl c={J.textSec}>Run history</Lbl>
+                        <button onClick={() => setRunsFor(null)} style={{ background: "none", border: "none", color: J.textSec, fontSize: 12, cursor: "pointer" }}>×</button>
+                      </div>
+                      {runsFor.runs.length === 0
+                        ? <div style={{ color: J.textDim, fontSize: 10, marginTop: 6 }}>No runs yet.</div>
+                        : runsFor.runs.map((r: any) => (
+                          <div key={r.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "4px 0", borderBottom: `1px solid ${J.border}`, fontSize: 10 }}>
+                            <span style={{ color: J.textDim }}>{new Date(r.started_at).toLocaleString()}</span>
+                            <Chip label={r.status} color={SCHED_STATUS_COLORS[r.status] || J.textSec} />
+                          </div>
+                        ))
+                      }
+                    </div>
+                  )}
+                </div>
+              ))
+        )}
+
+        {/* ── FORM ── */}
+        {view === "form" && (
+          <div>
+            {FLD("Name", INP(form.name, v => setF("name", v), "e.g. Nightly recon summary"))}
+            {FLD("Task Type", SEL(form.task_type, v => setF("task_type", v), [
+              { v: "ai_call", label: "AI Call — send a message/task to the agent" },
+              { v: "command", label: "Command — run a shell command or python script" },
+            ]))}
+
+            {form.task_type === "ai_call" ? (
+              <>
+                {FLD("Message / Task", INP(form.message, v => setF("message", v), "What should the agent do when this fires?", true))}
+                {FLD("Persona (optional)", INP(form.persona, v => setF("persona", v), "leave blank for default persona"))}
+              </>
+            ) : (
+              <>
+                {FLD("Command", INP(form.command, v => setF("command", v), "python3 /app/output/myscript.py arg1"))}
+                {FLD("Working directory (optional)", INP(form.cwd, v => setF("cwd", v), "/app/output"))}
+                {FLD("Timeout (seconds)", INP(form.timeout_seconds, v => setF("timeout_seconds", v), "300"))}
+              </>
+            )}
+
+            {FLD("Schedule", SEL(form.schedule_kind, v => setF("schedule_kind", v), [
+              { v: "interval", label: "Interval — repeat every N seconds" },
+              { v: "cron",     label: "Cron — 5-field expression (min hour dom month dow)" },
+              { v: "once",     label: "Once — run at a specific date/time" },
+            ]))}
+
+            {form.schedule_kind === "interval" &&
+              FLD("Repeat every (seconds)", INP(form.schedule_value, v => setF("schedule_value", v), "3600 = every hour"))}
+            {form.schedule_kind === "cron" &&
+              FLD("Cron expression", INP(form.schedule_value, v => setF("schedule_value", v), "0 9 * * 1-5  (9am on weekdays)"))}
+            {form.schedule_kind === "once" &&
+              FLD("Run at (ISO datetime, UTC)", INP(form.schedule_value, v => setF("schedule_value", v), "2026-06-20T09:00:00"))}
+
+            <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
+              <input type="checkbox" checked={form.enabled} onChange={e => setF("enabled", e.target.checked)} id="sched-enabled" />
+              <label htmlFor="sched-enabled" style={{ color: J.textSec, fontSize: 11 }}>Enabled</label>
+            </div>
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={save} disabled={saving} style={{ padding: "8px 20px", background: `${J.ok}0C`, border: `1px solid ${J.ok}66`, color: J.ok, borderRadius: 3, fontSize: 11, letterSpacing: "0.06em" }}>
+                {saving ? "SAVING…" : editingId ? "✓ SAVE CHANGES" : "✓ CREATE TASK"}
+              </button>
+              <button onClick={() => { setView("list"); setErr(""); }} style={{ padding: "8px 20px", background: "none", border: `1px solid ${J.borderMid}`, color: J.textSec, borderRadius: 3, fontSize: 11 }}>
+                CANCEL
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TELEMETRY PANEL — Token Usage + Command Log + Kali Audit
@@ -2259,7 +2870,7 @@ const WorkspaceSidebar = ({
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
       setEntries(d.entries || []);
-      setWsRoot(d.workspace_root || `/tmp/${userId}/${proj}/workspace`);
+      setWsRoot(d.workspace_root || `/app/workspace/${userId}/${proj}/workspace`);
     } catch (e: any) {
       setError(e.message || "Cannot load workspace");
     }
@@ -2464,7 +3075,7 @@ const WorkspaceSidebar = ({
 
         {/* Path display */}
         <div style={{ color: J.textDim, fontSize: 8, marginTop: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: "0.04em" }} title={wsRoot}>
-          /tmp/{userId}/{currentProject}/workspace
+          {_base_workspace}/{userId}/{currentProject}/workspace
         </div>
       </div>
 
@@ -2528,7 +3139,7 @@ const WorkspaceSidebar = ({
         {error && (
           <div style={{ padding: "10px 12px" }}>
             <div style={{ color: J.err, fontSize: 10, marginBottom: 4 }}>✗ {error}</div>
-            <div style={{ color: J.textDim, fontSize: 9 }}>Workspace: /tmp/{userId}/{currentProject}/workspace</div>
+            <div style={{ color: J.textDim, fontSize: 9 }}>Workspace: {_base_workspace}/{userId}/{currentProject}/workspace</div>
           </div>
         )}
         {!loading && !error && entries.length === 0 && (
@@ -3124,34 +3735,689 @@ const PersonaManager = ({
   );
 };
 
-// ─── Login Screen ─────────────────────────────────────────────────────────────
-const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => void; personas: PersonaData[] }) => {
-  const [user, setUser] = useState("");
-  const [pass, setPass] = useState("");
-  const [err, setErr]   = useState("");
-  const [loading, setLoading] = useState(false);
-  const [shaking, setShaking] = useState(false);
-  const [persona, setPersona] = useState<string>(() => loadPersona());
 
-  const switchPersona = (id: string, themeData?: Partial<Theme>) => {
-    applyTheme(id, themeData);
-    savePersona(id);
-    setPersona(id);
+// ═══════════════════════════════════════════════════════════════════════════════
+// BILLING PANEL — SaaS Subscription & Usage Dashboard
+// Backend: /api/billing/* (enabled only when SAAS_BILLING_ENABLED=true)
+// ═══════════════════════════════════════════════════════════════════════════════
+interface BillingPlan {
+  plan_id: string; name: string; base_price: number; billing_interval: string;
+  currency: string; features: string; metered_rates: string;
+}
+interface BillingCustomer {
+  customer_id: string; username: string; name: string; email: string;
+  country: string; currency: string; status: string;
+}
+interface BillingSub {
+  subscription_id: string; plan_id: string; status: string;
+  current_period_start: string; current_period_end: string;
+}
+interface BillingInvoice {
+  invoice_id: string; total: number; currency: string; status: string;
+  issued_at: string; due_at: string; paid_at: string;
+  period_start: string; period_end: string; line_items: string;
+}
+
+const BillingPanel = ({ onClose, authedUser }: { onClose: () => void; authedUser: string }) => {
+  const [billingEnabled, setBillingEnabled] = useState<boolean | null>(null);
+  const [tab,            setTab]            = useState<"overview"|"plans"|"usage"|"invoices"|"admin">("overview");
+  const [plans,          setPlans]          = useState<BillingPlan[]>([]);
+  const [customer,       setCustomer]       = useState<BillingCustomer | null>(null);
+  const [subs,           setSubs]           = useState<BillingSub[]>([]);
+  const [invoices,       setInvoices]       = useState<BillingInvoice[]>([]);
+  const [health,         setHealth]         = useState<any>(null);
+  const [loading,        setLoading]        = useState(true);
+  const [err,            setErr]            = useState("");
+  const [creating,       setCreating]       = useState(false);
+  const [createdOk,      setCreatedOk]      = useState(false);
+  const [custForm,       setCustForm]       = useState({ name:"", email:"", country:"US", currency:"USD" });
+  const [usageForm,      setUsageForm]      = useState({ subscriptionId:"", metric:"api_calls", quantity:"1" });
+  const [usageResult,    setUsageResult]    = useState<any>(null);
+  const [cycleRunning,   setCycleRunning]   = useState(false);
+  const [cycleResult,    setCycleResult]    = useState<any>(null);
+  const isAdmin = authedUser === "admin";
+
+  const load = async () => {
+    setLoading(true); setErr("");
+    try {
+      // Check feature flag first
+      const sr = await api(`${API_URL}/billing/status`);
+      const sd = await sr.json();
+      setBillingEnabled(sd.enabled);
+      if (!sd.enabled) { setLoading(false); return; }
+
+      const [plR, cuR, invR, hlR] = await Promise.all([
+        api(`${API_URL}/billing/plans`),
+        api(`${API_URL}/billing/customers/me`),
+        api(`${API_URL}/billing/invoices`),
+        api(`${API_URL}/billing/health`),
+      ]);
+      if (plR.ok)  setPlans((await plR.json()).plans || []);
+      if (cuR.ok)  { const cd = await cuR.json(); setCustomer(cd.customer || null); }
+      if (invR.ok) setInvoices((await invR.json()).invoices || []);
+      if (hlR.ok)  setHealth(await hlR.json());
+
+      // Load subscriptions if customer exists
+      if (cuR.ok) {
+        const cd = await (await api(`${API_URL}/billing/customers/me`)).json();
+        if (cd.customer) {
+          const subR = await api(`${API_URL}/billing/subscriptions`);
+          if (subR.ok) setSubs((await subR.json()).subscriptions || []);
+        }
+      }
+    } catch (e: any) { setErr(e.message); }
+    setLoading(false);
   };
 
-  const [mode, setMode] = useState<"login"|"register">("login");
-  const [regUser, setRegUser] = useState("");
-  const [regPass, setRegPass] = useState("");
-  const [regPass2, setRegPass2] = useState("");
-  const [regLoading, setRegLoading] = useState(false);
+  useEffect(() => { load(); }, []);
 
+  const createCustomer = async () => {
+    if (!custForm.name || !custForm.email) { setErr("Name and email required"); return; }
+    setCreating(true); setErr("");
+    try {
+      const r = await api(`${API_URL}/billing/customers`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ ...custForm, username: authedUser }),
+      });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.detail); }
+      await load(); setCreatedOk(true);
+    } catch (e: any) { setErr(e.message); }
+    setCreating(false);
+  };
+
+  const subscribe = async (planId: string) => {
+    if (!customer) { setErr("Create a billing profile first"); return; }
+    setErr("");
+    try {
+      const r = await api(`${API_URL}/billing/subscriptions`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ customerId: customer.customer_id, planId }),
+      });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.detail); }
+      await load();
+    } catch (e: any) { setErr(e.message); }
+  };
+
+  const cancelSub = async (subId: string) => {
+    if (!window.confirm("Cancel this subscription?")) return;
+    try {
+      await api(`${API_URL}/billing/subscriptions/${subId}`, { method:"DELETE" });
+      await load();
+    } catch (e: any) { setErr(e.message); }
+  };
+
+  const recordUsage = async () => {
+    if (!usageForm.subscriptionId) { setErr("Subscription ID required"); return; }
+    setErr("");
+    try {
+      const r = await api(`${API_URL}/billing/usage`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({
+          subscriptionId: usageForm.subscriptionId,
+          metric: usageForm.metric,
+          quantity: parseFloat(usageForm.quantity) || 1,
+          idempotencyKey: `${Date.now()}-${Math.random()}`,
+        }),
+      });
+      const d = await r.json();
+      setUsageResult(d);
+    } catch (e: any) { setErr(e.message); }
+  };
+
+  const runCycle = async () => {
+    setCycleRunning(true); setCycleResult(null); setErr("");
+    try {
+      const r = await api(`${API_URL}/billing/run-cycle`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ asOfDate: new Date().toISOString() }),
+      });
+      const d = await r.json();
+      setCycleResult(d); await load();
+    } catch (e: any) { setErr(e.message); }
+    setCycleRunning(false);
+  };
+
+  const statusColor = (s: string) =>
+    s === "active" ? J.ok : s === "paid" ? J.ok : s === "past_due" ? J.warn :
+    s === "canceled" ? J.err : s === "open" ? J.accent : J.textSec;
+
+  const fmtMoney = (amt: number, cur = "USD") =>
+    `${cur} ${(amt || 0).toFixed(2)}`;
+
+  const fmtDate = (iso: string) => iso ? iso.slice(0,10) : "—";
+
+  const INP: React.CSSProperties = {
+    width:"100%", padding:"7px 10px", borderRadius:3,
+    background:J.bgCard, border:`1px solid ${J.borderMid}`,
+    color:J.textPri, fontSize:12,
+  };
+
+  const StatCard = ({ label, value, color=J.accent, sub="" }: any) => (
+    <div style={{ padding:"12px 14px", background:J.bgCard, border:`1px solid ${color}22`,
+      borderTop:`2px solid ${color}55`, borderRadius:4, position:"relative" as const }}>
+      <Corners color={color} size={5} />
+      <div style={{ color, fontSize:20, fontFamily:J.fontHeader, fontWeight:700 }}>{value}</div>
+      <div style={{ color:J.textSec, fontSize:10, marginTop:4 }}>{label}</div>
+      {sub && <div style={{ color:J.textDim, fontSize:9, marginTop:2 }}>{sub}</div>}
+    </div>
+  );
+
+  const TAB = (id: typeof tab, label: string, color=J.accent) => (
+    <button onClick={() => setTab(id)} style={{
+      padding:"5px 14px", fontSize:10, fontFamily:J.fontHeader, fontWeight:600,
+      background: tab===id ? J.bgCard : "transparent",
+      border:`1px solid ${tab===id ? color+"66" : J.border}`,
+      borderBottom: tab===id ? `1px solid ${J.bgCard}` : `1px solid ${J.border}`,
+      borderRadius:"3px 3px 0 0", color: tab===id ? color : J.textSec,
+    }}>{label}</button>
+  );
+
+  return (
+    <div style={{ position:"fixed", inset:0, background:`${J.bgDeep}F4`, zIndex:100,
+      display:"flex", flexDirection:"column", fontFamily:J.fontMono }}>
+      {/* Header */}
+      <div style={{ padding:"12px 24px", borderBottom:`1px solid ${J.borderMid}`,
+        background:J.bgPanel, display:"flex", alignItems:"center",
+        justifyContent:"space-between", flexShrink:0 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+          <div style={{ width:22, height:22, borderRadius:"50%", background:J.bgCard,
+            border:`1px solid ${J.gold}55`, display:"flex", alignItems:"center",
+            justifyContent:"center", color:J.gold, fontSize:11 }}>$</div>
+          <div>
+            <div style={{ color:J.gold, fontSize:11, letterSpacing:"0.18em",
+              fontFamily:J.fontHeader, fontWeight:700 }}>SAAS BILLING PLATFORM</div>
+            <div style={{ color:J.textDim, fontSize:8, letterSpacing:"0.1em" }}>
+              SUBSCRIPTIONS · USAGE · INVOICES · PAYMENTS
+            </div>
+          </div>
+          {billingEnabled === false && (
+            <div style={{ padding:"2px 10px", background:J.errDim, border:`1px solid ${J.err}44`,
+              color:J.err, fontSize:9, borderRadius:2, marginLeft:8 }}>
+              ⊗ DISABLED — set SAAS_BILLING_ENABLED=true
+            </div>
+          )}
+          {billingEnabled === true && (
+            <div style={{ padding:"2px 10px", background:`${J.ok}0C`, border:`1px solid ${J.ok}44`,
+              color:J.ok, fontSize:9, borderRadius:2, marginLeft:8 }}>● ENABLED</div>
+          )}
+        </div>
+        <button onClick={onClose} style={{ background:"none", border:`1px solid ${J.borderMid}`,
+          color:J.textSec, padding:"4px 14px", borderRadius:2, fontSize:11 }}>✕</button>
+      </div>
+
+      {/* Disabled state */}
+      {billingEnabled === false && (
+        <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center",
+          flexDirection:"column", gap:16, color:J.textDim }}>
+          <div style={{ fontSize:36, opacity:0.3 }}>$</div>
+          <div style={{ fontSize:13, color:J.textSec }}>SaaS Billing is disabled</div>
+          <div style={{ fontSize:11, color:J.textDim, textAlign:"center", maxWidth:420, lineHeight:1.8 }}>
+            Set <span style={{ color:J.accent }}>SAAS_BILLING_ENABLED=true</span> in your environment
+            and restart the server to enable the billing platform.
+          </div>
+          <div style={{ padding:"10px 20px", background:J.bgCard, border:`1px solid ${J.borderMid}`,
+            borderRadius:4, fontFamily:"'Share Tech Mono',monospace", fontSize:11, color:J.accent }}>
+            export SAAS_BILLING_ENABLED=true
+          </div>
+        </div>
+      )}
+
+      {/* Loading */}
+      {loading && billingEnabled !== false && (
+        <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center",
+          color:J.textSec, fontSize:12, animation:"hud-pulse 1.5s infinite" }}>
+          Loading billing data…
+        </div>
+      )}
+
+      {/* Main content */}
+      {!loading && billingEnabled && (
+        <>
+          {/* Tabs */}
+          <div style={{ padding:"0 24px", background:J.bgPanel, display:"flex", gap:2,
+            borderBottom:`1px solid ${J.border}`, flexShrink:0 }}>
+            {TAB("overview", "⊞ OVERVIEW",    J.gold)}
+            {TAB("plans",    "◈ PLANS",        J.accent)}
+            {TAB("usage",    "⬡ USAGE",        J.react)}
+            {TAB("invoices", "⊕ INVOICES",     J.ok)}
+            {isAdmin && TAB("admin", "⚙ ADMIN", J.err)}
+          </div>
+
+          {err && <div style={{ margin:"0 24px 0", padding:"6px 12px", background:J.errDim,
+            border:`1px solid ${J.err}33`, color:J.err, fontSize:11 }}>⚠ {err}</div>}
+
+          <div style={{ flex:1, overflowY:"auto", padding:"20px 24px" }}>
+
+            {/* ── OVERVIEW ── */}
+            {tab === "overview" && (
+              <div>
+                {/* Stats row */}
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, marginBottom:20 }}>
+                  <StatCard label="Active Subscriptions"
+                    value={subs.filter(s=>s.status==="active").length} color={J.ok} />
+                  <StatCard label="Open Invoices"
+                    value={invoices.filter(i=>i.status==="open").length} color={J.accent} />
+                  <StatCard label="Total Invoiced"
+                    value={fmtMoney(invoices.reduce((s,i)=>s+i.total,0))} color={J.gold} />
+                  <StatCard label="Paid Invoices"
+                    value={invoices.filter(i=>i.status==="paid").length} color={J.react} />
+                </div>
+
+                {/* Customer profile */}
+                {!customer ? (
+                  <div style={{ padding:20, background:J.bgCard, border:`1px solid ${J.borderMid}`,
+                    borderTop:`2px solid ${J.gold}55`, borderRadius:4, marginBottom:16 }}>
+                    <Lbl c={J.gold}>⊞ CREATE BILLING PROFILE</Lbl>
+                    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginTop:10 }}>
+                      {[["name","Full Name","John Doe"],["email","Email","john@example.com"]].map(([f,l,p]) => (
+                        <div key={f}>
+                          <Lbl>{l}</Lbl>
+                          <input value={(custForm as any)[f]} placeholder={p}
+                            onChange={e => setCustForm(cf => ({...cf, [f]: e.target.value}))}
+                            style={{...INP, marginTop:5}} />
+                        </div>
+                      ))}
+                      <div>
+                        <Lbl>Country</Lbl>
+                        <select value={custForm.country}
+                          onChange={e => setCustForm(cf => ({...cf, country:e.target.value}))}
+                          style={{...INP, marginTop:5}}>
+                          {["US","GB","DE","FR","CA","AU","JP","SG"].map(c=>(
+                            <option key={c} value={c}>{c}</option>))}
+                        </select>
+                      </div>
+                      <div>
+                        <Lbl>Currency</Lbl>
+                        <select value={custForm.currency}
+                          onChange={e => setCustForm(cf => ({...cf, currency:e.target.value}))}
+                          style={{...INP, marginTop:5}}>
+                          {["USD","EUR","GBP","CAD","AUD","JPY"].map(c=>(
+                            <option key={c} value={c}>{c}</option>))}
+                        </select>
+                      </div>
+                    </div>
+                    <button onClick={createCustomer} disabled={creating} style={{
+                      marginTop:12, padding:"8px 22px", background:`${J.gold}0C`,
+                      border:`1px solid ${J.gold}`, color:J.gold, borderRadius:3,
+                      fontSize:11, letterSpacing:"0.1em" }}>
+                      {creating ? "CREATING…" : createdOk ? "✓ CREATED" : "⊞ CREATE BILLING PROFILE"}
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ padding:14, background:J.bgCard, border:`1px solid ${J.borderMid}`,
+                    borderLeft:`3px solid ${J.gold}`, borderRadius:4, marginBottom:16,
+                    display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                    <div>
+                      <div style={{ color:J.gold, fontSize:12, fontFamily:J.fontHeader, fontWeight:700 }}>
+                        {customer.name}
+                      </div>
+                      <div style={{ color:J.textSec, fontSize:10, marginTop:3 }}>
+                        {customer.email} · {customer.country} · {customer.currency}
+                      </div>
+                      <div style={{ color:J.textDim, fontSize:9, marginTop:2 }}>
+                        ID: {customer.customer_id.slice(0,16)}…
+                      </div>
+                    </div>
+                    <Chip label={customer.status.toUpperCase()} color={statusColor(customer.status)} />
+                  </div>
+                )}
+
+                {/* Active subscriptions */}
+                {subs.length > 0 && (
+                  <div>
+                    <Lbl c={J.accent}>ACTIVE SUBSCRIPTIONS</Lbl>
+                    <div style={{ marginTop:8, display:"flex", flexDirection:"column", gap:6 }}>
+                      {subs.map(s => {
+                        const plan = plans.find(p => p.plan_id === s.plan_id);
+                        return (
+                          <div key={s.subscription_id} style={{ padding:"10px 14px",
+                            background:J.bgCard, border:`1px solid ${J.borderMid}`,
+                            borderLeft:`3px solid ${statusColor(s.status)}`,
+                            borderRadius:3, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                            <div>
+                              <div style={{ color:J.textPri, fontSize:12 }}>
+                                {plan?.name || s.plan_id}
+                                <Chip label={s.status.toUpperCase()} color={statusColor(s.status)} />
+                              </div>
+                              <div style={{ color:J.textDim, fontSize:9, marginTop:3 }}>
+                                {fmtDate(s.current_period_start)} → {fmtDate(s.current_period_end)}
+                              </div>
+                            </div>
+                            {s.status === "active" && (
+                              <button onClick={() => cancelSub(s.subscription_id)} style={{
+                                padding:"3px 10px", background:J.errDim,
+                                border:`1px solid ${J.err}44`, color:"#FF9999",
+                                borderRadius:2, fontSize:9 }}>CANCEL</button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── PLANS ── */}
+            {tab === "plans" && (
+              <div>
+                <div style={{ color:J.textSec, fontSize:11, marginBottom:16, lineHeight:1.7 }}>
+                  Choose a plan to subscribe. Plans are billed monthly unless noted.
+                  Metered usage is charged in addition to the base price.
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14 }}>
+                  {plans.map(plan => {
+                    const active = subs.find(s => s.plan_id === plan.plan_id && s.status === "active");
+                    const features = (() => { try { return JSON.parse(plan.features); } catch { return []; } })();
+                    const rates    = (() => { try { return JSON.parse(plan.metered_rates); } catch { return []; } })();
+                    const color    = plan.base_price === 0 ? J.textSec : plan.base_price < 50 ? J.accent : J.gold;
+                    return (
+                      <div key={plan.plan_id} style={{ padding:16, background:J.bgCard,
+                        border:`1px solid ${active ? color : J.borderMid}`,
+                        borderTop:`3px solid ${color}`, borderRadius:4, position:"relative" as const }}>
+                        {active && <Corners color={color} size={7} />}
+                        <div style={{ color, fontSize:14, fontFamily:J.fontHeader, fontWeight:700 }}>
+                          {plan.name}
+                        </div>
+                        <div style={{ color:J.textPri, fontSize:22, fontFamily:J.fontHeader,
+                          fontWeight:700, marginTop:8 }}>
+                          {fmtMoney(plan.base_price, plan.currency)}
+                          <span style={{ color:J.textSec, fontSize:11 }}>/{plan.billing_interval}</span>
+                        </div>
+                        {rates.length > 0 && (
+                          <div style={{ color:J.textDim, fontSize:9, marginTop:4 }}>
+                            {rates.map((r: any) => (
+                              <div key={r.metric}>+ {r.unitPrice || r.unit_price} / {r.metric}</div>
+                            ))}
+                          </div>
+                        )}
+                        <div style={{ marginTop:12, borderTop:`1px solid ${J.border}`, paddingTop:10 }}>
+                          {features.map((f: string) => (
+                            <div key={f} style={{ color:J.textSec, fontSize:10, marginBottom:4 }}>
+                              ✓ {f}
+                            </div>
+                          ))}
+                        </div>
+                        <button
+                          onClick={() => active ? cancelSub(active.subscription_id) : subscribe(plan.plan_id)}
+                          disabled={!customer}
+                          style={{ marginTop:12, width:"100%", padding:"8px",
+                            background: active ? J.errDim : `${color}0C`,
+                            border:`1px solid ${active ? J.err+"44" : color+"66"}`,
+                            color: active ? "#FF9999" : color,
+                            borderRadius:3, fontSize:10, letterSpacing:"0.08em" }}>
+                          {!customer ? "Create billing profile first" :
+                           active    ? "CANCEL SUBSCRIPTION"        : "SUBSCRIBE"}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* ── USAGE ── */}
+            {tab === "usage" && (
+              <div>
+                <div style={{ padding:16, background:J.bgCard, border:`1px solid ${J.borderMid}`,
+                  borderLeft:`3px solid ${J.react}`, borderRadius:4, marginBottom:20 }}>
+                  <Lbl c={J.react}>⬡ RECORD USAGE EVENT</Lbl>
+                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:10, marginTop:10 }}>
+                    <div>
+                      <Lbl>Subscription ID</Lbl>
+                      <input value={usageForm.subscriptionId}
+                        onChange={e => setUsageForm(u=>({...u,subscriptionId:e.target.value}))}
+                        placeholder="sub-uuid" style={{...INP,marginTop:5}} />
+                    </div>
+                    <div>
+                      <Lbl>Metric</Lbl>
+                      <input value={usageForm.metric}
+                        onChange={e => setUsageForm(u=>({...u,metric:e.target.value}))}
+                        placeholder="api_calls" style={{...INP,marginTop:5}} />
+                    </div>
+                    <div>
+                      <Lbl>Quantity</Lbl>
+                      <input type="number" value={usageForm.quantity}
+                        onChange={e => setUsageForm(u=>({...u,quantity:e.target.value}))}
+                        style={{...INP,marginTop:5}} />
+                    </div>
+                  </div>
+                  <button onClick={recordUsage} style={{ marginTop:10, padding:"7px 20px",
+                    background:`${J.react}0C`, border:`1px solid ${J.react}55`,
+                    color:J.react, borderRadius:3, fontSize:10, letterSpacing:"0.08em" }}>
+                    ⬡ RECORD USAGE
+                  </button>
+                  {usageResult && (
+                    <div style={{ marginTop:10, padding:"8px 12px", background:`${J.ok}08`,
+                      border:`1px solid ${J.ok}33`, borderRadius:3, color:J.ok, fontSize:10 }}>
+                      ✓ Event recorded: {usageResult.eventId}
+                      {usageResult.duplicate && " (duplicate — idempotent)"}
+                    </div>
+                  )}
+                </div>
+                {subs.length > 0 && (
+                  <div>
+                    <Lbl c={J.textSec}>YOUR SUBSCRIPTIONS</Lbl>
+                    {subs.map(s => (
+                      <div key={s.subscription_id} style={{ marginTop:6, padding:"8px 12px",
+                        background:J.bgCard, border:`1px solid ${J.border}`, borderRadius:3 }}>
+                        <div style={{ display:"flex", justifyContent:"space-between" }}>
+                          <span style={{ color:J.textSec, fontSize:10 }}>{s.plan_id}</span>
+                          <Chip label={s.status} color={statusColor(s.status)} />
+                        </div>
+                        <div style={{ color:J.textDim, fontSize:9, marginTop:3,
+                          fontFamily:"'Share Tech Mono',monospace" }}>
+                          {s.subscription_id}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── INVOICES ── */}
+            {tab === "invoices" && (
+              <div>
+                {invoices.length === 0 ? (
+                  <div style={{ textAlign:"center", padding:40, color:J.textDim }}>
+                    No invoices yet. Subscribe to a plan and run a billing cycle.
+                  </div>
+                ) : (
+                  <div>
+                    <div style={{ display:"grid",
+                      gridTemplateColumns:"120px 100px 100px 80px 100px 80px",
+                      padding:"4px 12px", background:J.bgCard,
+                      borderRadius:"3px 3px 0 0", borderBottom:`1px solid ${J.border}` }}>
+                      {["ISSUED","PERIOD","TOTAL","TAX","STATUS","DUE"].map(h=>(
+                        <Lbl key={h} c={J.textDim}>{h}</Lbl>
+                      ))}
+                    </div>
+                    <div style={{ border:`1px solid ${J.border}`, borderRadius:"0 0 3px 3px" }}>
+                      {invoices.map((inv,i) => (
+                        <div key={inv.invoice_id} style={{
+                          display:"grid",
+                          gridTemplateColumns:"120px 100px 100px 80px 100px 80px",
+                          padding:"8px 12px", gap:0,
+                          borderBottom: i<invoices.length-1 ? `1px solid ${J.border}` : "none",
+                          background: i%2===0 ? "transparent" : `${J.bgCard}66`,
+                        }}>
+                          <span style={{color:J.textSec,fontSize:10}}>{fmtDate(inv.issued_at)}</span>
+                          <span style={{color:J.textDim,fontSize:9}}>
+                            {fmtDate(inv.period_start)}→{fmtDate(inv.period_end)}
+                          </span>
+                          <span style={{color:J.textPri,fontSize:11,fontFamily:J.fontHeader,fontWeight:600}}>
+                            {fmtMoney(inv.total, inv.currency)}
+                          </span>
+                          <span style={{color:J.textSec,fontSize:10}}>
+                            {fmtMoney(inv.tax_amount || 0, inv.currency)}
+                          </span>
+                          <span>
+                            <Chip label={inv.status.toUpperCase()} color={statusColor(inv.status)} />
+                          </span>
+                          <span style={{color:J.textDim,fontSize:9}}>{fmtDate(inv.due_at)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── ADMIN ── */}
+            {tab === "admin" && isAdmin && (
+              <div>
+                {/* Circuit breaker health */}
+                {health && (
+                  <div style={{ marginBottom:20 }}>
+                    <Lbl c={J.err}>⚙ COMPONENT HEALTH — CIRCUIT BREAKERS</Lbl>
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8, marginTop:10 }}>
+                      {Object.entries(health.components || {}).map(([name, s]: any) => (
+                        <div key={name} style={{ padding:"8px 12px", background:J.bgCard,
+                          border:`1px solid ${s.status==="ok" ? J.ok+"22" : J.err+"44"}`,
+                          borderLeft:`3px solid ${s.status==="ok" ? J.ok : J.err}`,
+                          borderRadius:3 }}>
+                          <div style={{ color:s.status==="ok"?J.ok:J.err, fontSize:9, marginBottom:2 }}>
+                            {s.status==="ok"?"●":"○"} {name.replace(/([A-Z])/g," $1").trim()}
+                          </div>
+                          {s.circuit_open && (
+                            <div style={{ color:J.warn, fontSize:8 }}>
+                              CIRCUIT OPEN · failures={s.failure_count}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ marginTop:8, display:"flex", gap:8 }}>
+                      <Chip label={`Overall: ${health.overall?.toUpperCase()}`}
+                        color={health.overall==="ok"?J.ok:J.warn} />
+                      <Chip label={`Gateway: ${health.gateway}`} color={J.accent} />
+                    </div>
+                  </div>
+                )}
+
+                {/* Run billing cycle */}
+                <div style={{ padding:16, background:J.bgCard, border:`1px solid ${J.borderMid}`,
+                  borderTop:`2px solid ${J.err}55`, borderRadius:4, marginBottom:16 }}>
+                  <Lbl c={J.err}>⚙ RUN BILLING CYCLE</Lbl>
+                  <div style={{ color:J.textSec, fontSize:10, marginTop:6, marginBottom:12, lineHeight:1.7 }}>
+                    Processes all subscriptions due for renewal: aggregates usage, generates invoices,
+                    charges payment gateway, handles dunning on failures, sends notifications.
+                  </div>
+                  <button onClick={runCycle} disabled={cycleRunning} style={{
+                    padding:"8px 24px", background:`${J.err}0C`,
+                    border:`1px solid ${J.err}55`, color:J.err, borderRadius:3,
+                    fontSize:11, letterSpacing:"0.1em" }}>
+                    {cycleRunning ? "RUNNING CYCLE…" : "⚙ RUN BILLING CYCLE NOW"}
+                  </button>
+                  {cycleResult && (
+                    <div style={{ marginTop:12, padding:"10px 14px", background:`${J.ok}08`,
+                      border:`1px solid ${J.ok}33`, borderRadius:3 }}>
+                      <div style={{ color:J.ok, fontSize:10, marginBottom:6 }}>✓ Cycle complete</div>
+                      <div style={{ fontSize:10, color:J.textSec }}>
+                        Processed: {cycleResult.processed?.length || 0}
+                        {" · "}
+                        Failures: {cycleResult.failures?.length || 0}
+                      </div>
+                      {(cycleResult.processed || []).map((p: any, i: number) => (
+                        <div key={i} style={{ color:J.textSec, fontSize:9, marginTop:3 }}>
+                          ▸ {p.subscriptionId?.slice(0,16)}… — {p.status}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* FX converter */}
+                <FxWidget />
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+// Small FX converter widget for admin tab
+const FxWidget = () => {
+  const [from, setFrom] = useState("USD");
+  const [to,   setTo]   = useState("EUR");
+  const [amt,  setAmt]  = useState("100");
+  const [result, setResult] = useState<any>(null);
+  const convert = async () => {
+    const r = await api(`${API_URL}/billing/fx?from_currency=${from}&to_currency=${to}&amount=${amt}`);
+    const d = await r.json();
+    setResult(d);
+  };
+  const INP2: React.CSSProperties = { padding:"5px 8px", background:J.bgCard,
+    border:`1px solid ${J.borderMid}`, color:J.textPri, fontSize:11, borderRadius:2 };
+  return (
+    <div style={{ padding:14, background:J.bgCard, border:`1px solid ${J.borderMid}`,
+      borderRadius:4 }}>
+      <Lbl c={J.accent}>⊕ FX CURRENCY CONVERTER</Lbl>
+      <div style={{ display:"flex", gap:8, marginTop:8, alignItems:"center" }}>
+        <input value={amt} onChange={e=>setAmt(e.target.value)} style={{...INP2,width:80}} />
+        <select value={from} onChange={e=>setFrom(e.target.value)} style={INP2}>
+          {["USD","EUR","GBP","CAD","AUD","JPY","SGD"].map(c=><option key={c}>{c}</option>)}
+        </select>
+        <span style={{color:J.textDim}}>→</span>
+        <select value={to} onChange={e=>setTo(e.target.value)} style={INP2}>
+          {["USD","EUR","GBP","CAD","AUD","JPY","SGD"].map(c=><option key={c}>{c}</option>)}
+        </select>
+        <button onClick={convert} style={{ padding:"5px 12px", background:`${J.accent}0C`,
+          border:`1px solid ${J.accent}55`, color:J.accent, borderRadius:2, fontSize:10 }}>
+          CONVERT
+        </button>
+        {result && !result.code && (
+          <span style={{ color:J.accent, fontSize:12, fontFamily:J.fontHeader, fontWeight:700 }}>
+            {result.convertedAmount?.toFixed(4)} {to}
+            <span style={{ color:J.textDim, fontSize:9, marginLeft:6 }}>
+              @{result.rate?.toFixed(6)} ({result.source})
+            </span>
+          </span>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ─── Login Screen ─────────────────────────────────────────────────────────────
+const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => void; personas: PersonaData[] }) => {
+  const [user,     setUser]     = useState("");
+  const [pass,     setPass]     = useState("");
+  const [err,      setErr]      = useState("");
+  const [loading,  setLoading]  = useState(false);
+  const [shaking,  setShaking]  = useState(false);
+  const [persona,  setPersona]  = useState<string>(() => loadPersona());
+
+  // Setup wizard state
+  const [mode,        setMode]        = useState<"checking"|"login"|"setup">("checking");
+  const [setupUser,   setSetupUser]   = useState("");
+  const [setupPass,   setSetupPass]   = useState("");
+  const [setupPass2,  setSetupPass2]  = useState("");
+  const [setupLoading,setSetupLoading]= useState(false);
+
+  // ── Check first-boot status on mount ──────────────────────────────────────
+  useEffect(() => {
+    fetch(`${API_URL}/system/setup-status`)
+      .then(r => r.json())
+      .then(d => setMode(d.setup_required ? "setup" : "login"))
+      .catch(() => setMode("login"));   // if endpoint unreachable, fall to login
+  }, []);
+
+  const switchPersona = (id: string, themeData?: Partial<Theme>) => {
+    applyTheme(id, themeData); savePersona(id); setPersona(id);
+  };
+
+  // ── Login ──────────────────────────────────────────────────────────────────
   const go = async () => {
     const u = user.trim().toLowerCase();
     if (!u) { setErr("Operator ID is required."); return; }
     setLoading(true); setErr("");
     try {
       const hashedPass = await sha256hex(pass);
-      const res = await fetch(`${API_URL}/auth/login`, {
+      const res  = await fetch(`${API_URL}/auth/login`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: u, password: hashedPass }),
       });
@@ -3160,55 +4426,69 @@ const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => v
         storeAuth(data.access_token, data.username || u);
         onAuth(data.username || u, persona);
       } else if (res.status === 401) {
-        setErr(data.detail || "Invalid credentials. Default: admin / admin123");
+        setErr(data.detail || "Invalid credentials.");
         setShaking(true); setTimeout(() => setShaking(false), 500);
-      } else if (res.status === 405 || res.status === 404) {
-        storeAuth(`dev-${u}-${Date.now()}`, u);
-        onAuth(u, persona);
       } else {
         setErr(data.detail || `Server error ${res.status}`);
         setShaking(true); setTimeout(() => setShaking(false), 500);
       }
     } catch {
-      storeAuth(`offline-${u}-${Date.now()}`, u);
-      onAuth(u, persona);
+      setErr("Connection failed. Verify the backend is running.");
+      setShaking(true); setTimeout(() => setShaking(false), 500);
     }
     setLoading(false);
   };
 
-  const register = async () => {
-    const u = regUser.trim().toLowerCase();
-    if (!u || !regPass) { setErr("Username and password required."); return; }
-    if (regPass !== regPass2) { setErr("Passwords do not match."); return; }
-    if (regPass.length < 6) { setErr("Password must be at least 6 characters."); return; }
-    setRegLoading(true); setErr("");
+  // ── First-boot setup ───────────────────────────────────────────────────────
+  const runSetup = async () => {
+    const u = setupUser.trim().toLowerCase();
+    if (!u)                                       { setErr("Username is required.");                                return; }
+    if (!setupPass)                               { setErr("Password is required.");                               return; }
+    if (setupPass !== setupPass2)                 { setErr("Passwords do not match.");                             return; }
+    if (setupPass.length < 8)                    { setErr("Password must be at least 8 characters.");             return; }
+    if (!/^[a-z0-9_\-]{2,32}$/.test(u))         { setErr("Username: 2-32 chars, a-z 0-9 _ -");                  return; }
+
+    setSetupLoading(true); setErr("");
     try {
-      const hashedRegPass = await sha256hex(regPass);
-      const res = await fetch(`${API_URL}/auth/register`, {
+      const hashedPass = await sha256hex(setupPass);
+      const res  = await fetch(`${API_URL}/system/setup`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: u, password: hashedRegPass }),
+        body: JSON.stringify({
+          username:         u,
+          password:         hashedPass,
+          confirm_password: hashedPass,
+        }),
       });
       const data = await res.json().catch(() => ({}));
-      if (res.ok) {
-        setUser(u); setPass(regPass);
-        setMode("login");
-        setErr("");
-        // auto-login after register
-        const res2 = await fetch(`${API_URL}/auth/login`, {
+      if (res.ok && data.success) {
+        // Auto-login immediately after setup
+        const res2  = await fetch(`${API_URL}/auth/login`, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username: u, password: hashedRegPass }),
+          body: JSON.stringify({ username: u, password: hashedPass }),
         });
         const data2 = await res2.json().catch(() => ({}));
         if (res2.ok && data2.access_token) {
           storeAuth(data2.access_token, data2.username || u);
           onAuth(data2.username || u, persona);
+        } else {
+          // Setup succeeded but auto-login failed — drop to login screen
+          setUser(u);
+          setMode("login");
+          setErr("Admin account created. Please log in.");
         }
+      } else if (res.status === 409) {
+        // Already set up — switch to login
+        setMode("login");
+        setErr("Setup already complete. Please log in.");
       } else {
-        setErr(data.detail || `Registration failed: ${res.status}`);
+        setErr(data.detail || `Setup failed (${res.status})`);
         setShaking(true); setTimeout(() => setShaking(false), 500);
       }
-    } catch (e: any) { setErr(`Error: ${e.message}`); }
-    setRegLoading(false);
+    } catch {
+      setErr("Connection failed. Verify the backend is running.");
+      setShaking(true); setTimeout(() => setShaking(false), 500);
+    }
+    setSetupLoading(false);
   };
 
   const inp: React.CSSProperties = {
@@ -3217,150 +4497,139 @@ const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => v
     color: J.textPri, fontSize: 13, boxSizing: "border-box",
   };
 
+  // ── Shared chrome ──────────────────────────────────────────────────────────
   return (
     <div style={{ minHeight: "100vh", background: J.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
       <style>{buildGlobalCSS(persona)}</style>
-
-      {/* Ambient scan line */}
       <div style={{ position: "fixed", left: 0, right: 0, height: 1, background: `linear-gradient(90deg,transparent,${J.accent}33,transparent)`, animation: "hud-scan 6s linear infinite", pointerEvents: "none", zIndex: 9999 }} />
-
-      {/* Background grid */}
-      <div style={{
-        position: "fixed", inset: 0, pointerEvents: "none",
-        backgroundImage: `linear-gradient(${J.border} 1px, transparent 1px), linear-gradient(90deg, ${J.border} 1px, transparent 1px)`,
-        backgroundSize: "40px 40px", opacity: 0.4,
-      }} />
+      <div style={{ position: "fixed", inset: 0, pointerEvents: "none", backgroundImage: `linear-gradient(${J.border} 1px, transparent 1px), linear-gradient(90deg, ${J.border} 1px, transparent 1px)`, backgroundSize: "40px 40px", opacity: 0.4 }} />
 
       <div style={{
         width: 400, padding: "44px 40px", position: "relative",
-        background: J.bgPanel,
-        border: `1px solid ${J.borderMid}`,
-        borderTop: `2px solid ${J.accent}55`,
-        borderRadius: 6,
+        background: J.bgPanel, border: `1px solid ${J.borderMid}`,
+        borderTop: `2px solid ${J.accent}55`, borderRadius: 6,
         animation: shaking ? "hud-shake 0.4s ease" : "none",
         boxShadow: `0 0 60px ${J.accentGlow}, 0 0 120px ${J.bgDeep}`,
       }}>
         <Corners color={J.accent} size={12} />
 
         {/* Arc reactor header */}
-        <div style={{ textAlign: "center", marginBottom: 36 }}>
+        <div style={{ textAlign: "center", marginBottom: 30 }}>
           <div style={{ position: "relative", width: 64, height: 64, margin: "0 auto 18px" }}>
-            {/* Spinning rings */}
-            <div className="arc-ring" style={{
-              position: "absolute", inset: 0, borderRadius: "50%",
-              border: `1px solid ${J.accent}33`, borderTop: `1px solid ${J.accent}88`,
-            }} />
-            <div className="arc-ring-slow" style={{
-              position: "absolute", inset: 4, borderRadius: "50%",
-              border: `1px solid ${J.accent}22`, borderRight: `1px solid ${J.accent}66`,
-            }} />
-            <div style={{
-              position: "absolute", inset: 0, borderRadius: "50%",
-              background: `radial-gradient(circle, ${J.accent}25 0%, ${J.bgCard} 65%)`,
-              border: `1px solid ${J.accent}66`,
-              boxShadow: `0 0 24px ${J.accentGlow2}, inset 0 0 16px ${J.accentGlow}`,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 24, color: J.accent,
-              animation: "hud-glow 3s ease-in-out infinite",
-            }}>{J.glyph}</div>
+            <div className="arc-ring" style={{ position:"absolute",inset:0,borderRadius:"50%",border:`1px solid ${J.accent}33`,borderTop:`1px solid ${J.accent}88` }} />
+            <div className="arc-ring-slow" style={{ position:"absolute",inset:4,borderRadius:"50%",border:`1px solid ${J.accent}22`,borderRight:`1px solid ${J.accent}66` }} />
+            <div style={{ position:"absolute",inset:0,borderRadius:"50%",background:`radial-gradient(circle, ${J.accent}25 0%, ${J.bgCard} 65%)`,border:`1px solid ${J.accent}66`,boxShadow:`0 0 24px ${J.accentGlow2}, inset 0 0 16px ${J.accentGlow}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,color:J.accent,animation:"hud-glow 3s ease-in-out infinite" }}>{J.glyph}</div>
           </div>
-          <div data-text={J.wordmark} className={persona !== "jarvis" ? "persona-glitch" : ""}
-            style={{ color: J.accent, fontSize: 22, letterSpacing: "0.22em", fontFamily: J.fontHeader, fontWeight: 700 }}>{J.wordmark}</div>
-          <div style={{ color: J.textDim, fontSize: 9, marginTop: 5, letterSpacing: "0.28em", fontFamily: J.fontHeader }}>{J.subtitle}</div>
+          <div data-text={J.wordmark} className={persona !== "jarvis" ? "persona-glitch" : ""} style={{ color:J.accent,fontSize:22,letterSpacing:"0.22em",fontFamily:J.fontHeader,fontWeight:700 }}>{J.wordmark}</div>
+          <div style={{ color:J.textDim,fontSize:9,marginTop:5,letterSpacing:"0.28em",fontFamily:J.fontHeader }}>{J.subtitle}</div>
           <Divider color={J.borderMid} />
-          <div style={{ color: J.textDim, fontSize: 8, marginTop: 6, letterSpacing: "0.2em" }}>{J.tagline}</div>
+          {mode === "setup" && (
+            <div style={{ color:J.warn,fontSize:9,marginTop:6,letterSpacing:"0.15em",fontFamily:J.fontHeader }}>
+              ◈ FIRST BOOT — SETUP REQUIRED
+            </div>
+          )}
+          {mode === "login" && (
+            <div style={{ color:J.textDim,fontSize:8,marginTop:6,letterSpacing:"0.2em" }}>{J.tagline}</div>
+          )}
+          {mode === "checking" && (
+            <div style={{ color:J.textDim,fontSize:8,marginTop:6,letterSpacing:"0.2em",animation:"hud-pulse 1s infinite" }}>INITIALISING…</div>
+          )}
         </div>
 
-        {/* ── Persona Selector ── */}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 5, justifyContent: "center", marginBottom: 20 }}>
-          {(personas.length > 0 ? personas : _personaRegistry).map(p => {
-            const color = (p.theme as any)?.accent || J.accent;
-            const glyph = (p.theme as any)?.glyph || p.icon || "◈";
-            return (
-              <button key={p.id} onClick={() => switchPersona(p.id, p.theme)}
-                title={p.tagline} style={{
-                  flex: "0 1 calc(33% - 4px)", minWidth: 70,
-                  padding: "7px 4px", borderRadius: 3,
-                  background: persona === p.id ? `${color}15` : J.bgCard,
-                  border: `1px solid ${persona === p.id ? color : J.border}`,
-                  color: persona === p.id ? color : J.textDim,
-                  fontSize: 9, letterSpacing: "0.06em", fontFamily: J.fontHeader, fontWeight: 600,
-                  display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
+        {/* Persona selector — shown on login only */}
+        {mode === "login" && (
+          <div style={{ display:"flex",flexWrap:"wrap",gap:5,justifyContent:"center",marginBottom:20 }}>
+            {(personas.length > 0 ? personas : _personaRegistry).map(p => {
+              const color = (p.theme as any)?.accent || J.accent;
+              const glyph = (p.theme as any)?.glyph || p.icon || "◈";
+              return (
+                <button key={p.id} onClick={() => switchPersona(p.id, p.theme)} title={p.tagline} style={{
+                  flex:"0 1 calc(33% - 4px)",minWidth:70,padding:"7px 4px",borderRadius:3,
+                  background: persona===p.id ? `${color}15` : J.bgCard,
+                  border: `1px solid ${persona===p.id ? color : J.border}`,
+                  color: persona===p.id ? color : J.textDim,
+                  fontSize:9,letterSpacing:"0.06em",fontFamily:J.fontHeader,fontWeight:600,
+                  display:"flex",flexDirection:"column",alignItems:"center",gap:3,
                 }}>
-                <span style={{ fontSize: 13 }}>{glyph}</span>
-                <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"100%" }}>{p.name}</span>
-              </button>
-            );
-          })}
-        </div>
-
-        <div style={{ marginBottom: 14 }}>
-          <Lbl>Operator ID</Lbl>
-          <input value={user} onChange={e => { setUser(e.target.value); setErr(""); }}
-            onKeyDown={e => e.key === "Enter" && go()} autoFocus style={{ ...inp, marginTop: 6 }} />
-        </div>
-        <div style={{ marginBottom: 22 }}>
-          <Lbl>Access Code</Lbl>
-          <input type="password" value={pass} onChange={e => { setPass(e.target.value); setErr(""); }}
-            onKeyDown={e => e.key === "Enter" && go()} style={{ ...inp, marginTop: 6 }} />
-        </div>
-
-        {err && (
-          <div style={{ color: J.err, fontSize: 11, marginBottom: 14, padding: "7px 12px", background: J.errDim, border: `1px solid ${J.err}33`, borderRadius: 2 }}>
-            ✕ {err}
-            {err.includes("admin123") && (
-              <div style={{ color: J.textSec, fontSize: 10, marginTop: 6 }}>
-                💡 Tip: First boot default is <span style={{ color: J.accent }}>admin</span> / <span style={{ color: J.accent }}>admin123</span>
-                {" — or "}
-                <button onClick={() => { setErr(""); setMode("register"); }} style={{ background: "none", border: "none", color: J.accent, cursor: "pointer", textDecoration: "underline", fontSize: 10 }}>create a new account</button>
-              </div>
-            )}
+                  <span style={{ fontSize:13 }}>{glyph}</span>
+                  <span style={{ overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:"100%" }}>{p.name}</span>
+                </button>
+              );
+            })}
           </div>
         )}
 
-        {mode === "login" ? (
+        {/* Error banner */}
+        {err && (
+          <div style={{ color:J.err,fontSize:11,marginBottom:14,padding:"7px 12px",background:J.errDim,border:`1px solid ${J.err}33`,borderRadius:2 }}>
+            ✕ {err}
+          </div>
+        )}
+
+        {/* ── LOGIN FORM ── */}
+        {mode === "login" && (
           <>
+            <div style={{ marginBottom:14 }}>
+              <Lbl>Operator ID</Lbl>
+              <input value={user} onChange={e => { setUser(e.target.value); setErr(""); }}
+                onKeyDown={e => e.key === "Enter" && go()} autoFocus style={{ ...inp, marginTop:6 }} />
+            </div>
+            <div style={{ marginBottom:22 }}>
+              <Lbl>Access Code</Lbl>
+              <input type="password" value={pass} onChange={e => { setPass(e.target.value); setErr(""); }}
+                onKeyDown={e => e.key === "Enter" && go()} style={{ ...inp, marginTop:6 }} />
+            </div>
             <button onClick={go} disabled={loading} style={{
-              width: "100%", padding: "11px", borderRadius: 3,
+              width:"100%", padding:"11px", borderRadius:3,
               background: loading ? J.bgCard : `${J.accent}0C`,
               border: `1px solid ${loading ? J.borderMid : J.accent}`,
               color: loading ? J.textSec : J.accent,
-              fontSize: 12, fontWeight: "bold", letterSpacing: "0.18em",
-              transition: "all 0.2s", fontFamily: J.fontHeader,
+              fontSize:12, fontWeight:"bold", letterSpacing:"0.18em", fontFamily:J.fontHeader,
             }}>{loading ? `${J.glyph} AUTHENTICATING…` : "▶ INITIALIZE SEQUENCE"}</button>
-            <div style={{ textAlign: "center", marginTop: 12 }}>
-              <button onClick={() => { setMode("register"); setErr(""); }} style={{
-                background: "none", border: "none", color: J.textSec, cursor: "pointer", fontSize: 10,
-              }}>No account? Register →</button>
-            </div>
           </>
-        ) : (
-          <div>
-            <div style={{ color: J.accent, fontSize: 10, letterSpacing: "0.12em", marginBottom: 12, fontFamily: J.fontHeader }}>◈ CREATE OPERATOR ACCOUNT</div>
-            <div style={{ marginBottom: 10 }}>
-              <Lbl>Username</Lbl>
-              <input value={regUser} onChange={e => setRegUser(e.target.value)} style={{ ...inp, marginTop: 5 }} placeholder="Choose a username" />
+        )}
+
+        {/* ── FIRST-BOOT SETUP WIZARD ── */}
+        {mode === "setup" && (
+          <>
+            <div style={{ color:J.textSec,fontSize:11,marginBottom:18,lineHeight:1.6 }}>
+              No accounts exist yet. Create the <span style={{ color:J.accent }}>administrator</span> account
+              to complete setup. Additional users can be added from the admin settings panel.
             </div>
-            <div style={{ marginBottom: 10 }}>
-              <Lbl>Password</Lbl>
-              <input type="password" value={regPass} onChange={e => setRegPass(e.target.value)} style={{ ...inp, marginTop: 5 }} placeholder="Min 6 characters" />
+            <div style={{ marginBottom:12 }}>
+              <Lbl>Admin Username</Lbl>
+              <input value={setupUser} onChange={e => { setSetupUser(e.target.value); setErr(""); }}
+                autoFocus placeholder="e.g. admin" style={{ ...inp, marginTop:5 }} />
             </div>
-            <div style={{ marginBottom: 14 }}>
+            <div style={{ marginBottom:12 }}>
+              <Lbl>Password <span style={{ color:J.textDim }}>(min 8 characters)</span></Lbl>
+              <input type="password" value={setupPass} onChange={e => { setSetupPass(e.target.value); setErr(""); }}
+                style={{ ...inp, marginTop:5 }} />
+            </div>
+            <div style={{ marginBottom:18 }}>
               <Lbl>Confirm Password</Lbl>
-              <input type="password" value={regPass2} onChange={e => setRegPass2(e.target.value)} onKeyDown={e => e.key === "Enter" && register()} style={{ ...inp, marginTop: 5 }} />
+              <input type="password" value={setupPass2} onChange={e => { setSetupPass2(e.target.value); setErr(""); }}
+                onKeyDown={e => e.key === "Enter" && runSetup()}
+                style={{ ...inp, marginTop:5 }} />
             </div>
-            <button onClick={register} disabled={regLoading} style={{
-              width: "100%", padding: "10px", borderRadius: 3,
-              background: `${J.ok}0C`, border: `1px solid ${J.ok}`,
-              color: J.ok, fontSize: 12, letterSpacing: "0.15em", fontFamily: J.fontHeader,
-            }}>{regLoading ? "CREATING…" : "⊞ CREATE ACCOUNT"}</button>
-            <div style={{ textAlign: "center", marginTop: 10 }}>
-              <button onClick={() => { setMode("login"); setErr(""); }} style={{ background: "none", border: "none", color: J.textSec, cursor: "pointer", fontSize: 10 }}>← Back to login</button>
-            </div>
+            <button onClick={runSetup} disabled={setupLoading} style={{
+              width:"100%", padding:"11px", borderRadius:3,
+              background: setupLoading ? J.bgCard : `${J.ok}0C`,
+              border: `1px solid ${setupLoading ? J.borderMid : J.ok}`,
+              color: setupLoading ? J.textSec : J.ok,
+              fontSize:12, fontWeight:"bold", letterSpacing:"0.18em", fontFamily:J.fontHeader,
+            }}>{setupLoading ? "◈ CREATING ACCOUNT…" : "⊞ COMPLETE SETUP"}</button>
+          </>
+        )}
+
+        {/* ── CHECKING ── */}
+        {mode === "checking" && (
+          <div style={{ textAlign:"center", color:J.textDim, fontSize:11, padding:"20px 0" }}>
+            Connecting to system…
           </div>
         )}
 
-        <div style={{ color: J.textDim, fontSize: 8, textAlign: "center", marginTop: 20, letterSpacing: "0.08em", lineHeight: 2 }}>
+        <div style={{ color:J.textDim,fontSize:8,textAlign:"center",marginTop:20,letterSpacing:"0.08em",lineHeight:2 }}>
           ALL ACCESS IS MONITORED · UNAUTHORISED USE IS PROHIBITED
         </div>
       </div>
@@ -3379,8 +4648,10 @@ export default function App() {
   const [memoryOpen,      setMemoryOpen]      = useState(false);
   const [experiencedOpen, setExperiencedOpen] = useState(false);
   const [evolutionOpen,   setEvolutionOpen]   = useState(false);
+  const [schedulerOpen,   setSchedulerOpen]   = useState(false);
   const [telemetryOpen,   setTelemetryOpen]   = useState(false);
   const [instructionsOpen, setInstructionsOpen] = useState(false);
+  const [billingOpen,     setBillingOpen]     = useState(false);
   const [tokenLog,        setTokenLog]        = useState<TokenSnapshot[]>([]);
   const [commandLog,      setCommandLog]      = useState<CommandEntry[]>([]);
   const cmdCounterRef = useRef(0);
@@ -3430,6 +4701,7 @@ export default function App() {
 
   const fileRef        = useRef<HTMLInputElement>(null);
   const wsRef          = useRef<WebSocket | null>(null);
+  const voiceRef       = useRef<VoiceIOHandle>(null);
   const bottomRef      = useRef<HTMLDivElement>(null);
   const evtHandlerRef  = useRef<((e: any) => void) | null>(null);
   const reconnDelay    = useRef(1000);
@@ -3560,9 +4832,15 @@ export default function App() {
     } else if (type === "halted") {
       // Server confirmed HALT — already handled client-side but clear streaming flag
       setStreaming(false);
+      voiceRef.current?.stopSpeaking();
     } else if (type === "done") {
       setStreaming(false);
-      setMessages(prev => prev.map(m => m.streaming ? { ...m, streaming: false } : m));
+      setMessages(prev => {
+        const settled = prev.map(m => m.streaming ? { ...m, streaming: false } : m);
+        const last = settled.filter(m => m.role === "assistant").at(-1);
+        if (last?.content) voiceRef.current?.speak(last.content);
+        return settled;
+      });
     } else if (type === "tool_call") {
       setMessages(prev => [...prev, { role: "tool_call", ...data }]);
     } else if (type === "tool_result") {
@@ -3610,6 +4888,18 @@ export default function App() {
     } else if (type === "error") {
       setMessages(prev => [...prev, { role: "assistant", content: `❌ ${data}` }]);
       setStreaming(false);
+    } else if (type === "auth_ok") {
+      // Sync UI provider/model to whatever the backend actually resolved
+      // (covers Ollama fallback where env says deepseek but no key exists)
+      if (data?.provider_info) {
+        const pi = data.provider_info;
+        setProvInfo(prev => ({
+          ...prev,
+          provider:      pi.provider      || prev.provider,
+          model:         pi.model         || prev.model,
+          schema_format: pi.schema_format || prev.schema_format,
+        }));
+      }
     } else if (type === "stream_start") {
       // backend SSE start acknowledgement — ignore
     }
@@ -3808,7 +5098,7 @@ export default function App() {
   }} />;
 
   return (
-    <div style={{ minHeight: "100vh", background: J.bg, display: "flex", flexDirection: "column" }}
+    <div style={{ height: "100vh", background: J.bg, display: "flex", flexDirection: "column", overflow: "hidden" }}
       onDrop={onDrop} onDragOver={onDragOver}>
       <style>{buildGlobalCSS(persona)}</style>
 
@@ -3833,8 +5123,8 @@ export default function App() {
             <ArcReactor size={26} />
             <div>
               <div data-text={J.wordmark} className={persona !== "jarvis" ? "persona-glitch" : ""}
-                style={{ color: J.accent, fontSize: 12, letterSpacing: "0.2em", fontFamily: J.fontHeader, fontWeight: 700, lineHeight: 1.2 }}>{J.wordmark}</div>
-              <div style={{ color: J.textDim, fontSize: 8, letterSpacing: "0.15em", fontFamily: J.fontHeader, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{J.subtitle}</div>
+                style={{ color: J.accent, fontSize: 16, letterSpacing: "0.2em", fontFamily: J.fontHeader, fontWeight: 700, lineHeight: 1.2 }}>S.I.R Platform</div>
+              <div style={{ color: J.textDim, fontSize: 10, letterSpacing: "0.15em", fontFamily: J.fontHeader, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>Super Intelligent Robot</div>
             </div>
           </div>
           <Divider color={J.borderMid} />
@@ -3880,8 +5170,10 @@ export default function App() {
             { label: "◉ MEMORY",    action: () => setMemoryOpen(true),      color: J.gold },
             { label: "⬢ EXPERIENCED", action: () => setExperiencedOpen(true), color: J.react },
             { label: "◈ EVOLVE",    action: () => setEvolutionOpen(true),   color: J.warm },
+            { label: "⏱ SCHEDULER", action: () => setSchedulerOpen(true),   color: J.ok },
             { label: "⊕ TELEMETRY", action: () => setTelemetryOpen(true),   color: J.accent },
             { label: "◈ PERSONAS",  action: () => setPersonaMgrOpen(true),   color: J.react },
+            { label: "$ BILLING",    action: () => setBillingOpen(true),      color: J.gold },
             { label: "⬡ INSTRUCT",  action: () => setInstructionsOpen(true), color: J.gold },
             { label: "⚙ CONFIG", action: () => setSettingsOpen(true), color: J.textSec },
             { label: "↺ RESET",  action: handleReset,                  color: J.err },
@@ -3947,7 +5239,7 @@ export default function App() {
               {provInfo.provider.toUpperCase()} / {provInfo.model} &nbsp;·&nbsp; {authedUser?.toUpperCase()} AUTHENTICATED
               <br />
               <span style={{ color: J.accent, opacity: 0.55 }}>
-                ◫ PROJECT: {currentProject} &nbsp;·&nbsp; /tmp/{authedUser}/{currentProject}/workspace
+                ◫ PROJECT: {currentProject} &nbsp;·&nbsp; {_base_workspace}/{authedUser}/{currentProject}/workspace
               </span>
             </div>
             <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
@@ -3998,7 +5290,7 @@ export default function App() {
         background: `${J.bgPanel}E8`,
         backdropFilter: "blur(10px)",
         maxWidth: 940, width: "100%", margin: "0 auto",
-        position: "sticky", bottom: 0,
+        flexShrink: 0,
       }}>
         {/* Staged attachments + workspace files */}
         {(attachments.length > 0 || workspaceFiles.length > 0) && (
@@ -4047,7 +5339,7 @@ export default function App() {
           {/* Active workspace badge — always visible so operator knows where agent writes */}
           <span
             onClick={() => setWorkspaceOpen(o => !o)}
-            title={`/tmp/${authedUser}/${currentProject}/workspace — click to ${workspaceOpen ? "hide" : "show"} file browser`}
+            title={`/app/data/${authedUser}/${currentProject}/workspace — click to ${workspaceOpen ? "hide" : "show"} file browser`}
             style={{
               marginLeft: "auto", padding: "2px 8px", borderRadius: 2, cursor: "pointer",
               background: `${J.accent}08`, border: `1px solid ${J.accent}22`,
@@ -4055,7 +5347,7 @@ export default function App() {
               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 280,
               fontFamily: J.fontMono,
             }}>
-            ◫ /tmp/{authedUser}/{currentProject}/workspace
+            ◫ {_base_workspace}/{authedUser}/{currentProject}/workspace
           </span>
         </div>
 
@@ -4087,6 +5379,21 @@ export default function App() {
               accept=".txt,.md,.py,.js,.ts,.json,.csv,.yaml,.yml,.html,.xml,.pdf,image/*"
               style={{ display: "none" }}
               onChange={e => { handleFiles(e.target.files); e.target.value = ""; }} />
+
+            {/* ── Voice I/O — STT mic + TTS speaker ── */}
+            <VoiceIO
+              ref={voiceRef}
+              onTranscript={t => {
+                setInput(t);
+                // Auto-send after voice input — remove the setTimeout lines to land in textarea instead
+                setTimeout(() => {
+                  if (reactMode) startClientReact(t);
+                  else send(t);
+                }, 80);
+              }}
+              J={J}
+              disabled={streaming}
+            />
 
             {/* Textarea */}
             <div style={{
@@ -4150,7 +5457,7 @@ export default function App() {
           </div>
 
           <div style={{ color: J.textDim, fontSize: 9, marginTop: 5, display: "flex", gap: 14, flexWrap: "wrap", letterSpacing: "0.06em", fontFamily: J.fontHeader }}>
-            <span>Enter — send · Shift+Enter — newline · drag & drop to attach</span>
+            <span>Enter — send · Shift+Enter — newline · drag & drop to attach · 🎙 voice input</span>
             {reactMode && <span style={{ color: `${J.react}55` }}>↺ REACT MODE — AI continues autonomously until TASK_COMPLETE</span>}
             {autoConfirm && <span style={{ color: `${J.warm}55` }}>⚡ AUTO-CONFIRM ACTIVE</span>}
           </div>
@@ -4162,6 +5469,7 @@ export default function App() {
       {memoryOpen      && <MemoryPanel      onClose={() => setMemoryOpen(false)}      userId={authedUser || "default"} />}
       {experiencedOpen && <ExperiencedPanel onClose={() => setExperiencedOpen(false)} userId={authedUser || "default"} />}
       {evolutionOpen   && <EvolutionPanel   onClose={() => setEvolutionOpen(false)}   userId={authedUser || "default"} />}
+      {schedulerOpen   && <SchedulerPanel   onClose={() => setSchedulerOpen(false)}   userId={authedUser || "default"} />}
       {telemetryOpen   && (
         <TelemetryPanel
           onClose={() => setTelemetryOpen(false)}
@@ -4176,6 +5484,12 @@ export default function App() {
           onClose={() => setPersonaMgrOpen(false)}
           userId={authedUser}
           onPersonasChanged={onPersonasChanged}
+        />
+      )}
+      {billingOpen && authedUser && (
+        <BillingPanel
+          onClose={() => setBillingOpen(false)}
+          authedUser={authedUser}
         />
       )}
       {instructionsOpen && (
