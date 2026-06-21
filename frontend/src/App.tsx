@@ -5147,7 +5147,7 @@ export default function App() {
             </button>
           )}
           <ModelPicker info={provInfo} onChange={d => setProvInfo(prev => ({ ...prev, ...d }))} />
-          <!--<Chip label={provInfo.schema_format || "openai"} color={pColor} />-->
+
         </div>
 
         {/* Right cluster */}
