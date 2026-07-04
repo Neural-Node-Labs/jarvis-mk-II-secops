@@ -775,7 +775,7 @@ TOOL_CALL: {"skill": "os_execution", "action": "run_command", "params": {"comman
       "fontImport": "@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Roboto:wght@400;700&display=swap');",
       "fontMono":   "monospace",
       "fontHeader": "'Orbitron', sans-serif",
-      "glyph":      "⚡",
+      "glyph":      "▼",
       "wordmark":   "SUPERMAN",
       "subtitle":   "MAN OF STEEL · CODE DEFENDER",
       "tagline":    "INVINCIBLE BLUEPRINTS · ZERO TOLERANCE FOR FAILURE",

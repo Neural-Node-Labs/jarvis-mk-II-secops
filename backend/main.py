@@ -90,7 +90,7 @@ from core.prompt_builder import (
     save_persona, delete_persona, load_all_personas,
 )
 from core.memory_manager import MemoryManager, detect_retrieval_request
-from core.agent import Agent, REACT_MAX_ITERATIONS, DEEP_TASK_MAX_ITERATIONS
+from core.agent import Agent, REACT_MAX_ITERATIONS, DEEP_TASK_MAX_ITERATIONS, CODE_AGENT_MAX_ITERATIONS
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CBD COMPONENT 1 — Logging Subsystem
@@ -1223,6 +1223,45 @@ async def trigger_evolution(request: Request):
         })
     except Exception as exc:
         logger.error("[evolve_error] %s", exc)
+        raise HTTPException(status_code=500, detail="Internal server error.")
+
+
+@app.post("/api/code_task", tags=["CodeAgent"])
+async def trigger_code_task(request: Request):
+    """
+    Runs one request through the Search → Edit → Validate coding loop
+    (core/blackbox_brain.py's force_code_agent path) instead of the generic
+    swarm/planner. Use this for "fix this bug", "add this feature", "refactor
+    X" — anything where the agent should search the codebase, make a change,
+    then prove it with a real test/build/lint run before calling it done.
+    """
+    caller = _require_auth(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+
+    task_desc = sanitise_message(body.get("task_description", "") or body.get("message", ""))
+    user_id   = body.get("user_id", caller)
+    model     = body.get("model")
+    provider  = body.get("provider")
+    max_iter  = int(body.get("max_iterations", CODE_AGENT_MAX_ITERATIONS))
+
+    if not task_desc:
+        raise HTTPException(status_code=400, detail="task_description (or message) is required.")
+
+    logger.info("[code_task_request] user=%s task=%.80s", user_id, task_desc)
+    try:
+        agent = _get_session(user_id, model=model, provider=provider)
+        gen   = agent.chat_stream(
+            task_desc, react=True, auto_confirm=bool(body.get("auto_confirm", False)),
+            force_code_agent=True, re_act_max_loop=max_iter,
+        )
+        return StreamingResponse(_agent_to_sse(gen), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+        })
+    except Exception as exc:
+        logger.error("[code_task_error] %s", exc)
         raise HTTPException(status_code=500, detail="Internal server error.")
 
 

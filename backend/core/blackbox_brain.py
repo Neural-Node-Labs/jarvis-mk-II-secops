@@ -157,6 +157,48 @@ Rules for Creating Programs:
 
 """
 
+CODE_AGENT_MAX_ITERATIONS = 40   # cap for force_code_agent=True — search+edit+validate
+                                   # cycles need more room than the default swarm-worker
+                                   # cap (3) or even the deep-task cap (30), since a single
+                                   # "loop" here is really search-N → edit → validate → repeat.
+
+# ── Code Agent system prompt — explicit Search → Edit → Validate loop ────────────
+# Distinct from LIGHTWEIGHT_SYSTEM_PROMPT (which is for tiny models with no tools
+# beyond os_execution) and from the generic worker prompt built in _run_worker
+# (which never mandates re-checking work). This prompt exists so an agent that
+# edits code is FORCED to close the loop — the completion gate in
+# _run_code_agent_worker backs this up mechanically, not just by asking nicely.
+CODE_AGENT_SYSTEM_PROMPT = """You are a coding agent that works in three phases, in order:
+
+1. SEARCH   — use code_tools.glob and code_tools.grep to find the relevant files,
+              then code_tools.read to see their exact current contents before
+              touching anything. Never edit a file you have not read this session.
+2. EDIT     — use code_tools.write (new file / full rewrite) or code_tools.edit
+              (surgical find-and-replace on an existing file) to make the change.
+3. VALIDATE — use code_tools.run_command to actually prove the change works:
+              run the test suite, linter, type-checker, or the exact repro steps
+              that motivated the change. Read the exit_code and output. If it
+              fails, treat that output as a new observation and go back to
+              SEARCH/EDIT — do not guess a fix blindly.
+
+Tools (invoke as TOOL_CALL: {"skill": "code_tools", "action": "...", "params": {...}}):
+  glob(pattern, root?, max_results?)                         — find files
+  grep(pattern, root?, file_glob?, max_results?, context_lines?) — search contents
+  read(path, start_line?, end_line?)                         — read a file
+  write(path, content, mode?)                                — create/overwrite a file
+  edit(path, old_str, new_str, expected_occurrences?)         — patch a file
+  run_command(command, cwd?, timeout_s?)                     — run tests/build/lint
+
+HARD RULE ON COMPLETION: do not write TASK_COMPLETE after an edit unless your most
+recent run_command since that edit exited with exit_code 0. If no test/build/lint
+command exists for this change, you may complete anyway — but you MUST say
+"VALIDATION: NONE_AVAILABLE" and one sentence explaining why nothing was
+runnable (e.g. no test suite in this repo, docs-only change). Skipping validation
+without that explicit statement will be rejected and you will be asked to validate
+before you can finish. A task that never touched any file (pure investigation /
+read-only question) is exempt from this rule — just answer and say TASK_COMPLETE.
+"""
+
 CHAT_HEURISTIC_TASK_KEYWORDS = (
     "create", "build", "write", "run", "execute", "install",
     "scan", "test", "deploy", "generate", "search", "find and",
@@ -256,6 +298,7 @@ class BlackboxBrain:
         persona:             str  = DEFAULT_PERSONA,
         re_act_max_loop:     Optional[int] = None,
         force_single_task:   bool = False,
+        force_code_agent:    bool = False,
     ) -> AsyncGenerator[dict, None]:
         """
         react=False         → Quick mode: one LLM turn, tools allowed once (same
@@ -269,6 +312,15 @@ class BlackboxBrain:
                                For deep, sequential, stateful work that can't be
                                split into independent parallel tasks. Used by
                                /api/evolve.
+        force_code_agent=True → Skip the Planner; run ONE worker through the
+                               explicit Search → Edit → Validate loop
+                               (core/skills/code_tools_skill.py's glob/grep/read/
+                               write/edit/run_command) with a completion gate that
+                               rejects TASK_COMPLETE after an unvalidated edit.
+                               Requires react=True. Cap defaults to
+                               CODE_AGENT_MAX_ITERATIONS. Mutually exclusive with
+                               force_single_task (force_code_agent wins if both
+                               are set).
         """
         if attachments:
             blocks = [_format_attachment(a) for a in attachments]
@@ -305,6 +357,14 @@ class BlackboxBrain:
             return
 
         effective_cap = re_act_max_loop or self.re_act_max_loop_default
+
+        if force_code_agent:
+            code_cap = re_act_max_loop or CODE_AGENT_MAX_ITERATIONS
+            async for event in self._run_code_agent_pipeline(
+                user_message, auto_confirm, persona, code_cap
+            ):
+                yield event
+            return
 
         if force_single_task:
             async for event in self._run_task_pipeline(
@@ -502,6 +562,184 @@ class BlackboxBrain:
             "iterations":      max((t.iterations_used for t in tasks), default=0),
             "tasks":           [self._task_to_dict(t) for t in tasks],
         }}
+
+    # ── Code Agent: Search → Edit → Validate loop (force_code_agent=True) ──────
+
+    async def _run_code_agent_pipeline(self, message: str, auto_confirm: bool, persona: str,
+                                        re_act_max_loop: int) -> AsyncGenerator[dict, None]:
+        self._append("user", message)
+        _memory.save_turn(self.user_id, "user", message)
+
+        task = Task(
+            task_id="CODE-001", goal=message, context={"user_id": self.user_id},
+            validation_criteria=(
+                "Every edit is followed by a run_command (tests/build/lint/repro) that "
+                "exits 0, OR the worker explicitly states VALIDATION: NONE_AVAILABLE with "
+                "justification. Read-only/investigation tasks with no edits are exempt."
+            ),
+        )
+        yield {"type": "react_status", "data": {
+            "iteration": 0, "max": re_act_max_loop,
+            "phase": f"code agent — search → edit → validate (cap {re_act_max_loop} iter)",
+            "healing": False,
+        }}
+
+        async for event in self._run_code_agent_worker(task, auto_confirm, persona, re_act_max_loop):
+            yield event
+
+        self.task_registry.append(task)
+        yield {"type": "react_status", "data": {"iteration": 0, "max": 0, "phase": "done", "healing": False}}
+
+        summary = task.result or "No result produced."
+        self._append("assistant", summary)
+        _memory.save_turn(self.user_id, "assistant", summary)
+
+        needs_attention = task.status == "FAILED" and task.error == "requires_confirmation"
+        yield {"type": "done", "data": {
+            "react_complete": not needs_attention and task.status == "COMPLETED",
+            "iterations":     task.iterations_used,
+            "validated":      bool(task.context.get("validated")),
+            "tasks":          [self._task_to_dict(task)],
+        }}
+
+    async def _run_code_agent_worker(self, task: Task, auto_confirm: bool, persona: str,
+                                      re_act_max_loop: int) -> AsyncGenerator[dict, None]:
+        """
+        Same ReAct shape as _run_worker, plus a mechanical completion gate:
+        TASK_COMPLETE is only honoured if no edit is currently unvalidated. If
+        the worker declares completion too early, we don't return — we push a
+        corrective observation back and spend another iteration on it instead.
+        """
+        task.status = "RUNNING"
+        logger.info("[code_agent] start task_id=%s goal=%.60s", task.task_id, task.goal)
+
+        base_prompt = build_system_prompt(persona=persona)
+        system_prompt = (
+            f"{CODE_AGENT_SYSTEM_PROMPT}\n\n"
+            f"TASK ID    : {task.task_id}\n"
+            f"GOAL       : {task.goal}\n"
+            f"VALIDATION : {task.validation_criteria}\n"
+            f"You have maximum {re_act_max_loop} reasoning iterations.\n\n"
+            f"{base_prompt}"
+        )
+        local_conversation: list = [{"role": "user", "content": f"Execute this task:\n\n{task.goal}"}]
+
+        any_edit_made           = False   # has ANY write/edit ever succeeded this task?
+        edited_pending_validation = False  # is there an edit with no passing validation since?
+        any_validation_passed    = False
+
+        for iteration in range(1, re_act_max_loop + 1):
+            task.iterations_used = iteration
+            try:
+                response = await self.llm.chat(local_conversation, system=system_prompt)
+            except Exception as exc:
+                local_conversation.append({"role": "user", "content": f"[ERROR]\n{exc}\nAdapt and continue."})
+                continue
+            local_conversation.append({"role": "assistant", "content": response})
+
+            yield {"type": "token", "data": f"\n── [{task.task_id} · iter {iteration}/{re_act_max_loop}] ──\n{response}\n"}
+
+            if self._is_complete(response):
+                if not any_edit_made:
+                    # Pure investigation/answer task — nothing to validate.
+                    task.result, task.status = self._extract_result(response), "COMPLETED"
+                    task.context["validated"] = True
+                    logger.info("[code_agent] complete (no edits) task_id=%s iter=%d", task.task_id, iteration)
+                    return
+                if edited_pending_validation and "VALIDATION: NONE_AVAILABLE" not in response:
+                    # Reject premature completion — force another iteration instead
+                    # of trusting the model's say-so.
+                    local_conversation.append({"role": "user", "content": (
+                        "[VALIDATION GATE] You declared TASK_COMPLETE but your last edit has not "
+                        "been validated (no run_command since then exited 0, and you did not state "
+                        "VALIDATION: NONE_AVAILABLE with a reason). Run the appropriate test/build/"
+                        "lint command now and confirm it passes before completing — or state "
+                        "VALIDATION: NONE_AVAILABLE with justification if nothing is runnable."
+                    )})
+                    logger.info("[code_agent] completion_rejected task_id=%s iter=%d reason=unvalidated_edit",
+                                task.task_id, iteration)
+                    continue
+                task.result, task.status = self._extract_result(response), "COMPLETED"
+                task.context["validated"] = any_validation_passed
+                logger.info("[code_agent] complete task_id=%s iter=%d validated=%s",
+                            task.task_id, iteration, any_validation_passed)
+                return
+
+            calls = self._extract_tool_calls(response)
+            if not calls:
+                if edited_pending_validation:
+                    local_conversation.append({"role": "user", "content": (
+                        "[VALIDATION GATE] You have an unvalidated edit and stopped issuing tool calls "
+                        "without declaring TASK_COMPLETE or VALIDATION: NONE_AVAILABLE. Run a validation "
+                        "command via code_tools.run_command, or explicitly justify why none applies."
+                    )})
+                    continue
+                task.result, task.status = response.strip(), "COMPLETED"
+                task.context["validated"] = any_validation_passed
+                logger.info("[code_agent] done (no tools) task_id=%s iter=%d", task.task_id, iteration)
+                return
+
+            observations: list = []
+            for call in calls:
+                skill_name = call.get("skill", "")
+                action     = call.get("action", "")
+                params     = call.get("params", {})
+                yield {"type": "tool_call", "data": {
+                    "skill": skill_name, "action": action, "params": params, "task_id": task.task_id,
+                }}
+                try:
+                    result = await self.registry.execute(skill_name, action, params, confirmed=auto_confirm)
+                except Exception as tool_exc:
+                    observations.append(f"[TOOL ✗ {skill_name}.{action} EXCEPTION]\n{tool_exc}")
+                    continue
+
+                if result.requires_confirm and not auto_confirm:
+                    self._confirm_counter += 1
+                    confirm_id = f"{skill_name}:{action}:{self._confirm_counter}"
+                    self.pending_confirms[confirm_id] = (skill_name, action, params)
+                    yield {"type": "confirm_needed", "data": {
+                        "confirm_id": confirm_id, "prompt": result.confirm_prompt,
+                        "skill": skill_name, "action": action, "task_id": task.task_id,
+                    }}
+                    observations.append(
+                        f"[TOOL ⏸ {skill_name}.{action} NEEDS OPERATOR CONFIRMATION — confirm_id={confirm_id}]\n"
+                        f"Skip it, try a non-destructive alternative, or note it in your result."
+                    )
+                    continue
+
+                result_dict = result.to_dict()
+                yield {"type": "tool_result", "data": {
+                    "skill": skill_name, "action": action, "params": params, "task_id": task.task_id, **result_dict,
+                }}
+
+                # ── Validation-gate bookkeeping ──────────────────────────────────
+                if skill_name == "code_tools" and result_dict.get("success"):
+                    if action in ("write", "edit"):
+                        any_edit_made = True
+                        edited_pending_validation = True
+                    elif action == "run_command":
+                        exit_code = (result_dict.get("output") or {}).get("exit_code")
+                        if exit_code == 0:
+                            edited_pending_validation = False
+                            any_validation_passed = True
+                        # non-zero exit_code deliberately leaves edited_pending_validation
+                        # True — a failed validation is not a passing one; the worker
+                        # must fix the code and re-validate before it can complete.
+
+                if result_dict.get("success"):
+                    observations.append(f"[TOOL ✓ {skill_name}.{action}]\n{json.dumps(result_dict.get('output'), indent=2, default=str)}")
+                else:
+                    observations.append(
+                        f"[TOOL ✗ {skill_name}.{action} FAILED]\nError: {result_dict.get('error')}\n"
+                        f"Diagnose and adjust approach."
+                    )
+            local_conversation.append({"role": "user", "content": "\n\n".join(observations)})
+
+        last_resp = local_conversation[-1].get("content", "") if local_conversation else "No result"
+        task.result = f"[MAX_ITERATIONS_REACHED after {re_act_max_loop} loops — validated={any_validation_passed}]\n{last_resp}"
+        task.status = "COMPLETED"
+        task.context["validated"] = any_validation_passed
+        logger.warning("[code_agent] max_iter task_id=%s validated=%s", task.task_id, any_validation_passed)
 
     # ── Layer 3: Swarm execution (asyncio, dependency-ordered batches) ──────────
 

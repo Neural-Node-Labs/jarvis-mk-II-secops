@@ -4,7 +4,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: sir-app
+    container_name: juan-app
     restart: unless-stopped
     env_file:
       - path: .env
@@ -46,34 +46,34 @@ services:
 #        condition: service_healthy
 
 
-  ollama:
-    image: ollama/ollama:latest
-    restart: unless-stopped
-    # Not published to the host: only the gateway (on the internal
-    # network) can reach Ollama. Publishing 11434 to the host would let
-    # anyone bypass the gateway's auth/rate-limiting entirely and talk
-    # to the model directly.
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        ollama serve &
-        sleep 5
-        if ! ollama list | grep -q 'qwen2.5-coder:0.5b'; then
-          echo "Pulling qwen2.5-coder:0.5b..."
-          ollama pull qwen2.5-coder:0.5b
-        fi
-        wait
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
-    volumes:
-      - type: bind
-        source: ./ollama_models
-        target: /root/.ollama
-
+#  ollama:
+#    image: ollama/ollama:latest
+#    restart: unless-stopped
+#    # Not published to the host: only the gateway (on the internal
+#    # network) can reach Ollama. Publishing 11434 to the host would let
+#    # anyone bypass the gateway's auth/rate-limiting entirely and talk
+#    # to the model directly.
+#    entrypoint: ["/bin/sh", "-c"]
+#    command:
+#      - |
+#        ollama serve &
+#        sleep 5
+#        if ! ollama list | grep -q 'qwen2.5-coder:0.5b'; then
+#          echo "Pulling qwen2.5-coder:0.5b..."
+#          ollama pull qwen2.5-coder:0.5b
+#        fi
+#        wait
+#    healthcheck:
+#      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+#      interval: 10s
+#      timeout: 5s
+#      retries: 5
+#      start_period: 15s
+#    volumes:
+#      - type: bind
+#        source: ./ollama_models
+#        target: /root/.ollama
+#
 
 
 

@@ -42,6 +42,7 @@ _STATIC_SKILL_MODULES = {
     "skills.selenium_test_skill",
     "skills.skill_creator_skill",
     "skills.unix_tools_skill",
+    "skills.code_tools_skill",
 }
 
 
@@ -103,6 +104,7 @@ class SkillRegistry:
             ("selenium_test_skill", self._load_selenium_test_skill),
             ("skill_creator", self._load_skill_creator),
             ("unix_tools_skill", self._load_unix_tools_skill),
+            ("code_tools", self._load_code_tools),
         ]
         for name, loader in loaders:
             try:
@@ -186,6 +188,14 @@ class SkillRegistry:
         """Loads the specialized native unix shell utilities wrapper skill."""
         from skills.unix_tools_skill import UnixToolsSkill
         return UnixToolsSkill()
+
+    def _load_code_tools(self):
+        """Loads the agentic coding primitives skill: glob/grep/read (search),
+        write/edit (mutate), run_command (validate) — the tool surface the
+        Search → Edit → Validate orchestration loop (core/blackbox_brain.py's
+        force_code_agent path) drives via TOOL_CALL blocks."""
+        from skills.code_tools_skill import CodeToolsSkill
+        return CodeToolsSkill()
 
     # ── Dynamic skill discovery / hot registration ──────────────────────────
     # Why this exists: previously, the ONLY way a skill became usable was a
