@@ -3232,6 +3232,7 @@ const PersonaPicker = ({ persona, onChange, personas }: {
           position: "absolute", top: "110%", left: 0, zIndex: 200,
           background: J.bgPanel, border: `1px solid ${J.borderMid}`,
           borderRadius: 5, padding: 6, width: 220,
+          maxHeight: 360, overflowY: "auto",
           boxShadow: "0 12px 40px #000C",
         }}>
           {personas.map((p) => (
@@ -3243,8 +3244,8 @@ const PersonaPicker = ({ persona, onChange, personas }: {
               textAlign: "left", display: "flex", flexDirection: "column", gap: 2,
               fontFamily: J.fontMono,
             }}
-              onMouseEnter={e => { if (persona !== id) (e.currentTarget as HTMLButtonElement).style.background = J.bgCard; }}
-              onMouseLeave={e => { if (persona !== id) (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+              onMouseEnter={e => { if (persona !== p.id) (e.currentTarget as HTMLButtonElement).style.background = J.bgCard; }}
+              onMouseLeave={e => { if (persona !== p.id) (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
             >
               <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontFamily: J.fontHeader, fontWeight: 700 }}>
                 <span style={{ fontSize: 13 }}>{p.theme?.glyph || p.icon || "◈"}</span>{p.name}
@@ -4696,6 +4697,8 @@ export default function App() {
   const [uploading,       setUploading]       = useState(false);
   const [autoConfirm,     setAutoConfirm]     = useState(false);
   const [reactMode,       setReactMode]       = useState(false);
+  const [autoContinue,    setAutoContinue]    = useState(true);
+  const [awaitingContinue, setAwaitingContinue] = useState(false);
   // FIX: user_id from actual logged-in user, never hardcoded
   const [authedUser,      setAuthedUser]      = useState<string | null>(() => getAuth()?.username || null);
 
@@ -4709,9 +4712,12 @@ export default function App() {
   const reactIterRef   = useRef(0);
   const reactActiveRef = useRef(false);
   const autoConfRef    = useRef(autoConfirm);
+  const autoContinueRef = useRef(autoContinue);
+  const resumeResolverRef = useRef<(() => void) | null>(null);
   const MAX_ITER       = 30;  // matches backend REACT_MAX_ITERATIONS
 
   useEffect(() => { autoConfRef.current = autoConfirm; }, [autoConfirm]);
+  useEffect(() => { autoContinueRef.current = autoContinue; }, [autoContinue]);
 
   // Auto-signout on 401 (token expired / revoked)
   useEffect(() => {
@@ -4951,6 +4957,17 @@ export default function App() {
   // ── Manual continue (for non-react mode only) ─────────────────────────────
   const sendContinue = useCallback(() => { if (!streaming) send("continue"); }, [send, streaming]);
 
+  // ── Manual continue for the ReAct loop when Auto is unchecked ─────────────
+  // Releases the pause created in startClientReact so exactly one more
+  // "continue" iteration is sent — nothing advances automatically while paused.
+  const continueReactManually = useCallback(() => {
+    if (resumeResolverRef.current) {
+      const resolve = resumeResolverRef.current;
+      resumeResolverRef.current = null;
+      resolve();
+    }
+  }, []);
+
   // ── Client-side ReAct loop (when backend react=false, drives iterations) ──
   // When reactMode=true, we pass react:true to backend and it handles all iterations.
   // This client loop is a FALLBACK for backward compatibility.
@@ -5027,6 +5044,16 @@ export default function App() {
       const complete = !lastErr && (content.includes("task_complete") || content.includes("task complete") ||
         content.includes("done") || content.includes("completed") || iter >= MAX_ITER);
       if (complete) go = false;
+
+      // AUTO toggle gate: when off, pause after each iteration and wait for a manual Continue click
+      // instead of automatically sending "continue" on the next loop pass.
+      if (go && !haltedRef.current && !autoContinueRef.current) {
+        setAwaitingContinue(true);
+        setMessages(prev => [...prev, { role: "react_status", iteration: iter, phase: "⏸ paused — Auto is off, click Continue", healing: false }]);
+        await new Promise<void>(resolve => { resumeResolverRef.current = resolve; });
+        setAwaitingContinue(false);
+        if (haltedRef.current) go = false;
+      }
     }
 
     setMessages(prev => [...prev, { role: "react_status", iteration: reactIterRef.current,
@@ -5059,6 +5086,8 @@ export default function App() {
     reactActiveRef.current = false;
     setStreaming(false);
     setHalted(true);
+    setAwaitingContinue(false);
+    if (resumeResolverRef.current) { const r = resumeResolverRef.current; resumeResolverRef.current = null; r(); }
 
     // 2. Send HALT via WS (fast path, fires before REST)
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -5123,8 +5152,8 @@ export default function App() {
             <ArcReactor size={26} />
             <div>
               <div data-text={J.wordmark} className={persona !== "jarvis" ? "persona-glitch" : ""}
-                style={{ color: J.accent, fontSize: 16, letterSpacing: "0.2em", fontFamily: J.fontHeader, fontWeight: 700, lineHeight: 1.2 }}>S.I.R Platform</div>
-              <div style={{ color: J.textDim, fontSize: 10, letterSpacing: "0.15em", fontFamily: J.fontHeader, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>Super Intelligent Robot</div>
+                style={{ color: J.accent, fontSize: 16, letterSpacing: "0.2em", fontFamily: J.fontHeader, fontWeight: 700, lineHeight: 1.2 }}>JUAN Platform</div>
+              <div style={{ color: J.textDim, fontSize: 10, letterSpacing: "0.15em", fontFamily: J.fontHeader, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>MK II SECOPS KALI</div>
             </div>
           </div>
           <Divider color={J.borderMid} />
@@ -5147,7 +5176,7 @@ export default function App() {
             </button>
           )}
           <ModelPicker info={provInfo} onChange={d => setProvInfo(prev => ({ ...prev, ...d }))} />
-          <Chip label={provInfo.schema_format || "openai"} color={pColor} />
+
         </div>
 
         {/* Right cluster */}
@@ -5173,7 +5202,6 @@ export default function App() {
             { label: "⏱ SCHEDULER", action: () => setSchedulerOpen(true),   color: J.ok },
             { label: "⊕ TELEMETRY", action: () => setTelemetryOpen(true),   color: J.accent },
             { label: "◈ PERSONAS",  action: () => setPersonaMgrOpen(true),   color: J.react },
-            { label: "$ BILLING",    action: () => setBillingOpen(true),      color: J.gold },
             { label: "⬡ INSTRUCT",  action: () => setInstructionsOpen(true), color: J.gold },
             { label: "⚙ CONFIG", action: () => setSettingsOpen(true), color: J.textSec },
             { label: "↺ RESET",  action: handleReset,                  color: J.err },
@@ -5322,6 +5350,8 @@ export default function App() {
             title="Automatically approve destructive actions without prompting. Use with caution." />
           <Toggle on={reactMode}     set={setReactMode}    color={J.react}   label="↺ ReAct"
             title="Enable autonomous ReAct loop. AI will reason, act, observe and self-correct until task is done." />
+          <Toggle on={autoContinue}  set={setAutoContinue} color={J.react}   label="⏩ Auto"
+            title="When checked, the ReAct loop automatically sends 'continue' after each iteration. When unchecked, it pauses after each iteration and waits for you to click Continue." />
           <Toggle on={memoryEnabled} set={setMemoryEnabled} color={J.gold}   label="◉ Memory"
             title="When OFF, no conversation history is sent to the LLM. Keeps context clean and prevents hallucination from old turns." />
           {/* Active instructions chips */}
@@ -5428,16 +5458,20 @@ export default function App() {
                 }} />
             </div>
 
-            {/* Continue button — shown in non-react mode only */}
-            {!reactMode && (
-              <button onClick={sendContinue} disabled={!canContinue} title="Continue — nudge the agent"
+            {/* Continue button — shown in non-react mode, or in ReAct mode while paused (Auto off) */}
+            {(!reactMode || awaitingContinue) && (
+              <button
+                onClick={awaitingContinue ? continueReactManually : sendContinue}
+                disabled={awaitingContinue ? false : !canContinue}
+                title={awaitingContinue ? "Auto is off — click to send the next 'continue' iteration" : "Continue — nudge the agent"}
                 style={{
                   padding: "9px 11px", borderRadius: 4, fontSize: 11,
-                  background: canContinue ? J.bgCard : "transparent",
-                  border: `1px solid ${canContinue ? J.borderMid : J.border}`,
-                  color: canContinue ? J.accent : J.textDim,
+                  background: (awaitingContinue || canContinue) ? J.bgCard : "transparent",
+                  border: `1px solid ${(awaitingContinue || canContinue) ? (awaitingContinue ? J.react : J.borderMid) : J.border}`,
+                  color: (awaitingContinue || canContinue) ? (awaitingContinue ? J.react : J.accent) : J.textDim,
                   fontFamily: J.fontHeader, fontWeight: 600,
                   letterSpacing: "0.06em",
+                  animation: awaitingContinue ? "hud-pulse 1.2s infinite" : "none",
                 }}>▷▷</button>
             )}
 
@@ -5458,7 +5492,14 @@ export default function App() {
 
           <div style={{ color: J.textDim, fontSize: 9, marginTop: 5, display: "flex", gap: 14, flexWrap: "wrap", letterSpacing: "0.06em", fontFamily: J.fontHeader }}>
             <span>Enter — send · Shift+Enter — newline · drag & drop to attach · 🎙 voice input</span>
-            {reactMode && <span style={{ color: `${J.react}55` }}>↺ REACT MODE — AI continues autonomously until TASK_COMPLETE</span>}
+            {reactMode && !awaitingContinue && (
+              <span style={{ color: `${J.react}55` }}>
+                ↺ REACT MODE — {autoContinue ? "AI continues autonomously until TASK_COMPLETE" : "Auto is OFF — click ▷▷ Continue after each iteration"}
+              </span>
+            )}
+            {reactMode && awaitingContinue && (
+              <span style={{ color: J.react }}>⏸ paused — Auto is off, click ▷▷ Continue to proceed</span>
+            )}
             {autoConfirm && <span style={{ color: `${J.warm}55` }}>⚡ AUTO-CONFIRM ACTIVE</span>}
           </div>
         </div>

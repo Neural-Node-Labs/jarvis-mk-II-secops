@@ -67,7 +67,7 @@ def _tts_available() -> bool:
 
 # ── STT ────────────────────────────────────────────────────────────────────────
 
-@voice_router.post("/stt")
+@voice_router.post("/api/voice/stt")
 async def speech_to_text(audio: UploadFile = File(...)):
     """
     Transcribe an uploaded audio file to text.
@@ -140,7 +140,7 @@ async def speech_to_text(audio: UploadFile = File(...)):
 
 # ── TTS ────────────────────────────────────────────────────────────────────────
 
-@voice_router.post("/tts")
+@voice_router.post("/api/voice/tts")
 async def text_to_speech(request: Request):
     """
     Synthesise text to audio/mpeg.
@@ -212,7 +212,7 @@ async def text_to_speech(request: Request):
 
 # ── Capabilities probe ─────────────────────────────────────────────────────────
 
-@voice_router.get("/capabilities")
+@voice_router.get("/api/voice/capabilities")
 async def voice_capabilities():
     """
     Return which voice features are live.
@@ -236,7 +236,7 @@ async def voice_capabilities():
 
 # ── Diagnostics ────────────────────────────────────────────────────────────────
 
-@voice_router.get("/diagnostics")
+@voice_router.get("/api/voice/diagnostics")
 async def voice_diagnostics():
     """
     Full pipeline diagnostics — model info, VAD config, ffmpeg version.
