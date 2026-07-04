@@ -1,4 +1,4 @@
-# SIR — Mighty Jarvis MKII
+# S.I.R Juan Platform
 
 SIR is a self-contained, Dockerised AI agent platform built for SecOps, pentesting, and autonomous task execution. It pairs a React frontend with a FastAPI backend, a modular skill system, parallel swarm orchestration, and a 9-phase self-evolution pipeline. Multiple LLM providers are supported with automatic Ollama fallback.
 
@@ -177,7 +177,7 @@ All endpoints are served at `http://localhost` (port 80 by default). The React S
 | `POST` | `/api/confirm` | Resume a paused agent — body: `{confirm_id, user_id}` |
 | `POST` | `/api/chat/upload` | Upload files as attachments |
 
-### JarvisMKII (Parallel Tasks)
+### S.I.R Juan Platform (Parallel Tasks)
 
 | Method | Path | Description |
 |---|---|---|
@@ -309,7 +309,7 @@ When no API key is present and Ollama is reachable, the LLM router falls back au
 | `LOG_LEVEL` | `info` | Logging verbosity |
 | `MEMORY_DIR` | `./data/memory` | Per-user memory file directory |
 | `MEMORY_MAX_TURNS` | `200` | Max turns retained per user |
-| `JARVIS_MAX_PARALLEL` | `10` | Max parallel tasks for JarvisMKII |
+| `JARVIS_MAX_PARALLEL` | `10` | Max parallel tasks for S.I.R Juan Platform |
 | `JARVIS_TASK_TIMEOUT` | `300` | Per-task timeout in seconds |
 | `JARVIS_SCHEDULER_POLL_SECONDS` | `15` | How often the scheduler checks for due tasks |
 | `KALI_EXEC_API_KEY` | — | API key guard for `/api/kali/exec` (leave empty only in dev) |
