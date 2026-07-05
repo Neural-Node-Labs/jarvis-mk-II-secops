@@ -11,9 +11,14 @@ Precedence, highest first:
   2. process environment variable (.env / docker-compose / shell export)
   3. hardcoded default in EDITABLE_SETTINGS
 
-This is intentionally NOT a place for secrets (API keys) — those stay in
-the environment / your process manager's secret store. get_setting() and
-save_settings() only ever touch the keys listed in EDITABLE_SETTINGS.
+This is intentionally NOT a place for most secrets — other API keys stay in
+the environment / your process manager's secret store. The one deliberate
+exception is LLM_API_KEY: the operator asked for it to be settable from the
+Settings UI instead of editing .env and restarting. It's stored the same way
+as everything else here (plaintext in settings.json — protect that file's
+permissions same as you would a .env file) but describe_settings() always
+masks it before it goes back over the wire: the UI only ever sees whether a
+key is set and its last 4 characters, never the full value.
 
 Every read goes back to disk-backed state (an in-memory cache, invalidated
 on write) rather than a module-level constant captured once at import —
@@ -26,6 +31,7 @@ version: 1.0.0
 import json
 import logging
 import os
+import re
 import threading
 from typing import Any, Optional
 
@@ -54,7 +60,6 @@ def _validate_path(value: str):
 
 
 def _validate_project_name(value: str):
-    import re
     value = (value or "").strip()
     if not value or not re.match(r"^[a-zA-Z0-9_\-]{1,48}$", value):
         return False, "Project name must be 1-48 chars: letters, numbers, _ or -."
@@ -69,6 +74,24 @@ def _validate_positive_int(value):
     if v <= 0:
         return False, "Must be greater than 0."
     return True, v
+
+
+def _validate_url_or_blank(value: str):
+    value = (value or "").strip()
+    if not value:
+        return True, ""   # blank = fall back to the provider's built-in default URL
+    if not re.match(r"^https?://[^\s]+$", value):
+        return False, "Must be a full http(s):// URL, or blank to use the provider default."
+    return True, value.rstrip("/")
+
+
+def _validate_secret(value: str):
+    value = (value or "").strip()
+    if not value:
+        return True, ""   # blank = clear the override, fall back to env var
+    if len(value) < 8:
+        return False, "That doesn't look like a valid API key (too short)."
+    return True, value
 
 
 EDITABLE_SETTINGS: dict[str, dict] = {
@@ -113,6 +136,25 @@ EDITABLE_SETTINGS: dict[str, dict] = {
         "type": "string",
         "default": "deepseek-coder",
         "validate": lambda v: (True, v.strip()) if (v or "").strip() else (False, "Cannot be empty."),
+    },
+    "LLM_BASE_URL": {
+        "label": "LLM API base URL",
+        "description": "Override the endpoint the default provider talks to (e.g. a "
+                        "self-hosted DeepSeek-compatible gateway, a proxy, or a custom "
+                        "Ollama host). Leave blank to use the provider's built-in default.",
+        "type": "string",
+        "default": "",
+        "validate": _validate_url_or_blank,
+    },
+    "LLM_API_KEY": {
+        "label": "LLM API key",
+        "description": "Saved server-side and used for every LLM call going forward — "
+                        "no .env edit or restart needed. Leave blank to clear the "
+                        "override and fall back to the {PROVIDER}_API_KEY environment "
+                        "variable, if set.",
+        "type": "secret",
+        "default": "",
+        "validate": _validate_secret,
     },
 }
 
@@ -175,7 +217,9 @@ def get_setting_int(key: str, default: int) -> int:
 
 
 def describe_settings() -> dict:
-    """Full registry + effective value + source, for the Settings UI."""
+    """Full registry + effective value + source, for the Settings UI.
+    "secret"-type values (LLM_API_KEY) are never returned in the clear —
+    only whether one is set and its last 4 characters, e.g. "•••• sk91"."""
     overrides = _load_cached()
     out = {}
     for key, meta in EDITABLE_SETTINGS.items():
@@ -185,12 +229,25 @@ def describe_settings() -> dict:
             value, source = os.getenv(key), "environment"
         else:
             value, source = meta["default"], "default"
+
+        is_secret = meta["type"] == "secret"
+        display_value = _mask_secret(value) if is_secret else value
+
         out[key] = {
-            "value": value, "source": source, "label": meta["label"],
+            "value": display_value, "source": source, "label": meta["label"],
             "description": meta["description"], "type": meta["type"],
             "default": meta["default"],
         }
+        if is_secret:
+            out[key]["is_set"] = bool(value)
     return out
+
+
+def _mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    tail = value[-4:] if len(value) >= 4 else value
+    return f"{'•' * 8}{tail}"
 
 
 def save_settings(updates: dict) -> dict:

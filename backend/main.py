@@ -177,12 +177,21 @@ def _build_llm_config(model: str = None, provider: str = None, temperature: floa
     resolved_provider = provider or get_setting("LLM_PROVIDER", "deepseek")
     resolved_model    = model    or get_setting("LLM_MODEL",    "deepseek-coder")
     max_tokens        = get_model_max_tokens(resolved_model)
+
+    # Settings-panel override takes priority (this is what "set the API key
+    # in Settings and it's used from here on, no .env edit" means) — falls
+    # back to the provider-named env var exactly as before if nothing was
+    # ever saved in Settings.
+    api_key  = get_setting("LLM_API_KEY", "") or os.getenv(f"{resolved_provider.upper()}_API_KEY")
+    base_url = get_setting("LLM_BASE_URL", "") or None   # None → LLMRouter uses the provider's built-in default
+
     return LLMConfig(
         provider=resolved_provider,
         model=resolved_model,
         temperature=temperature,
         max_tokens=max_tokens,
-        api_key=os.getenv(f"{resolved_provider.upper()}_API_KEY"),
+        api_key=api_key,
+        base_url=base_url,
     )
 
 
@@ -739,9 +748,40 @@ def _require_auth(request: Request) -> str:
     return require_auth(request, _validate_token)
 
 
+def _get_user_role(username: str) -> str:
+    """Look up a user's role from the DB. Defaults to 'user' if not found —
+    never raises, since a missing/deleted user is a 401/403 concern for the
+    caller, not this helper's job."""
+    try:
+        with _DB_LOCK:
+            conn = _get_db()
+            row = conn.execute("SELECT role FROM users WHERE username = ?", (username,)).fetchone()
+            conn.close()
+        return row["role"] if row else "user"
+    except Exception as exc:
+        logger.warning("[role_lookup_error] user=%s err=%s", username, exc)
+        return "user"
+
+
+def _is_admin(username: str) -> bool:
+    """
+    Whether `username` has the admin role. This is the real check — the
+    `role` column has existed in the users table (and been set correctly at
+    first-boot setup and user creation) all along, but every admin gate in
+    this file used to compare the username string against the literal
+    "admin" instead of ever reading it. That meant only an account literally
+    named "admin" could use any admin feature (Settings, user management,
+    etc.) even though first-boot setup lets the operator pick any username
+    for that first (role='admin') account. Fixed here, once, so every call
+    site below can just check `_is_admin(caller)`.
+    """
+    return _get_user_role(username) == "admin"
+
+
 def _require_admin(request: Request) -> str:
     username = _require_auth(request)
-    require_admin(username)
+    if not _is_admin(username):
+        raise HTTPException(status_code=403, detail="Administrator access required.")
     return username
 
 
@@ -889,7 +929,7 @@ async def list_models(request: Request):
 async def session_status(user_id: str, request: Request):
     caller = _require_auth(request)
     # Users can only inspect their own session; admin sees any
-    if caller != "admin" and caller != user_id:
+    if not _is_admin(caller) and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
     agent = _sessions.get(user_id)
     if agent is None:
@@ -905,7 +945,7 @@ async def session_status(user_id: str, request: Request):
 @app.delete("/api/session/{user_id}", tags=["Session"])
 async def reset_session(user_id: str, request: Request):
     caller = _require_auth(request)
-    if caller != "admin" and caller != user_id:
+    if not _is_admin(caller) and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
     destroyed = _destroy_session(user_id)
     return {"reset": destroyed, "user_id": user_id}
@@ -928,7 +968,7 @@ async def chat_sse(
     """SSE chat — authenticates via Authorization header."""
     caller = _require_auth(request)
     check_api_rate(get_client_ip(request))
-    if caller != "admin" and caller != user_id:
+    if not _is_admin(caller) and caller != user_id:
         user_id = caller   # users can only chat as themselves
 
     message = sanitise_message(message)
@@ -961,7 +1001,7 @@ async def chat_post(request: Request):
     model        = body.get("model")
     provider     = body.get("provider")
 
-    if caller != "admin":
+    if not _is_admin(caller):
         user_id = caller
 
     if not message:
@@ -1019,7 +1059,7 @@ async def chat_websocket(ws: WebSocket, user_id: str):
         return
 
     # Users can only use their own user_id
-    if ws_user != "admin" and ws_user != user_id:
+    if not _is_admin(ws_user) and ws_user != user_id:
         user_id = ws_user
 
     _probe_cfg = _build_llm_config()
@@ -1166,7 +1206,7 @@ async def chat_upload(
 ):
     caller = _require_auth(request)
     check_api_rate(get_client_ip(request))
-    if caller != "admin":
+    if not _is_admin(caller):
         user_id = caller
 
     message        = sanitise_message(message)
@@ -1223,7 +1263,7 @@ async def confirm_action(request: Request):
     confirm_id = body.get("confirm_id")
     user_id    = body.get("user_id", caller)
 
-    if caller != "admin":
+    if not _is_admin(caller):
         user_id = caller
     if not confirm_id:
         raise HTTPException(status_code=400, detail="confirm_id required.")
@@ -1358,7 +1398,7 @@ async def kali_tools(request: Request):
 @app.get("/api/memory/{user_id}", tags=["Memory"])
 async def memory_retrieve(user_id: str, request: Request, n: int = 5):
     caller = _require_auth(request)
-    if caller != "admin" and caller != user_id:
+    if not _is_admin(caller) and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
     history = _memory.retrieve_last_n(user_id, n=min(n, 20))
     return {"user_id": user_id, "history": history, "found": bool(history)}
@@ -1367,7 +1407,7 @@ async def memory_retrieve(user_id: str, request: Request, n: int = 5):
 @app.delete("/api/memory/{user_id}", tags=["Memory"])
 async def memory_clear(user_id: str, request: Request):
     caller = _require_auth(request)
-    if caller != "admin" and caller != user_id:
+    if not _is_admin(caller) and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
     ok = _memory.clear(user_id)
     return {"cleared": ok, "user_id": user_id}
@@ -1573,7 +1613,7 @@ async def skills_register(request: Request):
 @app.post("/api/halt/{user_id}", tags=["Session"])
 async def halt_session(user_id: str, request: Request):
     caller = _require_auth(request)
-    if caller != "admin" and caller != user_id:
+    if not _is_admin(caller) and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
     destroyed = _destroy_session(user_id)
     logger.info("[api_halt] user=%s destroyed=%s", user_id, destroyed)
@@ -1602,7 +1642,7 @@ async def auth_login(request: Request):
     with _DB_LOCK:
         conn = _get_db()
         row  = conn.execute(
-            "SELECT password_hash, is_active FROM users WHERE username = ?", (username,)
+            "SELECT password_hash, is_active, role FROM users WHERE username = ?", (username,)
         ).fetchone()
         conn.close()
 
@@ -1615,6 +1655,7 @@ async def auth_login(request: Request):
     clear_login_rate(ip)   # reset rate counter on success
     logger.info("[auth_ok] user=%s ip=%s", username, ip)
     return {"access_token": token, "token_type": "bearer", "username": username,
+            "role": row["role"], "is_admin": row["role"] == "admin",
             "expires_in": TOKEN_TTL_HOURS * 3600}
 
 
@@ -1630,9 +1671,10 @@ async def auth_logout(request: Request):
 async def auth_me(request: Request):
     try:
         username = _require_auth(request)
-        return {"username": username, "authenticated": True}
+        role = _get_user_role(username)
+        return {"username": username, "authenticated": True, "role": role, "is_admin": role == "admin"}
     except HTTPException:
-        return {"username": None, "authenticated": False}
+        return {"username": None, "authenticated": False, "role": None, "is_admin": False}
 
 
 @app.post("/api/auth/register", tags=["Auth"])
@@ -1698,7 +1740,7 @@ async def auth_list_users(request: Request):
 async def auth_update_user(username: str, request: Request):
     caller = _require_auth(request)
     target = username.lower()
-    if caller != "admin" and caller != target:
+    if not _is_admin(caller) and caller != target:
         raise HTTPException(status_code=403, detail="Permission denied.")
     try:
         body = await request.json()
@@ -1707,9 +1749,15 @@ async def auth_update_user(username: str, request: Request):
 
     new_pass  = body.get("password")
     is_active = body.get("is_active")
+    new_role  = body.get("role")
 
-    if caller != "admin" and is_active is not None:
+    if not _is_admin(caller) and is_active is not None:
         raise HTTPException(status_code=403, detail="Only admin can change active status.")
+    if new_role is not None:
+        if not _is_admin(caller):
+            raise HTTPException(status_code=403, detail="Only an administrator can change roles.")
+        if new_role not in ("admin", "user"):
+            raise HTTPException(status_code=400, detail="role must be 'admin' or 'user'.")
 
     with _DB_LOCK:
         conn = _get_db()
@@ -1730,10 +1778,19 @@ async def auth_update_user(username: str, request: Request):
                 ph = _hash_password(new_pass)
             updates.append("password_hash = ?"); params.append(ph)
         if is_active is not None:
-            if target == "admin" and not is_active:
+            target_role = conn.execute("SELECT role FROM users WHERE username = ?", (target,)).fetchone()
+            if target_role and target_role["role"] == "admin" and not is_active:
                 conn.close()
-                raise HTTPException(status_code=400, detail="Cannot deactivate admin account.")
+                raise HTTPException(status_code=400, detail="Cannot deactivate an administrator account.")
             updates.append("is_active = ?"); params.append(1 if is_active else 0)
+        if new_role is not None:
+            if new_role == "user":
+                admin_count = conn.execute("SELECT COUNT(*) c FROM users WHERE role = 'admin'").fetchone()["c"]
+                current = conn.execute("SELECT role FROM users WHERE username = ?", (target,)).fetchone()
+                if current and current["role"] == "admin" and admin_count <= 1:
+                    conn.close()
+                    raise HTTPException(status_code=400, detail="Cannot demote the last remaining administrator.")
+            updates.append("role = ?"); params.append(new_role)
         if not updates:
             conn.close()
             return {"updated": False, "message": "No fields to update."}
@@ -1751,8 +1808,10 @@ async def auth_update_user(username: str, request: Request):
 async def auth_delete_user(username: str, request: Request):
     caller = _require_admin(request)
     target = username.lower()
-    if target in ("admin", caller):
-        raise HTTPException(status_code=400, detail="Cannot delete admin or your own account.")
+    if target == caller:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account.")
+    if _get_user_role(target) == "admin":
+        raise HTTPException(status_code=400, detail="Cannot delete an administrator account.")
     with _DB_LOCK:
         conn = _get_db()
         if not conn.execute("SELECT 1 FROM users WHERE username = ?", (target,)).fetchone():
@@ -1925,7 +1984,7 @@ async def workspace_list(
     project: str = None,
 ):
     caller = _require_auth(request)
-    if caller != "admin" and caller != user_id:
+    if not _is_admin(caller) and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
 
     project  = project or _default_project()
@@ -1985,7 +2044,7 @@ async def workspace_list(
 @app.post("/api/workspace/{user_id}/read", tags=["Workspace"])
 async def workspace_read_files(user_id: str, request: Request):
     caller = _require_auth(request)
-    if caller != "admin" and caller != user_id:
+    if not _is_admin(caller) and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
 
     try:
@@ -2042,7 +2101,7 @@ async def workspace_read_files(user_id: str, request: Request):
 @app.post("/api/workspace/{user_id}/mkdir", tags=["Workspace"])
 async def workspace_mkdir(user_id: str, request: Request):
     caller = _require_auth(request)
-    if caller != "admin" and caller != user_id:
+    if not _is_admin(caller) and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
     try:
         body = await request.json()
@@ -2062,7 +2121,7 @@ async def workspace_mkdir(user_id: str, request: Request):
 @app.delete("/api/workspace/{user_id}/file", tags=["Workspace"])
 async def workspace_delete_file(user_id: str, request: Request):
     caller = _require_auth(request)
-    if caller != "admin" and caller != user_id:
+    if not _is_admin(caller) and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
     try:
         body = await request.json()
@@ -2262,7 +2321,7 @@ async def _scheduler_loop():
 async def scheduler_list_tasks(request: Request, user_id: str = None):
     caller = _require_auth(request)
     # Non-admins can only see their own tasks
-    uid = user_id if caller == "admin" else caller
+    uid = user_id if _is_admin(caller) else caller
     return await _skill_call("scheduler", "list_tasks", {"user_id": uid} if uid else {})
 
 
@@ -2274,7 +2333,7 @@ async def scheduler_create_task(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body.")
     # Force user_id to caller for non-admins
-    if caller != "admin":
+    if not _is_admin(caller):
         body["user_id"] = caller
     return await _skill_call("scheduler", "create_task", body)
 
@@ -2348,7 +2407,7 @@ async def run_rca(request: Request):
     user_id       = body.get("user_id", caller)
 
     # Non-admins can only run RCA under their own session
-    if caller != "admin":
+    if not _is_admin(caller):
         user_id = caller
 
     if not symptom:
@@ -2491,7 +2550,7 @@ def _list_projects(user_id: str) -> list[dict]:
 async def workspace_zip(user_id: str, request: Request, project: str = None):
     import zipfile as _zf
     caller  = _require_auth(request)
-    if caller != "admin" and caller != user_id:
+    if not _is_admin(caller) and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
     project = project or _default_project()
     ws_root = _workspace_path(user_id, project)
@@ -2525,6 +2584,64 @@ async def workspace_zip(user_id: str, request: Request, project: str = None):
     )
 
 
+@app.delete("/api/workspace/{user_id}/files", tags=["Workspace"])
+async def workspace_delete_files(user_id: str, request: Request):
+    """
+    Delete one or more files (or empty-after directories) from a workspace.
+    Body: { project?: str, paths: [str, ...] }  — paths are relative to the
+    workspace root, exactly as returned by GET /api/workspace/{user_id}.
+
+    Never deletes anything outside the resolved workspace root — every path
+    is realpath-resolved and checked the same way every other workspace
+    endpoint already guards against traversal. Missing files are reported,
+    not treated as fatal, so one bad path in a batch doesn't abort the rest.
+    """
+    caller = _require_auth(request)
+    if not _is_admin(caller) and caller != user_id:
+        raise HTTPException(status_code=403, detail="Permission denied.")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+
+    project = body.get("project") or _default_project()
+    paths   = body.get("paths") or []
+    if not isinstance(paths, list) or not paths:
+        raise HTTPException(status_code=400, detail="Provide a non-empty 'paths' list.")
+    if len(paths) > 200:
+        raise HTTPException(status_code=400, detail="Too many paths in one request (max 200).")
+
+    ws_root = _workspace_path(user_id, project)
+    results = []
+    for rel in paths:
+        rel = str(rel)
+        try:
+            candidate = os.path.normpath(os.path.join(ws_root, rel.lstrip("/\\")))
+            target    = _realpath_guard(candidate, ws_root)
+        except HTTPException as exc:
+            results.append({"path": rel, "deleted": False, "error": exc.detail})
+            continue
+
+        if not os.path.exists(target):
+            results.append({"path": rel, "deleted": False, "error": "not found"})
+            continue
+        if os.path.isdir(target):
+            results.append({"path": rel, "deleted": False, "error": "is a directory — delete its files individually"})
+            continue
+
+        try:
+            os.remove(target)
+            results.append({"path": rel, "deleted": True})
+        except Exception as exc:
+            logger.warning("[workspace_delete_error] user=%s path=%s err=%s", user_id, rel, exc)
+            results.append({"path": rel, "deleted": False, "error": str(exc)})
+
+    deleted_count = sum(1 for r in results if r["deleted"])
+    logger.info("[workspace_files_deleted] user=%s project=%s requested=%d deleted=%d",
+                user_id, project, len(paths), deleted_count)
+    return {"results": results, "deleted_count": deleted_count, "requested_count": len(paths)}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CBD COMPONENT — Project Manager (authenticated)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2532,7 +2649,7 @@ async def workspace_zip(user_id: str, request: Request, project: str = None):
 @app.get("/api/projects/{user_id}", tags=["Workspace"])
 async def list_projects(user_id: str, request: Request):
     caller = _require_auth(request)
-    if caller != "admin" and caller != user_id:
+    if not _is_admin(caller) and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
     projects = _list_projects(user_id)
     logger.info("[list_projects] user=%s count=%d", user_id, len(projects))
@@ -2541,14 +2658,14 @@ async def list_projects(user_id: str, request: Request):
         "projects":        projects,
         "count":           len(projects),
         "default_project": _default_project(),
-        "workspace_root":  _user_root(user_id) if caller == "admin" or caller == user_id else None,
+        "workspace_root":  _user_root(user_id) if _is_admin(caller) or caller == user_id else None,
     }
 
 
 @app.post("/api/projects/{user_id}", tags=["Workspace"])
 async def create_project(user_id: str, request: Request):
     caller = _require_auth(request)
-    if caller != "admin" and caller != user_id:
+    if not _is_admin(caller) and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
     try:
         body = await request.json()
@@ -2591,7 +2708,7 @@ async def create_project(user_id: str, request: Request):
 async def delete_project(user_id: str, project_name: str, request: Request):
     import shutil as _sh
     caller = _require_auth(request)
-    if caller != "admin" and caller != user_id:
+    if not _is_admin(caller) and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
     safe = _safe_name(project_name)
     if safe == _default_project():
@@ -2610,7 +2727,7 @@ async def delete_project(user_id: str, project_name: str, request: Request):
 @app.get("/api/projects/{user_id}/{project_name}", tags=["Workspace"])
 async def get_project(user_id: str, project_name: str, request: Request):
     caller = _require_auth(request)
-    if caller != "admin" and caller != user_id:
+    if not _is_admin(caller) and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
     safe = _safe_name(project_name)
     pr   = os.path.join(_user_root(user_id), safe)
@@ -2702,7 +2819,7 @@ async def generate_persona_hint(request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON body.")
     hint    = body.get("hint", "").strip()
     user_id = body.get("user_id", caller)
-    if caller != "admin":
+    if not _is_admin(caller):
         user_id = caller
     if not hint:
         raise HTTPException(status_code=400, detail="hint is required.")

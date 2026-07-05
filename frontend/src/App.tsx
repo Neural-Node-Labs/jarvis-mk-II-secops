@@ -28,16 +28,18 @@ const MODEL_MAX: Record<string, number> = {
 function mTok(m: string) { return MODEL_MAX[m] || 8192; }
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
-const AUTH_KEY = "jarvis_token", AUTH_USER = "jarvis_user";
+const AUTH_KEY = "jarvis_token", AUTH_USER = "jarvis_user", AUTH_ADMIN = "jarvis_is_admin";
 function getAuth() {
   const t = sessionStorage.getItem(AUTH_KEY), u = sessionStorage.getItem(AUTH_USER);
-  return t && u ? { token: t, username: u } : null;
+  const isAdmin = sessionStorage.getItem(AUTH_ADMIN) === "1";
+  return t && u ? { token: t, username: u, isAdmin } : null;
 }
-function storeAuth(t: string, u: string) {
+function storeAuth(t: string, u: string, isAdmin: boolean = false) {
   sessionStorage.setItem(AUTH_KEY, t); sessionStorage.setItem(AUTH_USER, u);
+  sessionStorage.setItem(AUTH_ADMIN, isAdmin ? "1" : "0");
 }
 function clearAuth() {
-  sessionStorage.removeItem(AUTH_KEY); sessionStorage.removeItem(AUTH_USER);
+  sessionStorage.removeItem(AUTH_KEY); sessionStorage.removeItem(AUTH_USER); sessionStorage.removeItem(AUTH_ADMIN);
 }
 async function api(url: string, opts: RequestInit = {}): Promise<Response> {
   const auth = getAuth();
@@ -810,10 +812,11 @@ const ModelPicker = ({ info, onChange }: { info: any; onChange: (d: any) => void
 };
 
 // ─── Settings Panel ───────────────────────────────────────────────────────────
-const SettingsPanel = ({ onClose, onSaved, authedUser, onWorkspaceRootChanged }: {
+const SettingsPanel = ({ onClose, onSaved, authedUser, isAdmin, onWorkspaceRootChanged }: {
   onClose: () => void;
   onSaved: (d: any) => void;
   authedUser: string | null;
+  isAdmin: boolean;
   onWorkspaceRootChanged?: () => void;
 }) => {
   const [tab,     setTab]     = useState<"llm"|"users"|"system">("llm");
@@ -855,8 +858,6 @@ const SettingsPanel = ({ onClose, onSaved, authedUser, onWorkspaceRootChanged }:
   const [creating,  setCreating]  = useState(false);
   const [deleting,  setDeleting]  = useState<string|null>(null);
 
-  const isAdmin = authedUser === "admin";
-
   const loadUsers = async () => {
     setUsersLoad(true); setUsersErr("");
     try {
@@ -884,7 +885,11 @@ const SettingsPanel = ({ onClose, onSaved, authedUser, onWorkspaceRootChanged }:
       const d = await r.json();
       setSysSettings(d.settings || {});
       const draft: Record<string, string> = {};
-      Object.entries(d.settings || {}).forEach(([k, v]: [string, any]) => { draft[k] = String(v.value); });
+      Object.entries(d.settings || {}).forEach(([k, v]: [string, any]) => {
+        // Secret fields never get pre-filled with the masked display value —
+        // an empty box means "leave as-is"; typing means "replace it".
+        draft[k] = v.type === "secret" ? "" : String(v.value);
+      });
       setSysDraft(draft);
     } catch (e: any) { setSysErr(e.message); }
     setSysLoad(false);
@@ -893,11 +898,19 @@ const SettingsPanel = ({ onClose, onSaved, authedUser, onWorkspaceRootChanged }:
   const saveSystemSettings = async () => {
     setSysSaving(true); setSysErr(""); setSysSaved(false);
     try {
-      // Only send keys whose draft value actually differs from the effective value —
-      // keeps unrelated settings untouched and gives cleaner validation errors.
+      // Only send keys that actually changed — keeps unrelated settings
+      // untouched and gives cleaner validation errors. Secret fields are
+      // special-cased: their draft is never pre-filled (see above), so any
+      // non-empty value there IS the change; comparing it against the
+      // masked display value would never match anyway.
       const changed: Record<string, any> = {};
       Object.entries(sysDraft).forEach(([k, v]) => {
-        if (String(sysSettings[k]?.value) !== v) changed[k] = v;
+        const isSecret = sysSettings[k]?.type === "secret";
+        if (isSecret) {
+          if (v !== "") changed[k] = v;
+        } else if (String(sysSettings[k]?.value) !== v) {
+          changed[k] = v;
+        }
       });
       if (Object.keys(changed).length === 0) { setSysSaving(false); return; }
       const r = await api(`${API_URL}/settings`, {
@@ -907,6 +920,13 @@ const SettingsPanel = ({ onClose, onSaved, authedUser, onWorkspaceRootChanged }:
       const d = await r.json();
       if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
       setSysSettings(d.settings || {});
+      // Re-clear secret drafts after a successful save (whatever was typed
+      // is now persisted server-side; keep it out of the input afterward).
+      setSysDraft(prev => {
+        const next = { ...prev };
+        Object.keys(changed).forEach(k => { if (d.settings?.[k]?.type === "secret") next[k] = ""; });
+        return next;
+      });
       setSysSaved(true);
       if ("JARVIS_WORKSPACE_ROOT" in changed) onWorkspaceRootChanged?.();
       setTimeout(() => setSysSaved(false), 2500);
@@ -924,7 +944,7 @@ const SettingsPanel = ({ onClose, onSaved, authedUser, onWorkspaceRootChanged }:
       const d = await r.json();
       if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
       setSysSettings(d.settings || {});
-      setSysDraft(prev => ({ ...prev, [key]: String(d.settings?.[key]?.value ?? "") }));
+      setSysDraft(prev => ({ ...prev, [key]: d.settings?.[key]?.type === "secret" ? "" : String(d.settings?.[key]?.value ?? "") }));
       if (key === "JARVIS_WORKSPACE_ROOT") onWorkspaceRootChanged?.();
     } catch (e: any) { setSysErr(e.message); }
     setSysSaving(false);
@@ -1107,7 +1127,7 @@ const SettingsPanel = ({ onClose, onSaved, authedUser, onWorkspaceRootChanged }:
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ color: selected?.username === u.username ? J.textPri : J.textSec, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {u.username}
-                        {u.username === "admin" && <span style={{ color: J.gold, fontSize: 9, marginLeft: 6 }}>ADMIN</span>}
+                        {u.role === "admin" && <span style={{ color: J.gold, fontSize: 9, marginLeft: 6 }}>ADMIN</span>}
                         {u.username === authedUser && <span style={{ color: J.accentDim, fontSize: 9, marginLeft: 6 }}>YOU</span>}
                       </div>
                       <div style={{ color: u.is_active ? J.ok : J.err, fontSize: 9, marginTop: 2 }}>
@@ -1115,7 +1135,7 @@ const SettingsPanel = ({ onClose, onSaved, authedUser, onWorkspaceRootChanged }:
                         <span style={{ color: J.textDim, marginLeft: 6 }}>{u.created_at?.slice(0,10)}</span>
                       </div>
                     </div>
-                    {isAdmin && u.username !== "admin" && u.username !== authedUser && (
+                    {isAdmin && u.role !== "admin" && u.username !== authedUser && (
                       <button onClick={e => { e.stopPropagation(); deleteUser(u.username); }} disabled={deleting === u.username} title={`Delete ${u.username}`}
                         style={{ background: "none", border: "none", color: J.err, fontSize: 14, cursor: "pointer", opacity: 0.6, padding: 0, flexShrink: 0 }}>
                         {deleting === u.username ? "…" : "⊗"}
@@ -1138,7 +1158,7 @@ const SettingsPanel = ({ onClose, onSaved, authedUser, onWorkspaceRootChanged }:
                 <div>
                   <div style={{ color: J.accent, fontSize: 13, fontFamily: J.fontHeader, fontWeight: 700, marginBottom: 4 }}>
                     {selected.username}
-                    {selected.username === "admin" && <span style={{ color: J.gold, fontSize: 10, marginLeft: 8 }}>ADMINISTRATOR</span>}
+                    {selected.role === "admin" && <span style={{ color: J.gold, fontSize: 10, marginLeft: 8 }}>ADMINISTRATOR</span>}
                   </div>
                   <div style={{ color: J.textDim, fontSize: 10, marginBottom: 20 }}>Created: {selected.created_at?.slice(0,16)}</div>
 
@@ -1153,7 +1173,7 @@ const SettingsPanel = ({ onClose, onSaved, authedUser, onWorkspaceRootChanged }:
                   </div>
 
                   {/* Active toggle (admin only, not self) */}
-                  {isAdmin && selected.username !== "admin" && (
+                  {isAdmin && selected.role !== "admin" && (
                     <div style={{ marginBottom: 20, display: "flex", alignItems: "center", gap: 12 }}>
                       <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
                         <input type="checkbox" checked={editActive} onChange={e => setEditActive(e.target.checked)} style={{ accentColor: J.ok, width: 14, height: 14 }} />
@@ -1181,8 +1201,8 @@ const SettingsPanel = ({ onClose, onSaved, authedUser, onWorkspaceRootChanged }:
           <div style={{ maxWidth: 660, margin: "0 auto", padding: "28px 24px 80px" }}>
             <div style={{ color: J.textDim, fontSize: 11, marginBottom: 20, lineHeight: 1.5 }}>
               These are process-wide operational settings — editable here instead of a .env file.
-              Changes apply immediately, no restart needed. API keys are not included here; those
-              stay in the environment.
+              Changes apply immediately, no restart needed. The LLM API key is saved server-side
+              and used for every LLM call going forward once set.
             </div>
             {sysLoad && <div style={{ color: J.textSec, fontSize: 11, animation: "hud-pulse 1.5s infinite" }}>Loading settings…</div>}
             {sysErr && <div style={{ color: J.err, fontSize: 11, marginBottom: 16, padding: "8px 12px", background: J.errDim, border: `1px solid ${J.err}33`, borderRadius: 3 }}>⚠ {sysErr}</div>}
@@ -1199,11 +1219,17 @@ const SettingsPanel = ({ onClose, onSaved, authedUser, onWorkspaceRootChanged }:
                   </span>
                 </div>
                 <div style={{ color: J.textDim, fontSize: 10, margin: "3px 0 6px" }}>{meta.description}</div>
+                {meta.type === "secret" && (
+                  <div style={{ color: meta.is_set ? J.ok : J.textDim, fontSize: 10, marginBottom: 4 }}>
+                    {meta.is_set ? `🔒 currently set (${meta.value})` : "— not set —"}
+                  </div>
+                )}
                 <div style={{ display: "flex", gap: 6 }}>
                   <input
                     value={sysDraft[key] ?? ""}
                     onChange={e => setSysDraft(prev => ({ ...prev, [key]: e.target.value }))}
-                    type={meta.type === "int" ? "number" : "text"}
+                    type={meta.type === "int" ? "number" : meta.type === "secret" ? "password" : "text"}
+                    placeholder={meta.type === "secret" ? (meta.is_set ? "enter a new key to replace it…" : "enter API key…") : undefined}
                     style={{ ...INP }}
                   />
                   {meta.source === "override" && (
@@ -3119,7 +3145,35 @@ const WorkspaceSidebar = ({
   };
 
   const checkAll  = () => { const s = new Set(filtered.filter(e => e.is_text).map(e => e.path)); setChecked(s); readChecked(s); };
-  const uncheckAll = () => { setChecked(new Set()); onFilesSelected([]); };
+  const uncheckAll = () => { setChecked(new Set()); onFilesSelected([]); setConfirmingDelete(false); };
+
+  // ── Delete selected files ────────────────────────────────────────────────────
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deletingFiles,    setDeletingFiles]    = useState(false);
+  const [deleteErr,        setDeleteErr]        = useState("");
+
+  const deleteSelected = async () => {
+    setDeletingFiles(true); setDeleteErr("");
+    try {
+      const r = await api(`${API_URL}/workspace/${userId}/files`, {
+        method: "DELETE", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project: currentProject, paths: Array.from(checked) }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      const failed = (d.results || []).filter((x: any) => !x.deleted);
+      if (failed.length) {
+        setDeleteErr(`${d.deleted_count}/${d.requested_count} deleted. Failed: ${failed.map((f: any) => `${f.path} (${f.error})`).join(", ")}`);
+      }
+      setConfirmingDelete(false);
+      setChecked(new Set());
+      onFilesSelected([]);
+      await loadFiles(currentProject);   // refresh the tree so removed files disappear
+    } catch (e: any) {
+      setDeleteErr(e.message || "Delete failed.");
+    }
+    setDeletingFiles(false);
+  };
 
   // ── Filter + sort + group ────────────────────────────────────────────────────
   const filtered = entries
@@ -3300,7 +3354,28 @@ const WorkspaceSidebar = ({
                 <span style={{ color: J.ok, fontSize: 9, marginLeft: "auto" }}>→ next message</span>
               </>
           }
+          {confirmingDelete ? (
+            <>
+              <span style={{ color: J.err, fontSize: 9 }}>Delete {totalChecked} file{totalChecked === 1 ? "" : "s"}?</span>
+              <button onClick={deleteSelected} disabled={deletingFiles}
+                style={{ padding: "2px 8px", borderRadius: 2, fontSize: 8, background: `${J.err}18`, border: `1px solid ${J.err}`, color: J.err, fontWeight: 700 }}>
+                {deletingFiles ? "…" : "CONFIRM"}
+              </button>
+              <button onClick={() => setConfirmingDelete(false)} disabled={deletingFiles}
+                style={{ padding: "2px 8px", borderRadius: 2, fontSize: 8, background: "none", border: `1px solid ${J.border}`, color: J.textDim }}>
+                CANCEL
+              </button>
+            </>
+          ) : (
+            <button onClick={() => setConfirmingDelete(true)} title="Delete the selected files from the workspace"
+              style={{ padding: "2px 8px", borderRadius: 2, fontSize: 8, background: "none", border: `1px solid ${J.err}55`, color: J.err, whiteSpace: "nowrap" }}>
+              🗑 DELETE
+            </button>
+          )}
         </div>
+      )}
+      {deleteErr && (
+        <div style={{ padding: "4px 12px", background: J.errDim, borderBottom: `1px solid ${J.err}33`, color: J.err, fontSize: 9 }}>⚠ {deleteErr}</div>
       )}
 
       {/* ── File list ── */}
@@ -3402,7 +3477,6 @@ const PersonaPicker = ({ persona, onChange, personas }: {
           position: "absolute", top: "110%", left: 0, zIndex: 200,
           background: J.bgPanel, border: `1px solid ${J.borderMid}`,
           borderRadius: 5, padding: 6, width: 220,
-          maxHeight: 360, overflowY: "auto",
           boxShadow: "0 12px 40px #000C",
         }}>
           {personas.map((p) => (
@@ -3414,8 +3488,8 @@ const PersonaPicker = ({ persona, onChange, personas }: {
               textAlign: "left", display: "flex", flexDirection: "column", gap: 2,
               fontFamily: J.fontMono,
             }}
-              onMouseEnter={e => { if (persona !== p.id) (e.currentTarget as HTMLButtonElement).style.background = J.bgCard; }}
-              onMouseLeave={e => { if (persona !== p.id) (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+              onMouseEnter={e => { if (persona !== id) (e.currentTarget as HTMLButtonElement).style.background = J.bgCard; }}
+              onMouseLeave={e => { if (persona !== id) (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
             >
               <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontFamily: J.fontHeader, fontWeight: 700 }}>
                 <span style={{ fontSize: 13 }}>{p.theme?.glyph || p.icon || "◈"}</span>{p.name}
@@ -3947,7 +4021,7 @@ const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => v
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.access_token) {
-        storeAuth(data.access_token, data.username || u);
+        storeAuth(data.access_token, data.username || u, !!data.is_admin);
         onAuth(data.username || u, persona);
       } else if (res.status === 401) {
         setErr(data.detail || "Invalid credentials.");
@@ -3992,7 +4066,7 @@ const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => v
         });
         const data2 = await res2.json().catch(() => ({}));
         if (res2.ok && data2.access_token) {
-          storeAuth(data2.access_token, data2.username || u);
+          storeAuth(data2.access_token, data2.username || u, !!data2.is_admin);
           onAuth(data2.username || u, persona);
         } else {
           // Setup succeeded but auto-login failed — drop to login screen
@@ -4230,6 +4304,10 @@ export default function App() {
   const [reactPaused,     setReactPaused]     = useState(false);
   // FIX: user_id from actual logged-in user, never hardcoded
   const [authedUser,      setAuthedUser]      = useState<string | null>(() => getAuth()?.username || null);
+  // FIX: was `authedUser === "admin"` — broke for any admin account not
+  // literally named "admin" (first-boot setup lets you pick any username).
+  // Now sourced from the backend's actual role, returned at login.
+  const [isAdmin,         setIsAdmin]         = useState<boolean>(() => getAuth()?.isAdmin || false);
 
   const fileRef        = useRef<HTMLInputElement>(null);
   const wsRef          = useRef<WebSocket | null>(null);
@@ -4250,7 +4328,7 @@ export default function App() {
 
   // Auto-signout on 401 (token expired / revoked)
   useEffect(() => {
-    const handler = () => { setAuthedUser(null); };
+    const handler = () => { setAuthedUser(null); setIsAdmin(false); };
     window.addEventListener("jarvis:signout", handler);
     return () => window.removeEventListener("jarvis:signout", handler);
   }, []);
@@ -4676,6 +4754,7 @@ export default function App() {
 
   if (!authedUser) return <Login personas={personaList} onAuth={(u, p) => {
     setAuthedUser(u);
+    setIsAdmin(getAuth()?.isAdmin || false);
     // Apply the persona chosen on the Login screen immediately into App state
     if (p && _personaThemeCache[p]) {
       applyTheme(p);
@@ -4793,7 +4872,7 @@ export default function App() {
             {halted ? "⛔ HALTED" : "⛔ HALT"}
           </button>
 
-          <button onClick={() => { clearAuth(); setAuthedUser(null); }}
+          <button onClick={() => { clearAuth(); setAuthedUser(null); setIsAdmin(false); }}
             title={`Session: ${authedUser}`}
             style={{ padding: "4px 10px", background: "transparent", border: `1px solid ${J.border}`, color: J.textSec, borderRadius: 2, fontSize: 10, letterSpacing: "0.06em", fontFamily: J.fontHeader, fontWeight: 600 }}>
             ⇤ {authedUser?.toUpperCase()}
@@ -5069,7 +5148,7 @@ export default function App() {
       </div>
 
       {/* ── Overlays ── */}
-      {settingsOpen    && <SettingsPanel    onClose={() => setSettingsOpen(false)}    onSaved={d => setProvInfo(prev => ({ ...prev, ...d }))} authedUser={authedUser} onWorkspaceRootChanged={() => {
+      {settingsOpen    && <SettingsPanel    onClose={() => setSettingsOpen(false)}    onSaved={d => setProvInfo(prev => ({ ...prev, ...d }))} authedUser={authedUser} isAdmin={isAdmin} onWorkspaceRootChanged={() => {
         if (!authedUser) return;
         api(`${API_URL}/workspace/${authedUser}?project=${encodeURIComponent(currentProject)}`)
           .then(r => r.json()).then(d => { if (d.workspace_root) setWorkspaceRoot(d.workspace_root); }).catch(() => {});
