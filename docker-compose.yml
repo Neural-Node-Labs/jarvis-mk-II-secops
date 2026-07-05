@@ -1,21 +1,43 @@
 services:
-
+  traefik:
+    image: traefik:latest
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - sir-network
+    command:
+      - --api.dashboard=false
+      - --api.insecure=false
+      - --log.level=INFO
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./local-cert.pem:/etc/traefik/certs/cert.pem:ro
+      - ./local-key.pem:/etc/traefik/certs/key.pem:ro
+      - ./traefik-dynamic.yml:/etc/traefik/dynamic/certs.yml:ro
   app:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: juan-app
+    container_name: sir-juan-platform
     restart: unless-stopped
+    networks:
+      - sir-network
     env_file:
       - path: .env
         required: false
-    ports:
-      - "${PORT:-80}:80"
     environment:
       LLM_PROVIDER:       ${LLM_PROVIDER:-ollama}
-      # This points the application directly to your customized engine
       LLM_MODEL:          ${LLM_MODEL:-qwen2.5-coder:0.5b}
-      #LLM_MODEL:          ${LLM_MODEL:-obedient-coder}
       LIGHTWEIGHT_MODEL:  ${LIGHTWEIGHT_MODEL:-0}
       DEEPSEEK_API_KEY:   ${DEEPSEEK_API_KEY:-}
       ANTHROPIC_API_KEY:  ${ANTHROPIC_API_KEY:-}
@@ -26,9 +48,7 @@ services:
       PUID: ${PUID:-1001}
       PGID: ${PGID:-1001}
     volumes:
-      - type: bind
-        source: ./sir/data
-        target: /app/data
+      - sir-juan-data:/app/data
       - type: bind
         source: ./sir/experienced
         target: /app/experienced
@@ -41,39 +61,44 @@ services:
       timeout: 5s
       retries: 5
       start_period: 25s
-#    depends_on:
-#      ollama:
-#        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.sir-juan.rule=Host(`localhost`)"
+      - "traefik.http.routers.sir-juan.entrypoints=websecure"
+      - "traefik.http.routers.sir-juan.tls=true"
+      - "traefik.http.services.sir-juan.loadbalancer.server.port=80"
 
 
-#  ollama:
-#    image: ollama/ollama:latest
-#    restart: unless-stopped
-#    # Not published to the host: only the gateway (on the internal
-#    # network) can reach Ollama. Publishing 11434 to the host would let
-#    # anyone bypass the gateway's auth/rate-limiting entirely and talk
-#    # to the model directly.
-#    entrypoint: ["/bin/sh", "-c"]
-#    command:
-#      - |
-#        ollama serve &
-#        sleep 5
-#        if ! ollama list | grep -q 'qwen2.5-coder:0.5b'; then
-#          echo "Pulling qwen2.5-coder:0.5b..."
-#          ollama pull qwen2.5-coder:0.5b
-#        fi
-#        wait
-#    healthcheck:
-#      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
-#      interval: 10s
-#      timeout: 5s
-#      retries: 5
-#      start_period: 15s
-#    volumes:
-#      - type: bind
-#        source: ./ollama_models
-#        target: /root/.ollama
-#
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    # Not published to the host: only the gateway (on the internal
+    # network) can reach Ollama. Publishing 11434 to the host would let
+    # anyone bypass the gateway's auth/rate-limiting entirely and talk
+    # to the model directly.
+    entrypoint: ["/bin/sh", "-c"]
+    networks:
+      - sir-network
+    command:
+      - |
+        ollama serve &
+        sleep 5
+        if ! ollama list | grep -q 'qwen2.5-coder:0.5b'; then
+          echo "Pulling qwen2.5-coder:0.5b..."
+          ollama pull qwen2.5-coder:0.5b
+        fi
+        wait
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    volumes:
+      - type: bind
+        source: ./ollama_models
+        target: /root/.ollama
+
 
 
 
@@ -107,3 +132,9 @@ services:
 #      - type: bind
 #        source: ./ollama_models
 #        target: /root/.ollama
+networks:
+  sir-network:
+    driver: bridge
+volumes:
+  traefik-letsencrypt:
+  sir-juan-data:

@@ -590,6 +590,43 @@ const Bubble = ({ msg }: { msg: any }) => {
     </div>
   );
 
+  if (msg.role === "system_note") {
+    return (
+      <div className="hud-msg" style={{
+        marginBottom: 6, padding: "7px 12px",
+        background: `${J.gold}08`, border: `1px solid ${J.gold}25`,
+        borderLeft: `2px solid ${J.gold}55`, borderRadius: 3,
+      }}>
+        <div style={{ color: J.gold, fontSize: 10, letterSpacing: "0.08em", marginBottom: 3 }}>⬆ FILES SAVED TO WORKSPACE</div>
+        {(msg.items || []).map((r: any, i: number) => (
+          <div key={i} style={{ fontSize: 11, color: J.textSec, lineHeight: 1.6 }}>
+            {!r.saved ? `✗ ${r.name}: ${r.error || "save failed"}`
+              : r.archive ? (r.extracted
+                  ? `📦 ${r.name} → extracted to ${r.extract_dir}/ (${(r.files || []).length} file${(r.files || []).length === 1 ? "" : "s"})`
+                  : `✗ ${r.name}: extraction failed — ${r.error || "unknown error"}`)
+              : `📄 ${r.name} → ${r.path}`}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (msg.role === "thought") {
+    return (
+      <div className="hud-msg" style={{
+        marginBottom: 6, padding: "8px 12px",
+        background: `${J.textDim}08`, border: `1px solid ${J.borderMid}`,
+        borderLeft: `2px solid ${J.textDim}55`, borderRadius: 3,
+      }}>
+        <div style={{ color: J.textDim, fontSize: 10, letterSpacing: "0.08em", marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}>
+          <span>💭</span>
+          <span>THOUGHT{typeof msg.iteration === "number" ? ` — ITER ${String(msg.iteration).padStart(2, "0")}` : ""}</span>
+        </div>
+        <div style={{ color: J.textSec, fontSize: 12, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{msg.text}</div>
+      </div>
+    );
+  }
+
   if (msg.role === "tool_call") {
     const sk = SKILL_META[msg.skill] || { border: J.borderMid, icon: "◈" };
     return (
@@ -599,8 +636,8 @@ const Bubble = ({ msg }: { msg: any }) => {
         borderLeft: `2px solid ${sk.border}`, borderRadius: 3,
       }}>
         <div style={{ color: sk.border, fontSize: 10, letterSpacing: "0.08em", marginBottom: 3, display: "flex", alignItems: "center", gap: 6 }}>
-          <span>{sk.icon}</span>
-          <span>{msg.skill?.toUpperCase()} → {msg.action?.toUpperCase()}</span>
+          <span>⚡</span>
+          <span>ACTION — {msg.skill?.toUpperCase()}.{msg.action?.toUpperCase()}</span>
           {msg.confirmed && <Chip label="⚡ AUTO" color={J.warn} />}
         </div>
         <pre style={{ margin: 0, fontSize: 10, color: J.textSec, overflow: "auto", maxHeight: 80, lineHeight: 1.5 }}>
@@ -620,7 +657,7 @@ const Bubble = ({ msg }: { msg: any }) => {
         borderLeft: `2px solid ${ok ? J.ok : J.err}`, borderRadius: 3,
       }}>
         <div style={{ color: ok ? J.ok : J.err, fontSize: 10, letterSpacing: "0.08em", marginBottom: 3 }}>
-          {ok ? "✓ RESULT" : "✗ ERROR"}
+          {ok ? "👁 OBSERVATION — SUCCESS" : "👁 OBSERVATION — ERROR"}
         </div>
         <pre style={{ margin: 0, fontSize: 10, color: J.textSec, overflow: "auto", maxHeight: 120, lineHeight: 1.5 }}>
           {JSON.stringify(msg.data?.output ?? msg.data?.error, null, 2)}
@@ -773,12 +810,13 @@ const ModelPicker = ({ info, onChange }: { info: any; onChange: (d: any) => void
 };
 
 // ─── Settings Panel ───────────────────────────────────────────────────────────
-const SettingsPanel = ({ onClose, onSaved, authedUser }: {
+const SettingsPanel = ({ onClose, onSaved, authedUser, onWorkspaceRootChanged }: {
   onClose: () => void;
   onSaved: (d: any) => void;
   authedUser: string | null;
+  onWorkspaceRootChanged?: () => void;
 }) => {
-  const [tab,     setTab]     = useState<"llm"|"users">("llm");
+  const [tab,     setTab]     = useState<"llm"|"users"|"system">("llm");
   // ── LLM tab ──
   const [prov,    setProv]    = useState("deepseek");
   const [model,   setModel]   = useState("deepseek-coder");
@@ -828,6 +866,68 @@ const SettingsPanel = ({ onClose, onSaved, authedUser }: {
       setUsers(d.users || []);
     } catch (e: any) { setUsersErr(e.message); }
     setUsersLoad(false);
+  };
+
+  // ── System tab — runtime settings (replaces .env-and-restart) ──
+  const [sysSettings,  setSysSettings]  = useState<Record<string, any>>({});
+  const [sysDraft,     setSysDraft]     = useState<Record<string, string>>({});
+  const [sysLoad,      setSysLoad]      = useState(false);
+  const [sysErr,       setSysErr]       = useState("");
+  const [sysSaving,    setSysSaving]    = useState(false);
+  const [sysSaved,     setSysSaved]     = useState(false);
+
+  const loadSystemSettings = async () => {
+    setSysLoad(true); setSysErr("");
+    try {
+      const r = await api(`${API_URL}/settings`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      setSysSettings(d.settings || {});
+      const draft: Record<string, string> = {};
+      Object.entries(d.settings || {}).forEach(([k, v]: [string, any]) => { draft[k] = String(v.value); });
+      setSysDraft(draft);
+    } catch (e: any) { setSysErr(e.message); }
+    setSysLoad(false);
+  };
+
+  const saveSystemSettings = async () => {
+    setSysSaving(true); setSysErr(""); setSysSaved(false);
+    try {
+      // Only send keys whose draft value actually differs from the effective value —
+      // keeps unrelated settings untouched and gives cleaner validation errors.
+      const changed: Record<string, any> = {};
+      Object.entries(sysDraft).forEach(([k, v]) => {
+        if (String(sysSettings[k]?.value) !== v) changed[k] = v;
+      });
+      if (Object.keys(changed).length === 0) { setSysSaving(false); return; }
+      const r = await api(`${API_URL}/settings`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(changed),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      setSysSettings(d.settings || {});
+      setSysSaved(true);
+      if ("JARVIS_WORKSPACE_ROOT" in changed) onWorkspaceRootChanged?.();
+      setTimeout(() => setSysSaved(false), 2500);
+    } catch (e: any) { setSysErr(e.message); }
+    setSysSaving(false);
+  };
+
+  const resetSystemSetting = async (key: string) => {
+    setSysSaving(true); setSysErr("");
+    try {
+      const r = await api(`${API_URL}/settings/reset`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keys: [key] }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      setSysSettings(d.settings || {});
+      setSysDraft(prev => ({ ...prev, [key]: String(d.settings?.[key]?.value ?? "") }));
+      if (key === "JARVIS_WORKSPACE_ROOT") onWorkspaceRootChanged?.();
+    } catch (e: any) { setSysErr(e.message); }
+    setSysSaving(false);
   };
 
   const selectUser = (u: any) => {
@@ -894,7 +994,7 @@ const SettingsPanel = ({ onClose, onSaved, authedUser }: {
   };
 
   const TAB = (id: typeof tab, label: string) => (
-    <button onClick={() => { setTab(id); if (id === "users") loadUsers(); }} style={{
+    <button onClick={() => { setTab(id); if (id === "users") loadUsers(); if (id === "system") loadSystemSettings(); }} style={{
       padding: "6px 20px", fontSize: 11, fontFamily: J.fontHeader, fontWeight: 600,
       background: tab === id ? J.bgCard : "transparent",
       border: `1px solid ${tab === id ? J.accent + "55" : J.border}`,
@@ -917,6 +1017,7 @@ const SettingsPanel = ({ onClose, onSaved, authedUser }: {
       <div style={{ padding: "0 24px", background: J.bgPanel, display: "flex", gap: 2, borderBottom: `1px solid ${J.border}`, flexShrink: 0 }}>
         {TAB("llm",   "⚙ LLM CONFIG")}
         {TAB("users", "⬡ USER MANAGEMENT")}
+        {isAdmin && TAB("system", "⛭ SYSTEM")}
       </div>
       {/* Body */}
       <div style={{ flex: 1, overflowY: "auto" }}>
@@ -1072,6 +1173,54 @@ const SettingsPanel = ({ onClose, onSaved, authedUser }: {
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {/* ── System Tab — runtime settings, replaces .env-and-restart ── */}
+        {tab === "system" && isAdmin && (
+          <div style={{ maxWidth: 660, margin: "0 auto", padding: "28px 24px 80px" }}>
+            <div style={{ color: J.textDim, fontSize: 11, marginBottom: 20, lineHeight: 1.5 }}>
+              These are process-wide operational settings — editable here instead of a .env file.
+              Changes apply immediately, no restart needed. API keys are not included here; those
+              stay in the environment.
+            </div>
+            {sysLoad && <div style={{ color: J.textSec, fontSize: 11, animation: "hud-pulse 1.5s infinite" }}>Loading settings…</div>}
+            {sysErr && <div style={{ color: J.err, fontSize: 11, marginBottom: 16, padding: "8px 12px", background: J.errDim, border: `1px solid ${J.err}33`, borderRadius: 3 }}>⚠ {sysErr}</div>}
+            {!sysLoad && Object.entries(sysSettings).map(([key, meta]: [string, any]) => (
+              <div key={key} style={{ marginBottom: 18 }}>
+                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+                  <Lbl>{meta.label}</Lbl>
+                  <span style={{
+                    fontSize: 9, letterSpacing: "0.06em", padding: "1px 6px", borderRadius: 2,
+                    color: meta.source === "override" ? J.accent : J.textDim,
+                    border: `1px solid ${meta.source === "override" ? J.accent + "55" : J.border}`,
+                  }}>
+                    {meta.source === "override" ? "CUSTOM" : meta.source === "environment" ? "FROM ENV" : "DEFAULT"}
+                  </span>
+                </div>
+                <div style={{ color: J.textDim, fontSize: 10, margin: "3px 0 6px" }}>{meta.description}</div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <input
+                    value={sysDraft[key] ?? ""}
+                    onChange={e => setSysDraft(prev => ({ ...prev, [key]: e.target.value }))}
+                    type={meta.type === "int" ? "number" : "text"}
+                    style={{ ...INP }}
+                  />
+                  {meta.source === "override" && (
+                    <button onClick={() => resetSystemSetting(key)} disabled={sysSaving}
+                      title="Revert to environment/default value"
+                      style={{ background: J.bgCard, border: `1px solid ${J.border}`, color: J.textSec, padding: "0 12px", borderRadius: 2, fontSize: 10, whiteSpace: "nowrap" }}>
+                      ↺ RESET
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+            {!sysLoad && Object.keys(sysSettings).length > 0 && (
+              <button onClick={saveSystemSettings} disabled={sysSaving} style={{ padding: "8px 28px", borderRadius: 2, background: sysSaved ? J.okDim : `${J.accent}0C`, border: `1px solid ${sysSaved ? J.ok : J.accent}`, color: sysSaved ? J.ok : J.accent, fontSize: 12, letterSpacing: "0.1em" }}>
+                {sysSaving ? "SAVING…" : sysSaved ? "✓ SETTINGS SAVED" : "APPLY SETTINGS"}
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -2042,9 +2191,10 @@ const SchedulerPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
   const [lastRun,  setLastRun]  = useState<{ taskId: string; status: string; output: string } | null>(null);
 
   const blankForm = {
-    name: "", user_id: userId, task_type: "ai_call" as "ai_call" | "command",
+    name: "", user_id: userId, task_type: "ai_call" as "ai_call" | "command" | "skill_action",
     schedule_kind: "interval" as "interval" | "cron" | "once", schedule_value: "3600",
     message: "", persona: "", command: "", cwd: "", timeout_seconds: "300", enabled: true,
+    skill: "code_tools", action: "run_command", params_json: "{}",
   };
   const [form, setForm] = useState(blankForm);
   const setF = (k: string, v: any) => setForm(prev => ({ ...prev, [k]: v }));
@@ -2071,6 +2221,8 @@ const SchedulerPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
       message: t.payload?.message || "", persona: t.payload?.persona || "",
       command: t.payload?.command || "", cwd: t.payload?.cwd || "",
       timeout_seconds: String(t.payload?.timeout_seconds || 300), enabled: t.enabled,
+      skill: t.payload?.skill || "code_tools", action: t.payload?.action || "run_command",
+      params_json: JSON.stringify(t.payload?.params || {}, null, 2),
     });
     setEditingId(t.id); setView("form");
   };
@@ -2080,9 +2232,16 @@ const SchedulerPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
       kind: form.schedule_kind,
       value: form.schedule_kind === "interval" ? parseInt(form.schedule_value, 10) || 0 : form.schedule_value,
     };
-    const payload = form.task_type === "ai_call"
-      ? { message: form.message, ...(form.persona ? { persona: form.persona } : {}) }
-      : { command: form.command, ...(form.cwd ? { cwd: form.cwd } : {}), timeout_seconds: parseInt(form.timeout_seconds, 10) || 300 };
+    let payload: any;
+    if (form.task_type === "ai_call") {
+      payload = { message: form.message, ...(form.persona ? { persona: form.persona } : {}) };
+    } else if (form.task_type === "command") {
+      payload = { command: form.command, ...(form.cwd ? { cwd: form.cwd } : {}), timeout_seconds: parseInt(form.timeout_seconds, 10) || 300 };
+    } else {
+      let params = {};
+      try { params = JSON.parse(form.params_json || "{}"); } catch { /* validated in save() */ }
+      payload = { skill: form.skill, action: form.action, params };
+    }
     return { name: form.name, user_id: form.user_id || userId, task_type: form.task_type, schedule, payload, enabled: form.enabled };
   };
 
@@ -2090,6 +2249,10 @@ const SchedulerPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
     if (!form.name.trim()) { setErr("Name is required."); return; }
     if (form.task_type === "ai_call" && !form.message.trim()) { setErr("Message is required for AI call tasks."); return; }
     if (form.task_type === "command" && !form.command.trim()) { setErr("Command is required for command tasks."); return; }
+    if (form.task_type === "skill_action") {
+      if (!form.skill.trim() || !form.action.trim()) { setErr("Skill and action are required for skill-action tasks."); return; }
+      try { JSON.parse(form.params_json || "{}"); } catch { setErr("Params must be valid JSON."); return; }
+    }
     setSaving(true); setErr("");
     try {
       const body = buildPayload();
@@ -2202,7 +2365,7 @@ const SchedulerPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
                     <div>
                       <span style={{ color: J.textPri, fontSize: 13, fontFamily: J.fontHeader, fontWeight: 600 }}>{t.name}</span>
                       <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
-                        <Chip label={t.task_type === "ai_call" ? "◈ AI CALL" : "▸ COMMAND"} color={t.task_type === "ai_call" ? J.react : J.accent} />
+                        <Chip label={t.task_type === "ai_call" ? "◈ AI CALL" : t.task_type === "command" ? "▸ COMMAND" : "⚙ SKILL ACTION"} color={t.task_type === "ai_call" ? J.react : t.task_type === "command" ? J.accent : J.gold} />
                         <Chip label={scheduleSummary(t)} color={J.textSec} />
                         {t.last_status && <Chip label={`last: ${t.last_status}`} color={SCHED_STATUS_COLORS[t.last_status] || J.textSec} />}
                       </div>
@@ -2226,7 +2389,7 @@ const SchedulerPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
                     </div>
                   </div>
                   <div style={{ color: J.textDim, fontSize: 10, marginTop: 8 }}>
-                    {t.task_type === "ai_call" ? `"${(t.payload?.message || "").slice(0,90)}"` : t.payload?.command}
+                    {t.task_type === "ai_call" ? `"${(t.payload?.message || "").slice(0,90)}"` : t.task_type === "command" ? t.payload?.command : `${t.payload?.skill}.${t.payload?.action}`}
                   </div>
                   <div style={{ color: J.textDim, fontSize: 9, marginTop: 4 }}>
                     next run: {t.next_run_at ? new Date(t.next_run_at).toLocaleString() : "—"}
@@ -2263,8 +2426,9 @@ const SchedulerPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
           <div>
             {FLD("Name", INP(form.name, v => setF("name", v), "e.g. Nightly recon summary"))}
             {FLD("Task Type", SEL(form.task_type, v => setF("task_type", v), [
-              { v: "ai_call", label: "AI Call — send a message/task to the agent" },
-              { v: "command", label: "Command — run a shell command or python script" },
+              { v: "ai_call",     label: "AI Call — send a message/task to the agent" },
+              { v: "command",     label: "Command — run a shell command or python script" },
+              { v: "skill_action", label: "Skill Action — call any registered skill directly (e.g. code_tools.run_command)" },
             ]))}
 
             {form.task_type === "ai_call" ? (
@@ -2272,11 +2436,17 @@ const SchedulerPanel = ({ onClose, userId }: { onClose: () => void; userId: stri
                 {FLD("Message / Task", INP(form.message, v => setF("message", v), "What should the agent do when this fires?", true))}
                 {FLD("Persona (optional)", INP(form.persona, v => setF("persona", v), "leave blank for default persona"))}
               </>
-            ) : (
+            ) : form.task_type === "command" ? (
               <>
                 {FLD("Command", INP(form.command, v => setF("command", v), "python3 /app/output/myscript.py arg1"))}
                 {FLD("Working directory (optional)", INP(form.cwd, v => setF("cwd", v), "/app/output"))}
                 {FLD("Timeout (seconds)", INP(form.timeout_seconds, v => setF("timeout_seconds", v), "300"))}
+              </>
+            ) : (
+              <>
+                {FLD("Skill", INP(form.skill, v => setF("skill", v), "code_tools"))}
+                {FLD("Action", INP(form.action, v => setF("action", v), "run_command"))}
+                {FLD("Params (JSON)", INP(form.params_json, v => setF("params_json", v), '{"command": "pytest"}', true))}
               </>
             )}
 
@@ -3075,7 +3245,7 @@ const WorkspaceSidebar = ({
 
         {/* Path display */}
         <div style={{ color: J.textDim, fontSize: 8, marginTop: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: "0.04em" }} title={wsRoot}>
-          {_base_workspace}/{userId}/{currentProject}/workspace
+          {wsRoot || `${_base_workspace}/${userId}/${currentProject}/workspace`}
         </div>
       </div>
 
@@ -3139,7 +3309,7 @@ const WorkspaceSidebar = ({
         {error && (
           <div style={{ padding: "10px 12px" }}>
             <div style={{ color: J.err, fontSize: 10, marginBottom: 4 }}>✗ {error}</div>
-            <div style={{ color: J.textDim, fontSize: 9 }}>Workspace: {_base_workspace}/{userId}/{currentProject}/workspace</div>
+            <div style={{ color: J.textDim, fontSize: 9 }}>Workspace: {wsRoot || `${_base_workspace}/${userId}/${currentProject}/workspace`}</div>
           </div>
         )}
         {!loading && !error && entries.length === 0 && (
@@ -3736,653 +3906,6 @@ const PersonaManager = ({
   );
 };
 
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// BILLING PANEL — SaaS Subscription & Usage Dashboard
-// Backend: /api/billing/* (enabled only when SAAS_BILLING_ENABLED=true)
-// ═══════════════════════════════════════════════════════════════════════════════
-interface BillingPlan {
-  plan_id: string; name: string; base_price: number; billing_interval: string;
-  currency: string; features: string; metered_rates: string;
-}
-interface BillingCustomer {
-  customer_id: string; username: string; name: string; email: string;
-  country: string; currency: string; status: string;
-}
-interface BillingSub {
-  subscription_id: string; plan_id: string; status: string;
-  current_period_start: string; current_period_end: string;
-}
-interface BillingInvoice {
-  invoice_id: string; total: number; currency: string; status: string;
-  issued_at: string; due_at: string; paid_at: string;
-  period_start: string; period_end: string; line_items: string;
-}
-
-const BillingPanel = ({ onClose, authedUser }: { onClose: () => void; authedUser: string }) => {
-  const [billingEnabled, setBillingEnabled] = useState<boolean | null>(null);
-  const [tab,            setTab]            = useState<"overview"|"plans"|"usage"|"invoices"|"admin">("overview");
-  const [plans,          setPlans]          = useState<BillingPlan[]>([]);
-  const [customer,       setCustomer]       = useState<BillingCustomer | null>(null);
-  const [subs,           setSubs]           = useState<BillingSub[]>([]);
-  const [invoices,       setInvoices]       = useState<BillingInvoice[]>([]);
-  const [health,         setHealth]         = useState<any>(null);
-  const [loading,        setLoading]        = useState(true);
-  const [err,            setErr]            = useState("");
-  const [creating,       setCreating]       = useState(false);
-  const [createdOk,      setCreatedOk]      = useState(false);
-  const [custForm,       setCustForm]       = useState({ name:"", email:"", country:"US", currency:"USD" });
-  const [usageForm,      setUsageForm]      = useState({ subscriptionId:"", metric:"api_calls", quantity:"1" });
-  const [usageResult,    setUsageResult]    = useState<any>(null);
-  const [cycleRunning,   setCycleRunning]   = useState(false);
-  const [cycleResult,    setCycleResult]    = useState<any>(null);
-  const isAdmin = authedUser === "admin";
-
-  const load = async () => {
-    setLoading(true); setErr("");
-    try {
-      // Check feature flag first
-      const sr = await api(`${API_URL}/billing/status`);
-      const sd = await sr.json();
-      setBillingEnabled(sd.enabled);
-      if (!sd.enabled) { setLoading(false); return; }
-
-      const [plR, cuR, invR, hlR] = await Promise.all([
-        api(`${API_URL}/billing/plans`),
-        api(`${API_URL}/billing/customers/me`),
-        api(`${API_URL}/billing/invoices`),
-        api(`${API_URL}/billing/health`),
-      ]);
-      if (plR.ok)  setPlans((await plR.json()).plans || []);
-      if (cuR.ok)  { const cd = await cuR.json(); setCustomer(cd.customer || null); }
-      if (invR.ok) setInvoices((await invR.json()).invoices || []);
-      if (hlR.ok)  setHealth(await hlR.json());
-
-      // Load subscriptions if customer exists
-      if (cuR.ok) {
-        const cd = await (await api(`${API_URL}/billing/customers/me`)).json();
-        if (cd.customer) {
-          const subR = await api(`${API_URL}/billing/subscriptions`);
-          if (subR.ok) setSubs((await subR.json()).subscriptions || []);
-        }
-      }
-    } catch (e: any) { setErr(e.message); }
-    setLoading(false);
-  };
-
-  useEffect(() => { load(); }, []);
-
-  const createCustomer = async () => {
-    if (!custForm.name || !custForm.email) { setErr("Name and email required"); return; }
-    setCreating(true); setErr("");
-    try {
-      const r = await api(`${API_URL}/billing/customers`, {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ ...custForm, username: authedUser }),
-      });
-      if (!r.ok) { const d = await r.json(); throw new Error(d.detail); }
-      await load(); setCreatedOk(true);
-    } catch (e: any) { setErr(e.message); }
-    setCreating(false);
-  };
-
-  const subscribe = async (planId: string) => {
-    if (!customer) { setErr("Create a billing profile first"); return; }
-    setErr("");
-    try {
-      const r = await api(`${API_URL}/billing/subscriptions`, {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ customerId: customer.customer_id, planId }),
-      });
-      if (!r.ok) { const d = await r.json(); throw new Error(d.detail); }
-      await load();
-    } catch (e: any) { setErr(e.message); }
-  };
-
-  const cancelSub = async (subId: string) => {
-    if (!window.confirm("Cancel this subscription?")) return;
-    try {
-      await api(`${API_URL}/billing/subscriptions/${subId}`, { method:"DELETE" });
-      await load();
-    } catch (e: any) { setErr(e.message); }
-  };
-
-  const recordUsage = async () => {
-    if (!usageForm.subscriptionId) { setErr("Subscription ID required"); return; }
-    setErr("");
-    try {
-      const r = await api(`${API_URL}/billing/usage`, {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({
-          subscriptionId: usageForm.subscriptionId,
-          metric: usageForm.metric,
-          quantity: parseFloat(usageForm.quantity) || 1,
-          idempotencyKey: `${Date.now()}-${Math.random()}`,
-        }),
-      });
-      const d = await r.json();
-      setUsageResult(d);
-    } catch (e: any) { setErr(e.message); }
-  };
-
-  const runCycle = async () => {
-    setCycleRunning(true); setCycleResult(null); setErr("");
-    try {
-      const r = await api(`${API_URL}/billing/run-cycle`, {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ asOfDate: new Date().toISOString() }),
-      });
-      const d = await r.json();
-      setCycleResult(d); await load();
-    } catch (e: any) { setErr(e.message); }
-    setCycleRunning(false);
-  };
-
-  const statusColor = (s: string) =>
-    s === "active" ? J.ok : s === "paid" ? J.ok : s === "past_due" ? J.warn :
-    s === "canceled" ? J.err : s === "open" ? J.accent : J.textSec;
-
-  const fmtMoney = (amt: number, cur = "USD") =>
-    `${cur} ${(amt || 0).toFixed(2)}`;
-
-  const fmtDate = (iso: string) => iso ? iso.slice(0,10) : "—";
-
-  const INP: React.CSSProperties = {
-    width:"100%", padding:"7px 10px", borderRadius:3,
-    background:J.bgCard, border:`1px solid ${J.borderMid}`,
-    color:J.textPri, fontSize:12,
-  };
-
-  const StatCard = ({ label, value, color=J.accent, sub="" }: any) => (
-    <div style={{ padding:"12px 14px", background:J.bgCard, border:`1px solid ${color}22`,
-      borderTop:`2px solid ${color}55`, borderRadius:4, position:"relative" as const }}>
-      <Corners color={color} size={5} />
-      <div style={{ color, fontSize:20, fontFamily:J.fontHeader, fontWeight:700 }}>{value}</div>
-      <div style={{ color:J.textSec, fontSize:10, marginTop:4 }}>{label}</div>
-      {sub && <div style={{ color:J.textDim, fontSize:9, marginTop:2 }}>{sub}</div>}
-    </div>
-  );
-
-  const TAB = (id: typeof tab, label: string, color=J.accent) => (
-    <button onClick={() => setTab(id)} style={{
-      padding:"5px 14px", fontSize:10, fontFamily:J.fontHeader, fontWeight:600,
-      background: tab===id ? J.bgCard : "transparent",
-      border:`1px solid ${tab===id ? color+"66" : J.border}`,
-      borderBottom: tab===id ? `1px solid ${J.bgCard}` : `1px solid ${J.border}`,
-      borderRadius:"3px 3px 0 0", color: tab===id ? color : J.textSec,
-    }}>{label}</button>
-  );
-
-  return (
-    <div style={{ position:"fixed", inset:0, background:`${J.bgDeep}F4`, zIndex:100,
-      display:"flex", flexDirection:"column", fontFamily:J.fontMono }}>
-      {/* Header */}
-      <div style={{ padding:"12px 24px", borderBottom:`1px solid ${J.borderMid}`,
-        background:J.bgPanel, display:"flex", alignItems:"center",
-        justifyContent:"space-between", flexShrink:0 }}>
-        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-          <div style={{ width:22, height:22, borderRadius:"50%", background:J.bgCard,
-            border:`1px solid ${J.gold}55`, display:"flex", alignItems:"center",
-            justifyContent:"center", color:J.gold, fontSize:11 }}>$</div>
-          <div>
-            <div style={{ color:J.gold, fontSize:11, letterSpacing:"0.18em",
-              fontFamily:J.fontHeader, fontWeight:700 }}>SAAS BILLING PLATFORM</div>
-            <div style={{ color:J.textDim, fontSize:8, letterSpacing:"0.1em" }}>
-              SUBSCRIPTIONS · USAGE · INVOICES · PAYMENTS
-            </div>
-          </div>
-          {billingEnabled === false && (
-            <div style={{ padding:"2px 10px", background:J.errDim, border:`1px solid ${J.err}44`,
-              color:J.err, fontSize:9, borderRadius:2, marginLeft:8 }}>
-              ⊗ DISABLED — set SAAS_BILLING_ENABLED=true
-            </div>
-          )}
-          {billingEnabled === true && (
-            <div style={{ padding:"2px 10px", background:`${J.ok}0C`, border:`1px solid ${J.ok}44`,
-              color:J.ok, fontSize:9, borderRadius:2, marginLeft:8 }}>● ENABLED</div>
-          )}
-        </div>
-        <button onClick={onClose} style={{ background:"none", border:`1px solid ${J.borderMid}`,
-          color:J.textSec, padding:"4px 14px", borderRadius:2, fontSize:11 }}>✕</button>
-      </div>
-
-      {/* Disabled state */}
-      {billingEnabled === false && (
-        <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center",
-          flexDirection:"column", gap:16, color:J.textDim }}>
-          <div style={{ fontSize:36, opacity:0.3 }}>$</div>
-          <div style={{ fontSize:13, color:J.textSec }}>SaaS Billing is disabled</div>
-          <div style={{ fontSize:11, color:J.textDim, textAlign:"center", maxWidth:420, lineHeight:1.8 }}>
-            Set <span style={{ color:J.accent }}>SAAS_BILLING_ENABLED=true</span> in your environment
-            and restart the server to enable the billing platform.
-          </div>
-          <div style={{ padding:"10px 20px", background:J.bgCard, border:`1px solid ${J.borderMid}`,
-            borderRadius:4, fontFamily:"'Share Tech Mono',monospace", fontSize:11, color:J.accent }}>
-            export SAAS_BILLING_ENABLED=true
-          </div>
-        </div>
-      )}
-
-      {/* Loading */}
-      {loading && billingEnabled !== false && (
-        <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center",
-          color:J.textSec, fontSize:12, animation:"hud-pulse 1.5s infinite" }}>
-          Loading billing data…
-        </div>
-      )}
-
-      {/* Main content */}
-      {!loading && billingEnabled && (
-        <>
-          {/* Tabs */}
-          <div style={{ padding:"0 24px", background:J.bgPanel, display:"flex", gap:2,
-            borderBottom:`1px solid ${J.border}`, flexShrink:0 }}>
-            {TAB("overview", "⊞ OVERVIEW",    J.gold)}
-            {TAB("plans",    "◈ PLANS",        J.accent)}
-            {TAB("usage",    "⬡ USAGE",        J.react)}
-            {TAB("invoices", "⊕ INVOICES",     J.ok)}
-            {isAdmin && TAB("admin", "⚙ ADMIN", J.err)}
-          </div>
-
-          {err && <div style={{ margin:"0 24px 0", padding:"6px 12px", background:J.errDim,
-            border:`1px solid ${J.err}33`, color:J.err, fontSize:11 }}>⚠ {err}</div>}
-
-          <div style={{ flex:1, overflowY:"auto", padding:"20px 24px" }}>
-
-            {/* ── OVERVIEW ── */}
-            {tab === "overview" && (
-              <div>
-                {/* Stats row */}
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, marginBottom:20 }}>
-                  <StatCard label="Active Subscriptions"
-                    value={subs.filter(s=>s.status==="active").length} color={J.ok} />
-                  <StatCard label="Open Invoices"
-                    value={invoices.filter(i=>i.status==="open").length} color={J.accent} />
-                  <StatCard label="Total Invoiced"
-                    value={fmtMoney(invoices.reduce((s,i)=>s+i.total,0))} color={J.gold} />
-                  <StatCard label="Paid Invoices"
-                    value={invoices.filter(i=>i.status==="paid").length} color={J.react} />
-                </div>
-
-                {/* Customer profile */}
-                {!customer ? (
-                  <div style={{ padding:20, background:J.bgCard, border:`1px solid ${J.borderMid}`,
-                    borderTop:`2px solid ${J.gold}55`, borderRadius:4, marginBottom:16 }}>
-                    <Lbl c={J.gold}>⊞ CREATE BILLING PROFILE</Lbl>
-                    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginTop:10 }}>
-                      {[["name","Full Name","John Doe"],["email","Email","john@example.com"]].map(([f,l,p]) => (
-                        <div key={f}>
-                          <Lbl>{l}</Lbl>
-                          <input value={(custForm as any)[f]} placeholder={p}
-                            onChange={e => setCustForm(cf => ({...cf, [f]: e.target.value}))}
-                            style={{...INP, marginTop:5}} />
-                        </div>
-                      ))}
-                      <div>
-                        <Lbl>Country</Lbl>
-                        <select value={custForm.country}
-                          onChange={e => setCustForm(cf => ({...cf, country:e.target.value}))}
-                          style={{...INP, marginTop:5}}>
-                          {["US","GB","DE","FR","CA","AU","JP","SG"].map(c=>(
-                            <option key={c} value={c}>{c}</option>))}
-                        </select>
-                      </div>
-                      <div>
-                        <Lbl>Currency</Lbl>
-                        <select value={custForm.currency}
-                          onChange={e => setCustForm(cf => ({...cf, currency:e.target.value}))}
-                          style={{...INP, marginTop:5}}>
-                          {["USD","EUR","GBP","CAD","AUD","JPY"].map(c=>(
-                            <option key={c} value={c}>{c}</option>))}
-                        </select>
-                      </div>
-                    </div>
-                    <button onClick={createCustomer} disabled={creating} style={{
-                      marginTop:12, padding:"8px 22px", background:`${J.gold}0C`,
-                      border:`1px solid ${J.gold}`, color:J.gold, borderRadius:3,
-                      fontSize:11, letterSpacing:"0.1em" }}>
-                      {creating ? "CREATING…" : createdOk ? "✓ CREATED" : "⊞ CREATE BILLING PROFILE"}
-                    </button>
-                  </div>
-                ) : (
-                  <div style={{ padding:14, background:J.bgCard, border:`1px solid ${J.borderMid}`,
-                    borderLeft:`3px solid ${J.gold}`, borderRadius:4, marginBottom:16,
-                    display:"flex", alignItems:"center", justifyContent:"space-between" }}>
-                    <div>
-                      <div style={{ color:J.gold, fontSize:12, fontFamily:J.fontHeader, fontWeight:700 }}>
-                        {customer.name}
-                      </div>
-                      <div style={{ color:J.textSec, fontSize:10, marginTop:3 }}>
-                        {customer.email} · {customer.country} · {customer.currency}
-                      </div>
-                      <div style={{ color:J.textDim, fontSize:9, marginTop:2 }}>
-                        ID: {customer.customer_id.slice(0,16)}…
-                      </div>
-                    </div>
-                    <Chip label={customer.status.toUpperCase()} color={statusColor(customer.status)} />
-                  </div>
-                )}
-
-                {/* Active subscriptions */}
-                {subs.length > 0 && (
-                  <div>
-                    <Lbl c={J.accent}>ACTIVE SUBSCRIPTIONS</Lbl>
-                    <div style={{ marginTop:8, display:"flex", flexDirection:"column", gap:6 }}>
-                      {subs.map(s => {
-                        const plan = plans.find(p => p.plan_id === s.plan_id);
-                        return (
-                          <div key={s.subscription_id} style={{ padding:"10px 14px",
-                            background:J.bgCard, border:`1px solid ${J.borderMid}`,
-                            borderLeft:`3px solid ${statusColor(s.status)}`,
-                            borderRadius:3, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
-                            <div>
-                              <div style={{ color:J.textPri, fontSize:12 }}>
-                                {plan?.name || s.plan_id}
-                                <Chip label={s.status.toUpperCase()} color={statusColor(s.status)} />
-                              </div>
-                              <div style={{ color:J.textDim, fontSize:9, marginTop:3 }}>
-                                {fmtDate(s.current_period_start)} → {fmtDate(s.current_period_end)}
-                              </div>
-                            </div>
-                            {s.status === "active" && (
-                              <button onClick={() => cancelSub(s.subscription_id)} style={{
-                                padding:"3px 10px", background:J.errDim,
-                                border:`1px solid ${J.err}44`, color:"#FF9999",
-                                borderRadius:2, fontSize:9 }}>CANCEL</button>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ── PLANS ── */}
-            {tab === "plans" && (
-              <div>
-                <div style={{ color:J.textSec, fontSize:11, marginBottom:16, lineHeight:1.7 }}>
-                  Choose a plan to subscribe. Plans are billed monthly unless noted.
-                  Metered usage is charged in addition to the base price.
-                </div>
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14 }}>
-                  {plans.map(plan => {
-                    const active = subs.find(s => s.plan_id === plan.plan_id && s.status === "active");
-                    const features = (() => { try { return JSON.parse(plan.features); } catch { return []; } })();
-                    const rates    = (() => { try { return JSON.parse(plan.metered_rates); } catch { return []; } })();
-                    const color    = plan.base_price === 0 ? J.textSec : plan.base_price < 50 ? J.accent : J.gold;
-                    return (
-                      <div key={plan.plan_id} style={{ padding:16, background:J.bgCard,
-                        border:`1px solid ${active ? color : J.borderMid}`,
-                        borderTop:`3px solid ${color}`, borderRadius:4, position:"relative" as const }}>
-                        {active && <Corners color={color} size={7} />}
-                        <div style={{ color, fontSize:14, fontFamily:J.fontHeader, fontWeight:700 }}>
-                          {plan.name}
-                        </div>
-                        <div style={{ color:J.textPri, fontSize:22, fontFamily:J.fontHeader,
-                          fontWeight:700, marginTop:8 }}>
-                          {fmtMoney(plan.base_price, plan.currency)}
-                          <span style={{ color:J.textSec, fontSize:11 }}>/{plan.billing_interval}</span>
-                        </div>
-                        {rates.length > 0 && (
-                          <div style={{ color:J.textDim, fontSize:9, marginTop:4 }}>
-                            {rates.map((r: any) => (
-                              <div key={r.metric}>+ {r.unitPrice || r.unit_price} / {r.metric}</div>
-                            ))}
-                          </div>
-                        )}
-                        <div style={{ marginTop:12, borderTop:`1px solid ${J.border}`, paddingTop:10 }}>
-                          {features.map((f: string) => (
-                            <div key={f} style={{ color:J.textSec, fontSize:10, marginBottom:4 }}>
-                              ✓ {f}
-                            </div>
-                          ))}
-                        </div>
-                        <button
-                          onClick={() => active ? cancelSub(active.subscription_id) : subscribe(plan.plan_id)}
-                          disabled={!customer}
-                          style={{ marginTop:12, width:"100%", padding:"8px",
-                            background: active ? J.errDim : `${color}0C`,
-                            border:`1px solid ${active ? J.err+"44" : color+"66"}`,
-                            color: active ? "#FF9999" : color,
-                            borderRadius:3, fontSize:10, letterSpacing:"0.08em" }}>
-                          {!customer ? "Create billing profile first" :
-                           active    ? "CANCEL SUBSCRIPTION"        : "SUBSCRIBE"}
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* ── USAGE ── */}
-            {tab === "usage" && (
-              <div>
-                <div style={{ padding:16, background:J.bgCard, border:`1px solid ${J.borderMid}`,
-                  borderLeft:`3px solid ${J.react}`, borderRadius:4, marginBottom:20 }}>
-                  <Lbl c={J.react}>⬡ RECORD USAGE EVENT</Lbl>
-                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:10, marginTop:10 }}>
-                    <div>
-                      <Lbl>Subscription ID</Lbl>
-                      <input value={usageForm.subscriptionId}
-                        onChange={e => setUsageForm(u=>({...u,subscriptionId:e.target.value}))}
-                        placeholder="sub-uuid" style={{...INP,marginTop:5}} />
-                    </div>
-                    <div>
-                      <Lbl>Metric</Lbl>
-                      <input value={usageForm.metric}
-                        onChange={e => setUsageForm(u=>({...u,metric:e.target.value}))}
-                        placeholder="api_calls" style={{...INP,marginTop:5}} />
-                    </div>
-                    <div>
-                      <Lbl>Quantity</Lbl>
-                      <input type="number" value={usageForm.quantity}
-                        onChange={e => setUsageForm(u=>({...u,quantity:e.target.value}))}
-                        style={{...INP,marginTop:5}} />
-                    </div>
-                  </div>
-                  <button onClick={recordUsage} style={{ marginTop:10, padding:"7px 20px",
-                    background:`${J.react}0C`, border:`1px solid ${J.react}55`,
-                    color:J.react, borderRadius:3, fontSize:10, letterSpacing:"0.08em" }}>
-                    ⬡ RECORD USAGE
-                  </button>
-                  {usageResult && (
-                    <div style={{ marginTop:10, padding:"8px 12px", background:`${J.ok}08`,
-                      border:`1px solid ${J.ok}33`, borderRadius:3, color:J.ok, fontSize:10 }}>
-                      ✓ Event recorded: {usageResult.eventId}
-                      {usageResult.duplicate && " (duplicate — idempotent)"}
-                    </div>
-                  )}
-                </div>
-                {subs.length > 0 && (
-                  <div>
-                    <Lbl c={J.textSec}>YOUR SUBSCRIPTIONS</Lbl>
-                    {subs.map(s => (
-                      <div key={s.subscription_id} style={{ marginTop:6, padding:"8px 12px",
-                        background:J.bgCard, border:`1px solid ${J.border}`, borderRadius:3 }}>
-                        <div style={{ display:"flex", justifyContent:"space-between" }}>
-                          <span style={{ color:J.textSec, fontSize:10 }}>{s.plan_id}</span>
-                          <Chip label={s.status} color={statusColor(s.status)} />
-                        </div>
-                        <div style={{ color:J.textDim, fontSize:9, marginTop:3,
-                          fontFamily:"'Share Tech Mono',monospace" }}>
-                          {s.subscription_id}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ── INVOICES ── */}
-            {tab === "invoices" && (
-              <div>
-                {invoices.length === 0 ? (
-                  <div style={{ textAlign:"center", padding:40, color:J.textDim }}>
-                    No invoices yet. Subscribe to a plan and run a billing cycle.
-                  </div>
-                ) : (
-                  <div>
-                    <div style={{ display:"grid",
-                      gridTemplateColumns:"120px 100px 100px 80px 100px 80px",
-                      padding:"4px 12px", background:J.bgCard,
-                      borderRadius:"3px 3px 0 0", borderBottom:`1px solid ${J.border}` }}>
-                      {["ISSUED","PERIOD","TOTAL","TAX","STATUS","DUE"].map(h=>(
-                        <Lbl key={h} c={J.textDim}>{h}</Lbl>
-                      ))}
-                    </div>
-                    <div style={{ border:`1px solid ${J.border}`, borderRadius:"0 0 3px 3px" }}>
-                      {invoices.map((inv,i) => (
-                        <div key={inv.invoice_id} style={{
-                          display:"grid",
-                          gridTemplateColumns:"120px 100px 100px 80px 100px 80px",
-                          padding:"8px 12px", gap:0,
-                          borderBottom: i<invoices.length-1 ? `1px solid ${J.border}` : "none",
-                          background: i%2===0 ? "transparent" : `${J.bgCard}66`,
-                        }}>
-                          <span style={{color:J.textSec,fontSize:10}}>{fmtDate(inv.issued_at)}</span>
-                          <span style={{color:J.textDim,fontSize:9}}>
-                            {fmtDate(inv.period_start)}→{fmtDate(inv.period_end)}
-                          </span>
-                          <span style={{color:J.textPri,fontSize:11,fontFamily:J.fontHeader,fontWeight:600}}>
-                            {fmtMoney(inv.total, inv.currency)}
-                          </span>
-                          <span style={{color:J.textSec,fontSize:10}}>
-                            {fmtMoney(inv.tax_amount || 0, inv.currency)}
-                          </span>
-                          <span>
-                            <Chip label={inv.status.toUpperCase()} color={statusColor(inv.status)} />
-                          </span>
-                          <span style={{color:J.textDim,fontSize:9}}>{fmtDate(inv.due_at)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ── ADMIN ── */}
-            {tab === "admin" && isAdmin && (
-              <div>
-                {/* Circuit breaker health */}
-                {health && (
-                  <div style={{ marginBottom:20 }}>
-                    <Lbl c={J.err}>⚙ COMPONENT HEALTH — CIRCUIT BREAKERS</Lbl>
-                    <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8, marginTop:10 }}>
-                      {Object.entries(health.components || {}).map(([name, s]: any) => (
-                        <div key={name} style={{ padding:"8px 12px", background:J.bgCard,
-                          border:`1px solid ${s.status==="ok" ? J.ok+"22" : J.err+"44"}`,
-                          borderLeft:`3px solid ${s.status==="ok" ? J.ok : J.err}`,
-                          borderRadius:3 }}>
-                          <div style={{ color:s.status==="ok"?J.ok:J.err, fontSize:9, marginBottom:2 }}>
-                            {s.status==="ok"?"●":"○"} {name.replace(/([A-Z])/g," $1").trim()}
-                          </div>
-                          {s.circuit_open && (
-                            <div style={{ color:J.warn, fontSize:8 }}>
-                              CIRCUIT OPEN · failures={s.failure_count}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                    <div style={{ marginTop:8, display:"flex", gap:8 }}>
-                      <Chip label={`Overall: ${health.overall?.toUpperCase()}`}
-                        color={health.overall==="ok"?J.ok:J.warn} />
-                      <Chip label={`Gateway: ${health.gateway}`} color={J.accent} />
-                    </div>
-                  </div>
-                )}
-
-                {/* Run billing cycle */}
-                <div style={{ padding:16, background:J.bgCard, border:`1px solid ${J.borderMid}`,
-                  borderTop:`2px solid ${J.err}55`, borderRadius:4, marginBottom:16 }}>
-                  <Lbl c={J.err}>⚙ RUN BILLING CYCLE</Lbl>
-                  <div style={{ color:J.textSec, fontSize:10, marginTop:6, marginBottom:12, lineHeight:1.7 }}>
-                    Processes all subscriptions due for renewal: aggregates usage, generates invoices,
-                    charges payment gateway, handles dunning on failures, sends notifications.
-                  </div>
-                  <button onClick={runCycle} disabled={cycleRunning} style={{
-                    padding:"8px 24px", background:`${J.err}0C`,
-                    border:`1px solid ${J.err}55`, color:J.err, borderRadius:3,
-                    fontSize:11, letterSpacing:"0.1em" }}>
-                    {cycleRunning ? "RUNNING CYCLE…" : "⚙ RUN BILLING CYCLE NOW"}
-                  </button>
-                  {cycleResult && (
-                    <div style={{ marginTop:12, padding:"10px 14px", background:`${J.ok}08`,
-                      border:`1px solid ${J.ok}33`, borderRadius:3 }}>
-                      <div style={{ color:J.ok, fontSize:10, marginBottom:6 }}>✓ Cycle complete</div>
-                      <div style={{ fontSize:10, color:J.textSec }}>
-                        Processed: {cycleResult.processed?.length || 0}
-                        {" · "}
-                        Failures: {cycleResult.failures?.length || 0}
-                      </div>
-                      {(cycleResult.processed || []).map((p: any, i: number) => (
-                        <div key={i} style={{ color:J.textSec, fontSize:9, marginTop:3 }}>
-                          ▸ {p.subscriptionId?.slice(0,16)}… — {p.status}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* FX converter */}
-                <FxWidget />
-              </div>
-            )}
-          </div>
-        </>
-      )}
-    </div>
-  );
-};
-
-// Small FX converter widget for admin tab
-const FxWidget = () => {
-  const [from, setFrom] = useState("USD");
-  const [to,   setTo]   = useState("EUR");
-  const [amt,  setAmt]  = useState("100");
-  const [result, setResult] = useState<any>(null);
-  const convert = async () => {
-    const r = await api(`${API_URL}/billing/fx?from_currency=${from}&to_currency=${to}&amount=${amt}`);
-    const d = await r.json();
-    setResult(d);
-  };
-  const INP2: React.CSSProperties = { padding:"5px 8px", background:J.bgCard,
-    border:`1px solid ${J.borderMid}`, color:J.textPri, fontSize:11, borderRadius:2 };
-  return (
-    <div style={{ padding:14, background:J.bgCard, border:`1px solid ${J.borderMid}`,
-      borderRadius:4 }}>
-      <Lbl c={J.accent}>⊕ FX CURRENCY CONVERTER</Lbl>
-      <div style={{ display:"flex", gap:8, marginTop:8, alignItems:"center" }}>
-        <input value={amt} onChange={e=>setAmt(e.target.value)} style={{...INP2,width:80}} />
-        <select value={from} onChange={e=>setFrom(e.target.value)} style={INP2}>
-          {["USD","EUR","GBP","CAD","AUD","JPY","SGD"].map(c=><option key={c}>{c}</option>)}
-        </select>
-        <span style={{color:J.textDim}}>→</span>
-        <select value={to} onChange={e=>setTo(e.target.value)} style={INP2}>
-          {["USD","EUR","GBP","CAD","AUD","JPY","SGD"].map(c=><option key={c}>{c}</option>)}
-        </select>
-        <button onClick={convert} style={{ padding:"5px 12px", background:`${J.accent}0C`,
-          border:`1px solid ${J.accent}55`, color:J.accent, borderRadius:2, fontSize:10 }}>
-          CONVERT
-        </button>
-        {result && !result.code && (
-          <span style={{ color:J.accent, fontSize:12, fontFamily:J.fontHeader, fontWeight:700 }}>
-            {result.convertedAmount?.toFixed(4)} {to}
-            <span style={{ color:J.textDim, fontSize:9, marginLeft:6 }}>
-              @{result.rate?.toFixed(6)} ({result.source})
-            </span>
-          </span>
-        )}
-      </div>
-    </div>
-  );
-};
-
 // ─── Login Screen ─────────────────────────────────────────────────────────────
 const Login = ({ onAuth, personas }: { onAuth: (u: string, persona: string) => void; personas: PersonaData[] }) => {
   const [user,     setUser]     = useState("");
@@ -4652,7 +4175,6 @@ export default function App() {
   const [schedulerOpen,   setSchedulerOpen]   = useState(false);
   const [telemetryOpen,   setTelemetryOpen]   = useState(false);
   const [instructionsOpen, setInstructionsOpen] = useState(false);
-  const [billingOpen,     setBillingOpen]     = useState(false);
   const [tokenLog,        setTokenLog]        = useState<TokenSnapshot[]>([]);
   const [commandLog,      setCommandLog]      = useState<CommandEntry[]>([]);
   const cmdCounterRef = useRef(0);
@@ -4690,6 +4212,9 @@ export default function App() {
   useEffect(() => { currentProjectRef.current = currentProject; }, [currentProject]);
   const [provInfo,        setProvInfo]        = useState({ provider: "deepseek", model: "deepseek-coder", schema_format: "openai" });
   const provInfoRef = useRef({ provider: "deepseek", model: "deepseek-coder" });
+  // Real configured workspace root, fetched from the backend — _base_workspace
+  // is only the pre-fetch placeholder, never trust it as the actual path.
+  const [workspaceRoot,   setWorkspaceRoot]   = useState<string>(_base_workspace);
   // Keep provInfoRef in sync
   // (updated in useEffect below)
   const [skills,          setSkills]          = useState<any[]>([]);
@@ -4697,8 +4222,12 @@ export default function App() {
   const [uploading,       setUploading]       = useState(false);
   const [autoConfirm,     setAutoConfirm]     = useState(false);
   const [reactMode,       setReactMode]       = useState(false);
-  const [autoContinue,    setAutoContinue]    = useState(true);
-  const [awaitingContinue, setAwaitingContinue] = useState(false);
+  // Auto Continue: when OFF, the ReAct loop pauses after each iteration and
+  // waits for the operator to click "Continue" instead of auto-sending it.
+  // Previously this was unconditional — every react iteration auto-sent
+  // "continue" with no way to inspect/interrupt between steps.
+  const [autoContinue,    setAutoContinue]    = useState(false);
+  const [reactPaused,     setReactPaused]     = useState(false);
   // FIX: user_id from actual logged-in user, never hardcoded
   const [authedUser,      setAuthedUser]      = useState<string | null>(() => getAuth()?.username || null);
 
@@ -4713,7 +4242,7 @@ export default function App() {
   const reactActiveRef = useRef(false);
   const autoConfRef    = useRef(autoConfirm);
   const autoContinueRef = useRef(autoContinue);
-  const resumeResolverRef = useRef<(() => void) | null>(null);
+  const reactResumeRef  = useRef<(() => void) | null>(null);
   const MAX_ITER       = 30;  // matches backend REACT_MAX_ITERATIONS
 
   useEffect(() => { autoConfRef.current = autoConfirm; }, [autoConfirm]);
@@ -4754,6 +4283,18 @@ export default function App() {
       }
     }).catch(() => {});
   }, [authedUser]);
+
+  // Fetch the REAL workspace root after login. Previously the UI always
+  // displayed the hardcoded `_base_workspace` guess ("/app/workspace"),
+  // which silently drifted from whatever JARVIS_WORKSPACE_ROOT was actually
+  // configured to — this replaces the guess with the backend's answer.
+  useEffect(() => {
+    if (!authedUser) return;
+    api(`${API_URL}/workspace/${authedUser}?project=${encodeURIComponent(currentProject)}`)
+      .then(r => r.json())
+      .then(d => { if (d.workspace_root) setWorkspaceRoot(d.workspace_root); })
+      .catch(() => {});
+  }, [authedUser, currentProject]);
 
   // FIX: WS URL uses actual user_id, reconnects when user changes
   useEffect(() => {
@@ -4847,6 +4388,17 @@ export default function App() {
         if (last?.content) voiceRef.current?.speak(last.content);
         return settled;
       });
+    } else if (type === "attachments_saved") {
+      // Confirms where uploads landed in the workspace (and what got
+      // extracted, for archives) — surfaced as a small system note rather
+      // than silently trusting the upload worked.
+      setMessages(prev => [...prev, { role: "system_note", items: data }]);
+    } else if (type === "thought") {
+      // The model's reasoning for this ReAct iteration — kept distinct from
+      // "token" (plain chat streaming) and from tool_call/tool_result, so a
+      // client can render the full Thought → Action → Observation triad
+      // instead of one undifferentiated blob.
+      setMessages(prev => [...prev, { role: "thought", ...data }]);
     } else if (type === "tool_call") {
       setMessages(prev => [...prev, { role: "tool_call", ...data }]);
     } else if (type === "tool_result") {
@@ -4957,17 +4509,6 @@ export default function App() {
   // ── Manual continue (for non-react mode only) ─────────────────────────────
   const sendContinue = useCallback(() => { if (!streaming) send("continue"); }, [send, streaming]);
 
-  // ── Manual continue for the ReAct loop when Auto is unchecked ─────────────
-  // Releases the pause created in startClientReact so exactly one more
-  // "continue" iteration is sent — nothing advances automatically while paused.
-  const continueReactManually = useCallback(() => {
-    if (resumeResolverRef.current) {
-      const resolve = resumeResolverRef.current;
-      resumeResolverRef.current = null;
-      resolve();
-    }
-  }, []);
-
   // ── Client-side ReAct loop (when backend react=false, drives iterations) ──
   // When reactMode=true, we pass react:true to backend and it handles all iterations.
   // This client loop is a FALLBACK for backward compatibility.
@@ -5045,22 +4586,33 @@ export default function App() {
         content.includes("done") || content.includes("completed") || iter >= MAX_ITER);
       if (complete) go = false;
 
-      // AUTO toggle gate: when off, pause after each iteration and wait for a manual Continue click
-      // instead of automatically sending "continue" on the next loop pass.
+      // Pause here unless Auto Continue is checked — previously this loop
+      // always sent "continue" immediately with no way to inspect a step or
+      // stop between iterations. Halting still wakes this up immediately.
       if (go && !haltedRef.current && !autoContinueRef.current) {
-        setAwaitingContinue(true);
-        setMessages(prev => [...prev, { role: "react_status", iteration: iter, phase: "⏸ paused — Auto is off, click Continue", healing: false }]);
-        await new Promise<void>(resolve => { resumeResolverRef.current = resolve; });
-        setAwaitingContinue(false);
-        if (haltedRef.current) go = false;
+        setMessages(prev => [...prev, { role: "react_status", iteration: iter,
+          phase: "⏸ paused — click Continue to proceed (or enable Auto Continue)", healing: false }]);
+        setReactPaused(true);
+        await new Promise<void>(resolve => { reactResumeRef.current = resolve; });
+        setReactPaused(false);
+        if (haltedRef.current) { go = false; }
       }
     }
 
     setMessages(prev => [...prev, { role: "react_status", iteration: reactIterRef.current,
-      phase: reactIterRef.current >= MAX_ITER ? `max iterations (${MAX_ITER}) reached` : "task complete ✓", healing: false }]);
+      phase: haltedRef.current ? "⛔ halted" : reactIterRef.current >= MAX_ITER ? `max iterations (${MAX_ITER}) reached` : "task complete ✓", healing: false }]);
     reactActiveRef.current = false;
     setStreaming(false);
   }, [input, streaming, attachments]);
+
+  // Manually advance a paused ReAct loop by one iteration (Auto Continue off)
+  const continueReact = useCallback(() => {
+    if (reactResumeRef.current) {
+      const resume = reactResumeRef.current;
+      reactResumeRef.current = null;
+      resume();
+    }
+  }, []);
 
   const onConfirm = (id: string) => {
     setPendingConfirms(prev => prev.filter(c => c.confirm_id !== id));
@@ -5086,8 +4638,15 @@ export default function App() {
     reactActiveRef.current = false;
     setStreaming(false);
     setHalted(true);
-    setAwaitingContinue(false);
-    if (resumeResolverRef.current) { const r = resumeResolverRef.current; resumeResolverRef.current = null; r(); }
+
+    // Wake a paused ReAct loop (Auto Continue off) so it observes the halt
+    // and exits instead of waiting forever for a Continue click.
+    if (reactResumeRef.current) {
+      const resume = reactResumeRef.current;
+      reactResumeRef.current = null;
+      setReactPaused(false);
+      resume();
+    }
 
     // 2. Send HALT via WS (fast path, fires before REST)
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -5152,8 +4711,8 @@ export default function App() {
             <ArcReactor size={26} />
             <div>
               <div data-text={J.wordmark} className={persona !== "jarvis" ? "persona-glitch" : ""}
-                style={{ color: J.accent, fontSize: 16, letterSpacing: "0.2em", fontFamily: J.fontHeader, fontWeight: 700, lineHeight: 1.2 }}>JUAN Platform</div>
-              <div style={{ color: J.textDim, fontSize: 10, letterSpacing: "0.15em", fontFamily: J.fontHeader, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>MK II SECOPS KALI</div>
+                style={{ color: J.accent, fontSize: 16, letterSpacing: "0.2em", fontFamily: J.fontHeader, fontWeight: 700, lineHeight: 1.2 }}>S.I.R Platform</div>
+              <div style={{ color: J.textDim, fontSize: 10, letterSpacing: "0.15em", fontFamily: J.fontHeader, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>Super Intelligent Robot</div>
             </div>
           </div>
           <Divider color={J.borderMid} />
@@ -5267,7 +4826,7 @@ export default function App() {
               {provInfo.provider.toUpperCase()} / {provInfo.model} &nbsp;·&nbsp; {authedUser?.toUpperCase()} AUTHENTICATED
               <br />
               <span style={{ color: J.accent, opacity: 0.55 }}>
-                ◫ PROJECT: {currentProject} &nbsp;·&nbsp; {_base_workspace}/{authedUser}/{currentProject}/workspace
+                ◫ PROJECT: {currentProject} &nbsp;·&nbsp; {workspaceRoot}
               </span>
             </div>
             <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
@@ -5350,8 +4909,10 @@ export default function App() {
             title="Automatically approve destructive actions without prompting. Use with caution." />
           <Toggle on={reactMode}     set={setReactMode}    color={J.react}   label="↺ ReAct"
             title="Enable autonomous ReAct loop. AI will reason, act, observe and self-correct until task is done." />
-          <Toggle on={autoContinue}  set={setAutoContinue} color={J.react}   label="⏩ Auto"
-            title="When checked, the ReAct loop automatically sends 'continue' after each iteration. When unchecked, it pauses after each iteration and waits for you to click Continue." />
+          {reactMode && (
+            <Toggle on={autoContinue} set={setAutoContinue} color={J.react}   label="⏵ Auto Continue"
+              title="When ON, the ReAct loop advances to the next iteration automatically. When OFF, it pauses after each step and waits for you to click Continue." />
+          )}
           <Toggle on={memoryEnabled} set={setMemoryEnabled} color={J.gold}   label="◉ Memory"
             title="When OFF, no conversation history is sent to the LLM. Keeps context clean and prevents hallucination from old turns." />
           {/* Active instructions chips */}
@@ -5369,7 +4930,7 @@ export default function App() {
           {/* Active workspace badge — always visible so operator knows where agent writes */}
           <span
             onClick={() => setWorkspaceOpen(o => !o)}
-            title={`/app/data/${authedUser}/${currentProject}/workspace — click to ${workspaceOpen ? "hide" : "show"} file browser`}
+            title={`${workspaceRoot} — click to ${workspaceOpen ? "hide" : "show"} file browser`}
             style={{
               marginLeft: "auto", padding: "2px 8px", borderRadius: 2, cursor: "pointer",
               background: `${J.accent}08`, border: `1px solid ${J.accent}22`,
@@ -5377,7 +4938,7 @@ export default function App() {
               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 280,
               fontFamily: J.fontMono,
             }}>
-            ◫ {_base_workspace}/{authedUser}/{currentProject}/workspace
+            ◫ {workspaceRoot}
           </span>
         </div>
 
@@ -5446,7 +5007,9 @@ export default function App() {
                   if (files.length) { e.preventDefault(); handleFiles(files); }
                 }}
                 placeholder={
-                  reactMode ? "Describe task for autonomous ReAct agent… runs to completion without manual Continue clicks"
+                  reactMode ? (autoContinue
+                    ? "Describe task for autonomous ReAct agent… runs to completion without manual Continue clicks"
+                    : "Describe task for ReAct agent… pauses after each step, click Continue to advance")
                   : attachments.length ? "Add context about the attached file(s)… (optional)"
                   : `Query ${J.wordmark} … (Shift+Enter for newline · drag & drop files to attach)`
                 }
@@ -5458,21 +5021,28 @@ export default function App() {
                 }} />
             </div>
 
-            {/* Continue button — shown in non-react mode, or in ReAct mode while paused (Auto off) */}
-            {(!reactMode || awaitingContinue) && (
-              <button
-                onClick={awaitingContinue ? continueReactManually : sendContinue}
-                disabled={awaitingContinue ? false : !canContinue}
-                title={awaitingContinue ? "Auto is off — click to send the next 'continue' iteration" : "Continue — nudge the agent"}
+            {/* Continue button — shown in non-react mode only */}
+            {!reactMode && (
+              <button onClick={sendContinue} disabled={!canContinue} title="Continue — nudge the agent"
                 style={{
                   padding: "9px 11px", borderRadius: 4, fontSize: 11,
-                  background: (awaitingContinue || canContinue) ? J.bgCard : "transparent",
-                  border: `1px solid ${(awaitingContinue || canContinue) ? (awaitingContinue ? J.react : J.borderMid) : J.border}`,
-                  color: (awaitingContinue || canContinue) ? (awaitingContinue ? J.react : J.accent) : J.textDim,
+                  background: canContinue ? J.bgCard : "transparent",
+                  border: `1px solid ${canContinue ? J.borderMid : J.border}`,
+                  color: canContinue ? J.accent : J.textDim,
                   fontFamily: J.fontHeader, fontWeight: 600,
                   letterSpacing: "0.06em",
-                  animation: awaitingContinue ? "hud-pulse 1.2s infinite" : "none",
                 }}>▷▷</button>
+            )}
+
+            {/* Continue button — ReAct paused, Auto Continue off, waiting on the operator */}
+            {reactMode && reactPaused && (
+              <button onClick={continueReact} title="Advance the ReAct loop by one iteration"
+                style={{
+                  padding: "9px 14px", borderRadius: 4, fontSize: 11,
+                  background: `${J.react}18`, border: `1px solid ${J.react}`, color: J.react,
+                  fontFamily: J.fontHeader, fontWeight: 700, letterSpacing: "0.06em",
+                  animation: "hud-pulse 1.5s infinite",
+                }}>▷▷ CONTINUE</button>
             )}
 
             {/* Send / React button */}
@@ -5492,21 +5062,18 @@ export default function App() {
 
           <div style={{ color: J.textDim, fontSize: 9, marginTop: 5, display: "flex", gap: 14, flexWrap: "wrap", letterSpacing: "0.06em", fontFamily: J.fontHeader }}>
             <span>Enter — send · Shift+Enter — newline · drag & drop to attach · 🎙 voice input</span>
-            {reactMode && !awaitingContinue && (
-              <span style={{ color: `${J.react}55` }}>
-                ↺ REACT MODE — {autoContinue ? "AI continues autonomously until TASK_COMPLETE" : "Auto is OFF — click ▷▷ Continue after each iteration"}
-              </span>
-            )}
-            {reactMode && awaitingContinue && (
-              <span style={{ color: J.react }}>⏸ paused — Auto is off, click ▷▷ Continue to proceed</span>
-            )}
+            {reactMode && <span style={{ color: `${J.react}55` }}>↺ REACT MODE — AI continues autonomously until TASK_COMPLETE</span>}
             {autoConfirm && <span style={{ color: `${J.warm}55` }}>⚡ AUTO-CONFIRM ACTIVE</span>}
           </div>
         </div>
       </div>
 
       {/* ── Overlays ── */}
-      {settingsOpen    && <SettingsPanel    onClose={() => setSettingsOpen(false)}    onSaved={d => setProvInfo(prev => ({ ...prev, ...d }))} authedUser={authedUser} />}
+      {settingsOpen    && <SettingsPanel    onClose={() => setSettingsOpen(false)}    onSaved={d => setProvInfo(prev => ({ ...prev, ...d }))} authedUser={authedUser} onWorkspaceRootChanged={() => {
+        if (!authedUser) return;
+        api(`${API_URL}/workspace/${authedUser}?project=${encodeURIComponent(currentProject)}`)
+          .then(r => r.json()).then(d => { if (d.workspace_root) setWorkspaceRoot(d.workspace_root); }).catch(() => {});
+      }} />}
       {memoryOpen      && <MemoryPanel      onClose={() => setMemoryOpen(false)}      userId={authedUser || "default"} />}
       {experiencedOpen && <ExperiencedPanel onClose={() => setExperiencedOpen(false)} userId={authedUser || "default"} />}
       {evolutionOpen   && <EvolutionPanel   onClose={() => setEvolutionOpen(false)}   userId={authedUser || "default"} />}
@@ -5525,12 +5092,6 @@ export default function App() {
           onClose={() => setPersonaMgrOpen(false)}
           userId={authedUser}
           onPersonasChanged={onPersonasChanged}
-        />
-      )}
-      {billingOpen && authedUser && (
-        <BillingPanel
-          onClose={() => setBillingOpen(false)}
-          authedUser={authedUser}
         />
       )}
       {instructionsOpen && (

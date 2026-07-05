@@ -152,7 +152,17 @@ class SkillRegistry:
         return CbdArchitectSkill()
 
     def _load_jarvis_mkii(self):
-        from jarvis_mkii_skill import JarvisMKIISkill
+        # Tolerates either layout: top-level jarvis_mkii_skill.py (the
+        # original assumption baked into _STATIC_SKILL_MODULES) or
+        # skills/jarvis_mkii_skill.py (where it apparently lives in at least
+        # one real deployment). Trying both here — instead of only the
+        # top-level import — means a deployment using the second layout
+        # doesn't lose the skill entirely just because this one loader
+        # assumed the first.
+        try:
+            from jarvis_mkii_skill import JarvisMKIISkill
+        except ImportError:
+            from skills.jarvis_mkii_skill import JarvisMKIISkill
         return JarvisMKIISkill()
 
     def _load_swarm(self):
@@ -249,9 +259,22 @@ class SkillRegistry:
             logger.debug("[skill_discovery] no 'skills' package on path — skipping")
             return added
 
+        # Match by basename as well as full dotted path: a module listed in
+        # _STATIC_SKILL_MODULES as e.g. "jarvis_mkii_skill" (imported
+        # top-level by its static loader) must still be skipped here if it
+        # physically lives at skills/jarvis_mkii_skill.py — pkgutil reports
+        # THAT as "skills.jarvis_mkii_skill", which is a literal-string miss
+        # against the set. Without this, a module already loaded (and
+        # working) via its static loader gets a redundant second import
+        # attempt here, and any error in that second attempt (or just the
+        # class-already-registered skip) shows up as confusing noise even
+        # though the skill is actually fine.
+        _static_basenames = {m.rsplit(".", 1)[-1] for m in _STATIC_SKILL_MODULES}
+
         for modinfo in pkgutil.iter_modules(skills_pkg.__path__, prefix="skills."):
             dotted = modinfo.name
-            if dotted in _STATIC_SKILL_MODULES:
+            basename = dotted.rsplit(".", 1)[-1]
+            if dotted in _STATIC_SKILL_MODULES or basename in _static_basenames:
                 continue
             try:
                 module = importlib.import_module(dotted)

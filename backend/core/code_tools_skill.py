@@ -72,7 +72,23 @@ except ImportError:  # pragma: no cover - allows standalone import/testing
 
 
 # ── Configuration ───────────────────────────────────────────────────────────────
-WORKSPACE_ROOT   = os.getenv("JARVIS_WORKSPACE_ROOT", "/app/workspace")
+try:
+    from core.settings_store import get_setting as _get_setting
+except ImportError:  # pragma: no cover - standalone import/testing fallback
+    def _get_setting(key: str, default=None):
+        return os.getenv(key, default)
+
+
+def _workspace_root() -> str:
+    """
+    Live-read the configured workspace root (settings.json override → env →
+    default) on every call — NOT a module-level constant. A constant here
+    would go stale the moment an operator edits the workspace path from the
+    Settings UI without restarting the process.
+    """
+    return _get_setting("JARVIS_WORKSPACE_ROOT", "/app/workspace")
+
+
 MAX_FILE_BYTES   = int(os.getenv("CT_MAX_FILE_BYTES",   str(1 * 1024 * 1024)))   # 1 MB read cap
 MAX_OUTPUT_BYTES = int(os.getenv("CT_MAX_OUTPUT_BYTES", str(200 * 1024)))        # run_command stdout/stderr cap
 DEFAULT_TIMEOUT_S = int(os.getenv("CT_DEFAULT_TIMEOUT_S", "120"))
@@ -99,7 +115,7 @@ def _resolve_in_workspace(rel_or_abs: str) -> tuple:
     Relative paths are resolved relative to the workspace root, not CWD.
     """
     try:
-        root = os.path.realpath(WORKSPACE_ROOT)
+        root = os.path.realpath(_workspace_root())
         os.makedirs(root, exist_ok=True)
         candidate = rel_or_abs if os.path.isabs(rel_or_abs) else os.path.join(root, rel_or_abs)
         resolved = os.path.realpath(candidate)
@@ -437,7 +453,7 @@ async def _execute_run_command(params: dict) -> "SkillResult":
 
     logger.info("[command_run] cmd=%.80s exit_code=%s duration_ms=%d", command, exit_code, duration_ms)
     return SkillResult.ok({
-        "command": command, "cwd": os.path.relpath(cwd_abs, os.path.realpath(WORKSPACE_ROOT)) or ".",
+        "command": command, "cwd": os.path.relpath(cwd_abs, os.path.realpath(_workspace_root())) or ".",
         "exit_code": exit_code, "stdout": stdout, "stderr": stderr,
         "duration_ms": duration_ms, "timed_out": False,
     })

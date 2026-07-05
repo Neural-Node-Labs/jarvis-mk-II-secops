@@ -637,7 +637,12 @@ class BlackboxBrain:
                 continue
             local_conversation.append({"role": "assistant", "content": response})
 
-            yield {"type": "token", "data": f"\n── [{task.task_id} · iter {iteration}/{re_act_max_loop}] ──\n{response}\n"}
+            thought = self._extract_thought(response)
+            if thought:
+                yield {"type": "thought", "data": {
+                    "task_id": task.task_id, "iteration": iteration,
+                    "max": re_act_max_loop, "text": thought,
+                }}
 
             if self._is_complete(response):
                 if not any_edit_made:
@@ -837,13 +842,19 @@ class BlackboxBrain:
                 continue
             local_conversation.append({"role": "assistant", "content": response})
 
-            # Surface the worker's own reasoning text. This is what carries any
-            # "Phase N — ..." narration (e.g. /api/evolve's 9-phase protocol) —
-            # tool_call/tool_result only carry skill/action/output, never the
-            # model's own commentary, and the worker calls the LLM non-streamed
-            # (one full response per iteration, not token-by-token) so this is
-            # emitted as a single chunk per iteration rather than incrementally.
-            await queue.put({"type": "token", "data": f"\n── [{task.task_id} · iter {iteration}/{re_act_max_loop}] ──\n{response}\n"})
+            # Surface the worker's own reasoning text as a distinct "thought"
+            # event — Action (tool_call) and Observation (tool_result) already
+            # have their own event types below; this completes the trio so a
+            # client can render Thought → Action → Observation per iteration
+            # instead of a single undifferentiated text blob. The worker calls
+            # the LLM non-streamed (one full response per iteration, not
+            # token-by-token), so this arrives as one chunk per iteration.
+            thought = self._extract_thought(response)
+            if thought:
+                await queue.put({"type": "thought", "data": {
+                    "task_id": task.task_id, "iteration": iteration,
+                    "max": re_act_max_loop, "text": thought,
+                }})
 
             if self._is_complete(response):
                 task.result, task.status = self._extract_result(response), "COMPLETED"
@@ -936,6 +947,19 @@ class BlackboxBrain:
                 idx = text.find(marker)
                 return text[idx + len(marker):].strip().lstrip(":").strip()
         return text.strip()
+
+    def _extract_thought(self, text: str) -> str:
+        """
+        The natural-language reasoning portion of a worker's response — text
+        before the first TOOL_CALL: {...} marker (or the whole text, if the
+        response ends in TASK_COMPLETE with no tool call). Used to emit a
+        clean "thought" event distinct from the "action" (tool_call) event,
+        instead of dumping the raw response — JSON marker included — as an
+        undifferentiated blob.
+        """
+        idx = text.find(TOOL_CALL_MARKER)
+        thought = text[:idx] if idx != -1 else text
+        return thought.strip()
 
     def _extract_tool_calls(self, text: str) -> list:
         """Brace-counting TOOL_CALL: {...} parser — identical contract to the old Agent."""

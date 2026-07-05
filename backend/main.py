@@ -49,8 +49,10 @@ changelog:
 """
 import re
 import os
+import io
 import json
 import uuid
+import base64
 import asyncio
 import logging
 import threading
@@ -91,6 +93,10 @@ from core.prompt_builder import (
 )
 from core.memory_manager import MemoryManager, detect_retrieval_request
 from core.agent import Agent, REACT_MAX_ITERATIONS, DEEP_TASK_MAX_ITERATIONS, CODE_AGENT_MAX_ITERATIONS
+from core.settings_store import (
+    get_setting, get_setting_int, describe_settings, save_settings, reset_settings,
+    EDITABLE_SETTINGS,
+)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CBD COMPONENT 1 — Logging Subsystem
@@ -168,8 +174,8 @@ def _destroy_session(user_id: str) -> bool:
 
 
 def _build_llm_config(model: str = None, provider: str = None, temperature: float = 0.7) -> LLMConfig:
-    resolved_provider = provider or os.getenv("LLM_PROVIDER", "deepseek")
-    resolved_model    = model    or os.getenv("LLM_MODEL",    "deepseek-coder")
+    resolved_provider = provider or get_setting("LLM_PROVIDER", "deepseek")
+    resolved_model    = model    or get_setting("LLM_MODEL",    "deepseek-coder")
     max_tokens        = get_model_max_tokens(resolved_model)
     return LLMConfig(
         provider=resolved_provider,
@@ -183,9 +189,12 @@ def _build_llm_config(model: str = None, provider: str = None, temperature: floa
 # ══════════════════════════════════════════════════════════════════════════════
 # CBD COMPONENT 4 — JarvisMKII Multi-Task Skill
 # ══════════════════════════════════════════════════════════════════════════════
-TASK_TIMEOUT_SECONDS = int(os.getenv("JARVIS_TASK_TIMEOUT", "300"))
 _active_tasks: dict[str, dict] = {}
 _task_lock = threading.Lock()
+
+
+def _task_timeout_seconds() -> int:
+    return get_setting_int("JARVIS_TASK_TIMEOUT", 300)
 
 
 async def _run_single_task(task_def: dict) -> dict:
@@ -203,6 +212,7 @@ async def _run_single_task(task_def: dict) -> dict:
 
     started_at    = datetime.now(timezone.utc)
     output_tokens: list[str] = []
+    task_timeout  = _task_timeout_seconds()
 
     with _task_lock:
         _active_tasks[task_id] = {
@@ -224,7 +234,7 @@ async def _run_single_task(task_def: dict) -> dict:
                 if event.get("type") == "token":
                     output_tokens.append(event.get("data", ""))
 
-        await asyncio.wait_for(_collect(), timeout=TASK_TIMEOUT_SECONDS)
+        await asyncio.wait_for(_collect(), timeout=task_timeout)
         full_output = "".join(output_tokens)
         duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
         result = {"task_id": task_id, "status": "complete",
@@ -232,10 +242,10 @@ async def _run_single_task(task_def: dict) -> dict:
         logger.info("[task_complete] id=%s duration_ms=%d", task_id, duration_ms)
 
     except asyncio.TimeoutError:
-        duration_ms = TASK_TIMEOUT_SECONDS * 1000
+        duration_ms = task_timeout * 1000
         result = {"task_id": task_id, "status": "timeout",
                   "output": "".join(output_tokens),
-                  "error": f"Task timed out after {TASK_TIMEOUT_SECONDS}s",
+                  "error": f"Task timed out after {task_timeout}s",
                   "duration_ms": duration_ms}
         logger.warning("[task_timeout] id=%s", task_id)
 
@@ -259,7 +269,7 @@ async def _jarvis_mkii_execute(payload: dict) -> dict:
     if not tasks:
         return {"error": "MKII_NO_TASKS", "message": "Provide at least one task in tasks[]"}
 
-    max_parallel = int(os.getenv("JARVIS_MAX_PARALLEL", "10"))
+    max_parallel = get_setting_int("JARVIS_MAX_PARALLEL", 10)
     if len(tasks) > max_parallel:
         return {"error": "MKII_TOO_MANY_TASKS",
                 "message": f"Max {max_parallel} parallel tasks. Got {len(tasks)}."}
@@ -452,6 +462,136 @@ async def _process_attachments(files: list[UploadFile]) -> list[dict]:
             logger.warning("[attachment_skip] file=%s err=%s", uf.filename, exc)
 
     return attachments
+
+
+# Archive extensions we know how to safely unpack with stdlib only.
+_ARCHIVE_EXTS = {
+    ".zip":     "zip",
+    ".tar":     "tar",
+    ".tar.gz":  "tar", ".tgz": "tar",
+    ".tar.bz2": "tar", ".tbz2": "tar",
+    ".tar.xz":  "tar", ".txz": "tar",
+}
+
+
+def _archive_kind(filename: str) -> Optional[str]:
+    lower = filename.lower()
+    for ext, kind in sorted(_ARCHIVE_EXTS.items(), key=lambda kv: -len(kv[0])):
+        if lower.endswith(ext):
+            return kind
+    return None
+
+
+def _safe_extract_member(dest_root: str, member_name: str) -> Optional[str]:
+    """Resolve an archive member path against dest_root, rejecting zip-slip
+    (../, absolute paths, symlink escapes). Returns the safe absolute path,
+    or None if the member should be skipped."""
+    candidate = os.path.normpath(os.path.join(dest_root, member_name.lstrip("/\\")))
+    root_rp = os.path.realpath(dest_root)
+    cand_rp = os.path.realpath(os.path.dirname(candidate))
+    if cand_rp != root_rp and not cand_rp.startswith(root_rp + os.sep):
+        return None
+    return candidate
+
+
+def _extract_archive(raw: bytes, filename: str, kind: str, dest_root: str) -> dict:
+    """Extract a zip/tar archive into dest_root/<archive-stem>/. Returns
+    {extracted: bool, extract_dir, files: [...], skipped: [...], error}."""
+    stem = re.sub(r"\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|txz)$", "", filename, flags=re.IGNORECASE) or "archive"
+    stem = sanitise_filename(stem) or "archive"
+    extract_dir = os.path.join(dest_root, stem)
+    os.makedirs(extract_dir, exist_ok=True)
+    files: list[str] = []
+    skipped: list[str] = []
+
+    try:
+        if kind == "zip":
+            import zipfile as _zf
+            with _zf.ZipFile(io.BytesIO(raw)) as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    dest = _safe_extract_member(extract_dir, info.filename)
+                    if dest is None:
+                        skipped.append(info.filename)
+                        continue
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    with zf.open(info) as src, open(dest, "wb") as out:
+                        out.write(src.read())
+                    files.append(os.path.relpath(dest, extract_dir))
+        elif kind == "tar":
+            import tarfile as _tf
+            with _tf.open(fileobj=io.BytesIO(raw), mode="r:*") as tf:
+                for member in tf.getmembers():
+                    if not member.isfile():
+                        continue
+                    dest = _safe_extract_member(extract_dir, member.name)
+                    if dest is None:
+                        skipped.append(member.name)
+                        continue
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    src = tf.extractfile(member)
+                    if src is None:
+                        continue
+                    with open(dest, "wb") as out:
+                        out.write(src.read())
+                    files.append(os.path.relpath(dest, extract_dir))
+        else:
+            return {"extracted": False, "error": f"Unsupported archive kind '{kind}'."}
+    except Exception as exc:
+        logger.warning("[archive_extract_error] file=%s err=%s", filename, exc)
+        return {"extracted": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    if skipped:
+        logger.warning("[archive_extract_skipped] file=%s skipped=%d (path traversal)", filename, len(skipped))
+    logger.info("[archive_extracted] file=%s extract_dir=%s files=%d", filename, extract_dir, len(files))
+    return {"extracted": True, "extract_dir": os.path.relpath(extract_dir, dest_root),
+            "files": files, "skipped": skipped}
+
+
+def _save_attachments_to_workspace(attachments: list[dict], workspace_path: str) -> list[dict]:
+    """
+    Persist every uploaded attachment into the active workspace directory.
+    Archives (.zip/.tar/.tar.gz/.tgz/.tar.bz2/.tbz2/.tar.xz/.txz) are
+    unpacked into workspace_path/<archive-stem>/ instead of being dropped in
+    as a single opaque blob — so the agent's file tools (glob/grep/read/
+    workspace browser) see the actual extracted files immediately. Never
+    raises — a save/extract failure is recorded per-file and the chat
+    request still proceeds with the in-memory attachment as before.
+    """
+    results: list[dict] = []
+    for att in attachments:
+        name = sanitise_filename(att.get("name", "upload"))
+        try:
+            if "b64" in att:
+                raw = base64.b64decode(att["b64"])
+            else:
+                raw = (att.get("text", "") or "").encode("utf-8")
+        except Exception as exc:
+            results.append({"name": name, "saved": False, "error": f"decode failed: {exc}"})
+            continue
+
+        kind = _archive_kind(name)
+        if kind:
+            outcome = _extract_archive(raw, name, kind, workspace_path)
+            results.append({"name": name, "saved": True, "archive": True, **outcome})
+            continue
+
+        try:
+            dest = os.path.normpath(os.path.join(workspace_path, name))
+            root_rp = os.path.realpath(workspace_path)
+            if os.path.realpath(os.path.dirname(dest)) != root_rp:
+                dest = os.path.join(workspace_path, os.path.basename(name))  # flatten any residual traversal
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, "wb") as f:
+                f.write(raw)
+            results.append({"name": name, "saved": True, "archive": False,
+                             "path": os.path.relpath(dest, workspace_path)})
+            logger.info("[attachment_saved_to_workspace] name=%s workspace=%s bytes=%d", name, workspace_path, len(raw))
+        except Exception as exc:
+            logger.warning("[attachment_save_error] name=%s err=%s", name, exc)
+            results.append({"name": name, "saved": False, "error": str(exc)})
+    return results
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -928,7 +1068,7 @@ async def chat_websocket(ws: WebSocket, user_id: str):
             instructions    = msg.get("instructions", "")
             memory_enabled  = msg.get("memory_enabled", True)
             persona         = msg.get("persona", DEFAULT_PERSONA)
-            project         = msg.get("project",  DEFAULT_PROJECT)
+            project         = msg.get("project", _default_project())
             workspace_path  = _workspace_path(user_id, project)
 
             if halt:
@@ -952,6 +1092,29 @@ async def chat_websocket(ws: WebSocket, user_id: str):
             llm_trace.info("[WS] user=%s project=%s react=%s atts=%d msg=%.120s",
                            user_id, project, react, len(attachments), message)
 
+            # Persist every uploaded file into the active workspace (archives
+            # are unpacked there too) so the agent's file tools see them as
+            # real files, not just inline chat context.
+            save_results = _save_attachments_to_workspace(attachments, workspace_path) if attachments else []
+            if save_results:
+                lines = []
+                for r in save_results:
+                    if not r.get("saved"):
+                        lines.append(f"  ✗ {r['name']}: {r.get('error', 'save failed')}")
+                    elif r.get("archive"):
+                        if r.get("extracted"):
+                            lines.append(f"  📦 {r['name']} → extracted to {r['extract_dir']}/ ({len(r.get('files', []))} file(s))")
+                        else:
+                            lines.append(f"  ✗ {r['name']}: extraction failed — {r.get('error', 'unknown error')}")
+                    else:
+                        lines.append(f"  📄 {r['name']} → saved to {r['path']}")
+                attachment_note = "[UPLOADED FILES — saved into your workspace]\n" + "\n".join(lines) + "\n"
+            else:
+                attachment_note = ""
+
+            if save_results:
+                await ws.send_json({"type": "attachments_saved", "data": save_results})
+
             try:
                 agent = _get_session(user_id, model, provider)
                 workspace_ctx = (
@@ -960,6 +1123,7 @@ async def chat_websocket(ws: WebSocket, user_id: str):
                     f"Workspace Path  : {workspace_path}\n"
                     f"User            : {user_id}\n"
                     f"All file operations MUST use this workspace path as root.\n"
+                    f"{attachment_note}"
                 )
                 effective_msg = (
                     f"{workspace_ctx}\n[OPERATOR INSTRUCTIONS]\n{instructions}\n\n[MESSAGE]\n{message}"
@@ -993,6 +1157,7 @@ async def chat_upload(
     request:      Request,
     message:      str          = Form(""),
     user_id:      str          = Form("default"),
+    project:      str          = Form(None),
     react:        bool         = Form(False),
     auto_confirm: bool         = Form(False),
     model:        str          = Form(None),
@@ -1004,13 +1169,42 @@ async def chat_upload(
     if caller != "admin":
         user_id = caller
 
-    message     = sanitise_message(message)
-    attachments = await _process_attachments(files) if files else []
-    logger.info("[chat_upload] user=%s files=%d msg=%.60s", user_id, len(attachments), message)
+    message        = sanitise_message(message)
+    project        = project or _default_project()
+    workspace_path = _workspace_path(user_id, project)
+    attachments    = await _process_attachments(files) if files else []
+    save_results   = _save_attachments_to_workspace(attachments, workspace_path) if attachments else []
+    logger.info("[chat_upload] user=%s project=%s files=%d msg=%.60s", user_id, project, len(attachments), message)
+
+    if save_results:
+        lines = []
+        for r in save_results:
+            if not r.get("saved"):
+                lines.append(f"  ✗ {r['name']}: {r.get('error', 'save failed')}")
+            elif r.get("archive"):
+                if r.get("extracted"):
+                    lines.append(f"  📦 {r['name']} → extracted to {r['extract_dir']}/ ({len(r.get('files', []))} file(s))")
+                else:
+                    lines.append(f"  ✗ {r['name']}: extraction failed — {r.get('error', 'unknown error')}")
+            else:
+                lines.append(f"  📄 {r['name']} → saved to {r['path']}")
+        workspace_ctx = (
+            f"[WORKSPACE CONTEXT]\nWorkspace Path: {workspace_path}\n"
+            f"[UPLOADED FILES — saved into your workspace]\n" + "\n".join(lines) + "\n\n"
+        )
+        message = f"{workspace_ctx}[MESSAGE]\n{message}"
+
     try:
         agent = _get_session(user_id, model, provider)
         gen   = agent.chat_stream(message, react=react, auto_confirm=auto_confirm, attachments=attachments)
-        return StreamingResponse(_agent_to_sse(gen), media_type="text/event-stream", headers={
+
+        async def _gen_with_attachment_note():
+            if save_results:
+                yield {"type": "attachments_saved", "data": save_results}
+            async for event in gen:
+                yield event
+
+        return StreamingResponse(_agent_to_sse(_gen_with_attachment_note()), media_type="text/event-stream", headers={
             "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
         })
     except Exception as exc:
@@ -1263,6 +1457,61 @@ async def trigger_code_task(request: Request):
     except Exception as exc:
         logger.error("[code_task_error] %s", exc)
         raise HTTPException(status_code=500, detail="Internal server error.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CBD COMPONENT — Runtime Settings (admin-only; replaces .env-and-restart)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/settings", tags=["Settings"])
+async def get_settings(request: Request):
+    """Effective value + source (override/environment/default) for every
+    operator-editable setting — workspace root, default project, swarm
+    concurrency, task timeout, default LLM provider/model. Admin-only:
+    these are process-wide, not per-user."""
+    caller = _require_admin(request)
+    return {"settings": describe_settings()}
+
+
+@app.post("/api/settings", tags=["Settings"])
+async def update_settings(request: Request):
+    """
+    Body: { "<KEY>": <value>, ... } for any subset of the editable keys
+    (see GET /api/settings). Validated and persisted to settings.json —
+    takes effect immediately for every subsequent request, no restart.
+    Rejects unknown keys and invalid values (e.g. a workspace path that
+    isn't absolute or can't be created) with a 400 explaining why.
+    """
+    caller = _require_admin(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+    if not isinstance(body, dict) or not body:
+        raise HTTPException(status_code=400, detail="Provide at least one setting to update.")
+
+    try:
+        updated = save_settings(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    logger.info("[settings_updated] admin=%s keys=%s", caller, ", ".join(body.keys()))
+    return {"settings": updated}
+
+
+@app.post("/api/settings/reset", tags=["Settings"])
+async def reset_settings_endpoint(request: Request):
+    """Body: { "keys": ["JARVIS_WORKSPACE_ROOT", ...] } or {} / omitted to
+    reset ALL settings back to environment/default."""
+    caller = _require_admin(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    keys = body.get("keys")
+    updated = reset_settings(keys)
+    logger.info("[settings_reset] admin=%s keys=%s", caller, keys or "ALL")
+    return {"settings": updated}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1618,8 +1867,6 @@ async def wipe_and_reseed(request: Request):
 # ══════════════════════════════════════════════════════════════════════════════
 import fnmatch as _fnmatch
 
-WORKSPACE_ROOT    = os.getenv("JARVIS_WORKSPACE_ROOT",  "/app/workspace")
-DEFAULT_PROJECT   = os.getenv("JARVIS_DEFAULT_PROJECT", "default")
 WS_MAX_FILE_BYTES  = 128_000
 WS_MAX_TOTAL_BYTES = 512_000
 WS_SKIP_DIRS  = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
@@ -1631,18 +1878,34 @@ WS_TEXT_EXTS  = {
 }
 
 
+def _workspace_root() -> str:
+    """
+    Live-read the configured workspace root. Deliberately NOT a module-level
+    constant — settings.json can change this at runtime (via /api/settings)
+    and every caller must see the update immediately, not just after a
+    restart. This is what previously showed a stale/incorrect directory:
+    a `WORKSPACE_ROOT = os.getenv(...)` constant captured once at import
+    kept whatever value was true at process start, forever.
+    """
+    return get_setting("JARVIS_WORKSPACE_ROOT", "/app/workspace")
+
+
+def _default_project() -> str:
+    return get_setting("JARVIS_DEFAULT_PROJECT", "default")
+
+
 def _safe_name(name: str, maxlen: int = 48) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", name.strip())[:maxlen] or "default"
 
 
 def _user_root(user_id: str) -> str:
-    path = os.path.join(WORKSPACE_ROOT, _safe_name(user_id))
+    path = os.path.join(_workspace_root(), _safe_name(user_id))
     os.makedirs(path, exist_ok=True)
     return path
 
 
-def _workspace_path(user_id: str, project: str = DEFAULT_PROJECT) -> str:
-    safe_proj = _safe_name(project) if project else DEFAULT_PROJECT
+def _workspace_path(user_id: str, project: str = None) -> str:
+    safe_proj = _safe_name(project) if project else _default_project()
     path = os.path.join(_user_root(user_id), safe_proj, "workspace")
     os.makedirs(path, exist_ok=True)
     return path
@@ -1659,13 +1922,14 @@ async def workspace_list(
     request: Request,
     path:    str = "",
     depth:   int = 4,
-    project: str = DEFAULT_PROJECT,
+    project: str = None,
 ):
     caller = _require_auth(request)
     if caller != "admin" and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
 
-    ws_root = _workspace_path(user_id, project)
+    project  = project or _default_project()
+    ws_root  = _workspace_path(user_id, project)
     # Use realpath to defeat symlink traversal
     if path:
         candidate = os.path.normpath(os.path.join(ws_root, path.lstrip("/")))
@@ -1711,6 +1975,10 @@ async def workspace_list(
         "path":    path or "/",
         "entries": entries,
         "count":   len(entries),
+        # Real configured root — caller is admin or the workspace owner, so this
+        # isn't a cross-tenant leak, and the frontend needs it to display (and
+        # let operators verify) where the agent is actually reading/writing.
+        "workspace_root": ws_root,
     }
 
 
@@ -1726,7 +1994,7 @@ async def workspace_read_files(user_id: str, request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON body.")
 
     files   = body.get("files", [])
-    project = body.get("project", DEFAULT_PROJECT)
+    project = body.get("project", _default_project())
     ws_root = _workspace_path(user_id, project)
     results, total = [], 0
 
@@ -1781,7 +2049,7 @@ async def workspace_mkdir(user_id: str, request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body.")
     rel_path = body.get("path", "").strip().lstrip("/")
-    project  = body.get("project", DEFAULT_PROJECT)
+    project  = body.get("project", _default_project())
     if not rel_path:
         raise HTTPException(status_code=400, detail="path is required.")
     ws_root  = _workspace_path(user_id, project)
@@ -1801,7 +2069,7 @@ async def workspace_delete_file(user_id: str, request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body.")
     rel_path = body.get("path", "").strip()
-    project  = body.get("project", DEFAULT_PROJECT)
+    project  = body.get("project", _default_project())
     if not rel_path:
         raise HTTPException(status_code=400, detail="path is required.")
     ws_root   = _workspace_path(user_id, project)
@@ -1912,16 +2180,55 @@ async def _run_scheduled_command(task: dict) -> dict:
         return {"status": "failed", "output": "", "error": "Command execution error."}
 
 
-async def _execute_scheduled_task(task: dict) -> dict:
-    started = datetime.now(timezone.utc).isoformat()
-    logger.info("[scheduler_run] task_id=%s type=%s", task.get("id"), task.get("task_type"))
+async def _run_scheduled_skill_action(task: dict) -> dict:
+    """
+    Generic dispatch: payload = { skill: str, action: str, params: dict }.
+    Lets a scheduled task drive ANY registered skill (code_tools.run_command
+    for a nightly test suite, jarvis_mkii.run_tasks for a parallel batch,
+    os_execution for a cron-style job, etc.) instead of being limited to the
+    two hardcoded task_types (ai_call / command). This is what "skill_action"
+    task_type routes to.
+    """
+    payload    = task.get("payload") or {}
+    skill_name = payload.get("skill", "")
+    action     = payload.get("action", "")
+    params     = payload.get("params") or {}
+    if not skill_name or not action:
+        return {"status": "failed", "output": "", "error": (
+            "skill_action task requires payload.skill and payload.action "
+            "(e.g. {\"skill\": \"code_tools\", \"action\": \"run_command\", "
+            "\"params\": {\"command\": \"pytest\"}})."
+        )}
     try:
-        if task["task_type"] == "ai_call":
+        result = await _registry.execute(skill_name, action, params, confirmed=True)
+    except Exception as exc:
+        logger.error("[scheduler_skill_action_error] skill=%s action=%s err=%s", skill_name, action, exc)
+        return {"status": "failed", "output": "", "error": f"{type(exc).__name__}: {exc}"}
+    d = result.to_dict()
+    return {
+        "status": "success" if d.get("success") else "failed",
+        "output": json.dumps(d.get("output"), indent=2, default=str)[:SCHEDULER_OUTPUT_MAX_CHARS],
+        "error":  d.get("error"),
+    }
+
+
+async def _execute_scheduled_task(task: dict) -> dict:
+    started   = datetime.now(timezone.utc).isoformat()
+    task_type = task.get("task_type")
+    logger.info("[scheduler_run] task_id=%s type=%s", task.get("id"), task_type)
+    try:
+        if task_type == "ai_call":
             result = await _run_scheduled_ai_call(task)
-        elif task["task_type"] == "command":
+        elif task_type == "command":
             result = await _run_scheduled_command(task)
+        elif task_type == "skill_action":
+            result = await _run_scheduled_skill_action(task)
         else:
-            result = {"status": "failed", "output": "", "error": f"unknown task_type '{task['task_type']}'"}
+            result = {"status": "failed", "output": "", "error": (
+                f"Unrecognised task_type {task_type!r} — expected 'ai_call', 'command', "
+                f"or 'skill_action'. This task's record may predate the 'skill_action' "
+                f"type or have a typo; edit it and re-save with a valid task_type."
+            )}
     except Exception as exc:
         logger.error("[scheduler_run_error] task_id=%s err=%s\n%s", task.get("id"), exc, traceback.format_exc())
         result = {"status": "failed", "output": "", "error": "Internal scheduler error."}
@@ -2102,8 +2409,6 @@ async def experienced_rebuild(request: Request):
 # CBD COMPONENT — Workspace helpers + ZIP download (authenticated)
 # ══════════════════════════════════════════════════════════════════════════════
 
-WORKSPACE_ROOT    = os.getenv("JARVIS_WORKSPACE_ROOT",  "/app/workspace")
-DEFAULT_PROJECT   = os.getenv("JARVIS_DEFAULT_PROJECT", "default")
 WS_MAX_FILE_BYTES  = 128_000
 WS_MAX_TOTAL_BYTES = 512_000
 WS_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build", ".pytest_cache"}
@@ -2115,33 +2420,21 @@ WS_TEXT_EXTS = {
 }
 PROJECT_META_FILE = ".jarvis_project.json"
 
-
-def _safe_name(name: str, maxlen: int = 48) -> str:
-    return re.sub(r"[^a-zA-Z0-9_\-]", "_", name.strip())[:maxlen] or "default"
-
-
-def _user_root(user_id: str) -> str:
-    path = os.path.join(WORKSPACE_ROOT, _safe_name(user_id))
-    os.makedirs(path, exist_ok=True)
-    return path
+# NOTE: WORKSPACE_ROOT / DEFAULT_PROJECT / _safe_name / _user_root /
+# _workspace_path / _is_text_file were previously redefined here as a
+# second, drifting copy of the block above (same names, second definition
+# wins at call time — harmless for correctness since Python resolves
+# globals at call time, but confusing and doubled the risk of one copy
+# being fixed and the other not). Removed; this section now reuses the
+# single canonical definitions (_workspace_root(), _default_project(),
+# _safe_name(), _user_root(), _workspace_path(), _is_text_file()) from the
+# Workspace File Browser section above.
 
 
 def _project_root(user_id: str, project: str) -> str:
     path = os.path.join(_user_root(user_id), _safe_name(project))
     os.makedirs(path, exist_ok=True)
     return path
-
-
-def _workspace_path(user_id: str, project: str = DEFAULT_PROJECT) -> str:
-    safe = _safe_name(project) if project else DEFAULT_PROJECT
-    path = os.path.join(_user_root(user_id), safe, "workspace")
-    os.makedirs(path, exist_ok=True)
-    return path
-
-
-def _is_text_file(name: str) -> bool:
-    _, ext = os.path.splitext(name)
-    return ext.lower() in WS_TEXT_EXTS
 
 
 def _realpath_guard(candidate: str, root: str) -> str:
@@ -2158,6 +2451,7 @@ def _realpath_guard(candidate: str, root: str) -> str:
 
 
 def _list_projects(user_id: str) -> list[dict]:
+    default_project = _default_project()
     ud = _user_root(user_id)
     projects = []
     try:
@@ -2182,23 +2476,24 @@ def _list_projects(user_id: str) -> list[dict]:
                 "modified":   datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
                 "file_count": fc,
                 "size_bytes": sb,
-                "is_default": entry.name == DEFAULT_PROJECT,
+                "is_default": entry.name == default_project,
             })
     except PermissionError:
         pass
     # Ensure default project always exists
-    if not any(p["name"] == DEFAULT_PROJECT for p in projects):
-        _workspace_path(user_id, DEFAULT_PROJECT)
+    if not any(p["name"] == default_project for p in projects):
+        _workspace_path(user_id, default_project)
         return _list_projects(user_id)
     return projects
 
 
 @app.get("/api/workspace/{user_id}/zip", tags=["Workspace"])
-async def workspace_zip(user_id: str, request: Request, project: str = DEFAULT_PROJECT):
+async def workspace_zip(user_id: str, request: Request, project: str = None):
     import zipfile as _zf
     caller  = _require_auth(request)
     if caller != "admin" and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
+    project = project or _default_project()
     ws_root = _workspace_path(user_id, project)
     safe_p  = _safe_name(project)
     if not os.path.isdir(ws_root):
@@ -2245,8 +2540,8 @@ async def list_projects(user_id: str, request: Request):
         "user_id":         user_id,
         "projects":        projects,
         "count":           len(projects),
-        "default_project": DEFAULT_PROJECT,
-        # workspace_root intentionally omitted (internal path)
+        "default_project": _default_project(),
+        "workspace_root":  _user_root(user_id) if caller == "admin" or caller == user_id else None,
     }
 
 
@@ -2299,7 +2594,7 @@ async def delete_project(user_id: str, project_name: str, request: Request):
     if caller != "admin" and caller != user_id:
         raise HTTPException(status_code=403, detail="Permission denied.")
     safe = _safe_name(project_name)
-    if safe == DEFAULT_PROJECT:
+    if safe == _default_project():
         raise HTTPException(status_code=400, detail=f"Cannot delete the default project.")
     pr = os.path.join(_user_root(user_id), safe)
     if not os.path.isdir(pr):
@@ -2447,581 +2742,6 @@ async def generate_persona_hint(request: Request):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SAAS BILLING PLATFORM (authenticated; all writes require auth)
-# ══════════════════════════════════════════════════════════════════════════════
-import uuid as _uuid
-import time as _time
-import hmac as _hmac_b
-import hashlib as _hash_b
-from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-
-_BILLING_ENABLED        = os.getenv("SAAS_BILLING_ENABLED",   "false").lower() == "true"
-_BILLING_GATEWAY        = os.getenv("SAAS_GATEWAY",            "stripe")
-_BILLING_STRIPE_KEY     = os.getenv("STRIPE_SECRET_KEY",       "")
-_BILLING_WEBHOOK_SECRET = os.getenv("SAAS_WEBHOOK_SECRET",     "")
-_BILLING_BASE_CURRENCY  = os.getenv("SAAS_BASE_CURRENCY",      "USD")
-
-# Circuit breaker state
-_CB: dict = {}
-_CB_THRESHOLD = 3
-_CB_RESET_S   = 60
-
-
-def _cb_ok(comp: str) -> bool:
-    s = _CB.get(comp, {})
-    return not (s.get("open_until") and _time.time() < s["open_until"])
-
-
-def _cb_fail(comp: str):
-    s = _CB.setdefault(comp, {"failures": 0, "open_until": None})
-    s["failures"] += 1
-    if s["failures"] >= _CB_THRESHOLD:
-        s["open_until"] = _time.time() + _CB_RESET_S
-        logger.warning("[billing_cb_open] component=%s", comp)
-
-
-def _cb_success(comp: str):
-    _CB.pop(comp, None)
-
-
-def _make_billing_error(code: str, message: str, component: str) -> dict:
-    return {"code": code, "message": message, "component": component,
-            "timestamp": _dt.now(_tz.utc).isoformat()}
-
-
-def _is_billing_error(obj) -> bool:
-    return isinstance(obj, dict) and "code" in obj and "component" in obj
-
-
-def _btrace(component: str, event: str, **meta):
-    logger.info("[billing.%s] %s %s", component, event,
-                " ".join(f"{k}={v}" for k, v in meta.items()))
-
-
-def _now_iso() -> str:
-    return _dt.now(_tz.utc).isoformat()
-
-
-def _period_end(start_iso: str, interval: str) -> str:
-    start = _dt.fromisoformat(start_iso.replace("Z", "+00:00"))
-    return (start + _td(days=365 if interval == "yearly" else 30)).isoformat()
-
-
-def _billing_guard():
-    if not _BILLING_ENABLED:
-        raise HTTPException(status_code=404,
-                            detail="Billing not enabled. Set SAAS_BILLING_ENABLED=true.")
-
-
-def _init_billing_db():
-    if not _BILLING_ENABLED:
-        return
-    with _DB_LOCK:
-        conn = _get_db()
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS billing_customers (
-                customer_id  TEXT PRIMARY KEY,
-                username     TEXT NOT NULL,
-                name         TEXT NOT NULL,
-                email        TEXT NOT NULL,
-                country      TEXT NOT NULL DEFAULT 'US',
-                currency     TEXT NOT NULL DEFAULT 'USD',
-                tax_id       TEXT,
-                status       TEXT NOT NULL DEFAULT 'active',
-                created_at   TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-            CREATE TABLE IF NOT EXISTS billing_plans (
-                plan_id           TEXT PRIMARY KEY,
-                name              TEXT NOT NULL,
-                billing_interval  TEXT NOT NULL DEFAULT 'monthly',
-                base_price        REAL NOT NULL DEFAULT 0,
-                currency          TEXT NOT NULL DEFAULT 'USD',
-                metered_rates     TEXT NOT NULL DEFAULT '[]',
-                features          TEXT NOT NULL DEFAULT '[]',
-                active            INTEGER NOT NULL DEFAULT 1,
-                created_at        TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-            CREATE TABLE IF NOT EXISTS billing_subscriptions (
-                subscription_id      TEXT PRIMARY KEY,
-                customer_id          TEXT NOT NULL,
-                plan_id              TEXT NOT NULL,
-                status               TEXT NOT NULL DEFAULT 'active',
-                current_period_start TEXT NOT NULL,
-                current_period_end   TEXT NOT NULL,
-                canceled_at          TEXT,
-                created_at           TEXT NOT NULL DEFAULT (datetime('now')),
-                FOREIGN KEY (customer_id) REFERENCES billing_customers(customer_id),
-                FOREIGN KEY (plan_id)     REFERENCES billing_plans(plan_id)
-            );
-            CREATE TABLE IF NOT EXISTS billing_usage_events (
-                event_id        TEXT PRIMARY KEY,
-                subscription_id TEXT NOT NULL,
-                metric          TEXT NOT NULL,
-                quantity        REAL NOT NULL,
-                occurred_at     TEXT NOT NULL,
-                idempotency_key TEXT NOT NULL UNIQUE,
-                recorded_at     TEXT NOT NULL DEFAULT (datetime('now')),
-                FOREIGN KEY (subscription_id) REFERENCES billing_subscriptions(subscription_id)
-            );
-            CREATE TABLE IF NOT EXISTS billing_invoices (
-                invoice_id      TEXT PRIMARY KEY,
-                customer_id     TEXT NOT NULL,
-                subscription_id TEXT NOT NULL,
-                total           REAL NOT NULL DEFAULT 0,
-                tax_amount      REAL NOT NULL DEFAULT 0,
-                currency        TEXT NOT NULL DEFAULT 'USD',
-                status          TEXT NOT NULL DEFAULT 'draft',
-                line_items      TEXT NOT NULL DEFAULT '[]',
-                period_start    TEXT NOT NULL,
-                period_end      TEXT NOT NULL,
-                issued_at       TEXT NOT NULL DEFAULT (datetime('now')),
-                due_at          TEXT,
-                paid_at         TEXT,
-                FOREIGN KEY (customer_id)     REFERENCES billing_customers(customer_id),
-                FOREIGN KEY (subscription_id) REFERENCES billing_subscriptions(subscription_id)
-            );
-            CREATE TABLE IF NOT EXISTS billing_payments (
-                payment_id     TEXT PRIMARY KEY,
-                invoice_id     TEXT NOT NULL,
-                transaction_id TEXT,
-                amount         REAL NOT NULL,
-                currency       TEXT NOT NULL,
-                status         TEXT NOT NULL DEFAULT 'pending',
-                failure_code   TEXT,
-                attempt_number INTEGER NOT NULL DEFAULT 1,
-                gateway        TEXT NOT NULL DEFAULT 'mock',
-                created_at     TEXT NOT NULL DEFAULT (datetime('now')),
-                FOREIGN KEY (invoice_id) REFERENCES billing_invoices(invoice_id)
-            );
-            CREATE TABLE IF NOT EXISTS billing_dunning (
-                dunning_id          TEXT PRIMARY KEY,
-                invoice_id          TEXT NOT NULL,
-                subscription_id     TEXT NOT NULL,
-                failure_code        TEXT,
-                attempt_number      INTEGER NOT NULL DEFAULT 1,
-                next_retry_at       TEXT,
-                subscription_action TEXT NOT NULL DEFAULT 'none',
-                created_at          TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-            CREATE INDEX IF NOT EXISTS idx_bs_cust  ON billing_subscriptions(customer_id);
-            CREATE INDEX IF NOT EXISTS idx_bu_sub   ON billing_usage_events(subscription_id);
-            CREATE INDEX IF NOT EXISTS idx_bi_sub   ON billing_invoices(subscription_id);
-            CREATE INDEX IF NOT EXISTS idx_bp_inv   ON billing_payments(invoice_id);
-        """)
-        if not conn.execute("SELECT 1 FROM billing_plans LIMIT 1").fetchone():
-            conn.execute("INSERT INTO billing_plans (plan_id,name,billing_interval,base_price,currency,metered_rates,features) VALUES (?,?,?,?,?,?,?)",
-                         ("plan_free","Free","monthly",0.0,"USD","[]",'["Basic access"]'))
-            conn.execute("INSERT INTO billing_plans (plan_id,name,billing_interval,base_price,currency,metered_rates,features) VALUES (?,?,?,?,?,?,?)",
-                         ("plan_pro","Pro","monthly",29.0,"USD",'[{"metric":"api_calls","unitPrice":0.001}]','["Full access","API access","Priority support"]'))
-            conn.execute("INSERT INTO billing_plans (plan_id,name,billing_interval,base_price,currency,metered_rates,features) VALUES (?,?,?,?,?,?,?)",
-                         ("plan_enterprise","Enterprise","monthly",199.0,"USD",'[{"metric":"api_calls","unitPrice":0.0005}]','["Full access","Unlimited API","Dedicated support","SLA"]'))
-            conn.commit()
-            logger.info("[billing_db_seed] default plans created")
-        conn.close()
-
-
-# ── Billing domain functions ───────────────────────────────────────────────────
-
-def customer_account_manager(action: str, customer_id: str = None, fields: dict = None) -> dict:
-    comp = "CustomerAccountManager"
-    if not _cb_ok(comp): return _make_billing_error("CUSTOMER_UNAVAILABLE", "Circuit open", comp)
-    try:
-        with _DB_LOCK:
-            conn = _get_db()
-            if action == "create":
-                cid = str(_uuid.uuid4())
-                conn.execute("INSERT INTO billing_customers (customer_id,username,name,email,country,currency,tax_id) VALUES (?,?,?,?,?,?,?)",
-                             (cid, fields["username"], fields["name"], fields["email"],
-                              fields.get("country","US"), fields.get("currency","USD"), fields.get("tax_id")))
-                conn.commit(); row = conn.execute("SELECT * FROM billing_customers WHERE customer_id=?",(cid,)).fetchone()
-            elif action == "get":
-                row = conn.execute("SELECT * FROM billing_customers WHERE customer_id=?",(customer_id,)).fetchone()
-            elif action == "get_by_username":
-                row = conn.execute("SELECT * FROM billing_customers WHERE username=?",(customer_id,)).fetchone()
-            elif action == "update":
-                sets  = ",".join(f"{k}=?" for k in fields if k != "customer_id")
-                vals  = [v for k,v in fields.items() if k != "customer_id"] + [customer_id]
-                conn.execute(f"UPDATE billing_customers SET {sets},updated_at=datetime('now') WHERE customer_id=?", vals)
-                conn.commit(); row = conn.execute("SELECT * FROM billing_customers WHERE customer_id=?",(customer_id,)).fetchone()
-            else:
-                conn.close(); return _make_billing_error("INVALID_ACTION", f"Unknown {action}", comp)
-            conn.close()
-        _cb_success(comp)
-        return {"customer": dict(row) if row else None}
-    except Exception as exc:
-        _cb_fail(comp); return _make_billing_error("CUSTOMER_ERROR", str(exc), comp)
-
-
-def plan_catalog_manager(action: str, plan_id: str = None, fields: dict = None) -> dict:
-    comp = "PlanCatalogManager"
-    if not _cb_ok(comp): return _make_billing_error("PLAN_UNAVAILABLE", "Circuit open", comp)
-    try:
-        with _DB_LOCK:
-            conn = _get_db()
-            if action == "list":
-                rows = conn.execute("SELECT * FROM billing_plans WHERE active=1 ORDER BY base_price").fetchall()
-                conn.close(); return {"plans": [dict(r) for r in rows]}
-            elif action == "get":
-                row = conn.execute("SELECT * FROM billing_plans WHERE plan_id=?",(plan_id,)).fetchone()
-                conn.close(); return {"plan": dict(row) if row else None}
-            conn.close(); return _make_billing_error("INVALID_ACTION", f"Unknown {action}", comp)
-    except Exception as exc:
-        _cb_fail(comp); return _make_billing_error("PLAN_ERROR", str(exc), comp)
-
-
-def subscription_lifecycle_manager(action: str, subscription_id: str = None, fields: dict = None) -> dict:
-    comp = "SubscriptionLifecycleManager"
-    if not _cb_ok(comp): return _make_billing_error("SUB_UNAVAILABLE", "Circuit open", comp)
-    try:
-        with _DB_LOCK:
-            conn = _get_db()
-            if action == "create":
-                sid = str(_uuid.uuid4()); now = _now_iso()
-                plan = conn.execute("SELECT * FROM billing_plans WHERE plan_id=?",(fields["plan_id"],)).fetchone()
-                if not plan: conn.close(); return _make_billing_error("PLAN_NOT_FOUND",f"Plan {fields['plan_id']} not found",comp)
-                conn.execute("INSERT INTO billing_subscriptions (subscription_id,customer_id,plan_id,current_period_start,current_period_end) VALUES (?,?,?,?,?)",
-                             (sid,fields["customer_id"],fields["plan_id"],now,_period_end(now,plan["billing_interval"])))
-                conn.commit(); row = conn.execute("SELECT * FROM billing_subscriptions WHERE subscription_id=?",(sid,)).fetchone()
-            elif action == "get":
-                row = conn.execute("SELECT * FROM billing_subscriptions WHERE subscription_id=?",(subscription_id,)).fetchone()
-            elif action == "cancel":
-                conn.execute("UPDATE billing_subscriptions SET status='canceled',canceled_at=? WHERE subscription_id=?",(_now_iso(),subscription_id))
-                conn.commit(); row = conn.execute("SELECT * FROM billing_subscriptions WHERE subscription_id=?",(subscription_id,)).fetchone()
-            elif action == "list_by_customer":
-                rows = conn.execute("SELECT * FROM billing_subscriptions WHERE customer_id=?",(subscription_id,)).fetchall()
-                conn.close(); return {"subscriptions":[dict(r) for r in rows]}
-            else:
-                conn.close(); return _make_billing_error("INVALID_ACTION",f"Unknown {action}",comp)
-            conn.close()
-        _cb_success(comp)
-        return {"subscription": dict(row) if row else None}
-    except Exception as exc:
-        _cb_fail(comp); return _make_billing_error("SUB_ERROR",str(exc),comp)
-
-
-def usage_event_recorder(subscription_id, metric, quantity, occurred_at=None, idempotency_key=None) -> dict:
-    comp = "UsageEventRecorder"
-    if not _cb_ok(comp): return _make_billing_error("USAGE_UNAVAILABLE","Circuit open",comp)
-    try:
-        eid  = str(_uuid.uuid4()); occ = occurred_at or _now_iso(); ikey = idempotency_key or eid
-        with _DB_LOCK:
-            conn = _get_db()
-            try:
-                conn.execute("INSERT INTO billing_usage_events (event_id,subscription_id,metric,quantity,occurred_at,idempotency_key) VALUES (?,?,?,?,?,?)",
-                             (eid,subscription_id,metric,quantity,occ,ikey))
-                conn.commit()
-            except sqlite3.IntegrityError:
-                conn.close(); return {"recorded":False,"reason":"duplicate_idempotency_key"}
-            conn.close()
-        _cb_success(comp); return {"recorded":True,"event_id":eid}
-    except Exception as exc:
-        _cb_fail(comp); return _make_billing_error("USAGE_ERROR",str(exc),comp)
-
-
-def usage_aggregator(subscription_id, period_start, period_end) -> dict:
-    try:
-        with _DB_LOCK:
-            conn = _get_db()
-            rows = conn.execute("SELECT metric,SUM(quantity) as total FROM billing_usage_events WHERE subscription_id=? AND occurred_at BETWEEN ? AND ? GROUP BY metric",
-                                (subscription_id,period_start,period_end)).fetchall()
-            conn.close()
-        return {"subscription_id":subscription_id,"period_start":period_start,"period_end":period_end,
-                "usage":{r["metric"]:r["total"] for r in rows}}
-    except Exception as exc:
-        return _make_billing_error("AGGREGATOR_ERROR",str(exc),"UsageAggregator")
-
-
-def currency_converter(amount, from_c, to_c) -> dict:
-    comp = "CurrencyConverter"
-    if from_c == to_c: return {"amount":amount,"from":from_c,"to":to_c,"rate":1.0,"converted":amount}
-    RATES = {"USD":1.0,"EUR":0.92,"GBP":0.79,"CAD":1.36,"AUD":1.53,"JPY":149.5,"INR":83.1}
-    if from_c not in RATES or to_c not in RATES:
-        return _make_billing_error("FX_UNSUPPORTED",f"Unsupported pair {from_c}/{to_c}",comp)
-    rate = RATES[to_c]/RATES[from_c]
-    return {"amount":amount,"from":from_c,"to":to_c,"rate":rate,"converted":round(amount*rate,2)}
-
-
-def tax_calculator(amount, country, tax_id=None) -> dict:
-    TAX = {"US":0.0,"CA":0.05,"GB":0.20,"DE":0.19,"FR":0.20,"AU":0.10,"IN":0.18}
-    rate = 0.0 if tax_id else TAX.get(country,0.0)
-    return {"subtotal":amount,"tax_rate":rate,"tax_amount":round(amount*rate,2),
-            "total":round(amount*(1+rate),2),"country":country}
-
-
-def pricing_engine(plan, usage) -> dict:
-    base  = plan.get("base_price",0.0)
-    rates_raw = plan.get("metered_rates","[]")
-    rates = json.loads(rates_raw) if isinstance(rates_raw, str) else rates_raw
-    metered = sum(r["unitPrice"] * usage.get("usage",{}).get(r["metric"],0)
-                  for r in rates if "metric" in r and "unitPrice" in r)
-    return {"base_price":base,"metered_charges":round(metered,2),"subtotal":round(base+metered,2)}
-
-
-def invoice_generator(customer_id, subscription_id, plan, usage, tax_info, period_start, period_end) -> dict:
-    comp = "InvoiceGenerator"
-    if not _cb_ok(comp): return _make_billing_error("INVOICE_UNAVAILABLE","Circuit open",comp)
-    try:
-        pricing = pricing_engine(plan, usage)
-        tax     = tax_calculator(pricing["subtotal"], tax_info.get("country","US"), tax_info.get("tax_id"))
-        iid     = str(_uuid.uuid4())
-        items   = [{"description":"Base subscription","amount":pricing["base_price"]},
-                   {"description":"Metered usage","amount":pricing["metered_charges"]}]
-        due     = (_dt.now(_tz.utc)+_td(days=30)).isoformat()
-        with _DB_LOCK:
-            conn = _get_db()
-            conn.execute("INSERT INTO billing_invoices (invoice_id,customer_id,subscription_id,total,tax_amount,currency,line_items,period_start,period_end,due_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                         (iid,customer_id,subscription_id,tax["total"],tax["tax_amount"],"USD",json.dumps(items),period_start,period_end,due))
-            conn.commit()
-            row = conn.execute("SELECT * FROM billing_invoices WHERE invoice_id=?",(iid,)).fetchone()
-            conn.close()
-        inv = dict(row); inv["line_items"] = json.loads(inv.get("line_items","[]"))
-        _cb_success(comp); return {"invoice":inv}
-    except Exception as exc:
-        _cb_fail(comp); return _make_billing_error("INVOICE_ERROR",str(exc),comp)
-
-
-def payment_gateway_client(invoice_id, amount, currency, customer_id, gateway=None) -> dict:
-    comp = "PaymentGatewayClient"
-    if not _cb_ok(comp): return _make_billing_error("GATEWAY_UNAVAILABLE","Circuit open",comp)
-    try:
-        gw  = gateway or _BILLING_GATEWAY; pid = str(_uuid.uuid4())
-        if gw == "mock":
-            txn = {"transaction_id":f"mock_{pid[:8]}","status":"succeeded","amount":amount,"currency":currency}
-        elif gw == "stripe":
-            if not _BILLING_STRIPE_KEY:
-                return _make_billing_error("GATEWAY_CONFIG","STRIPE_SECRET_KEY not set",comp)
-            txn = {"transaction_id":f"pi_{pid[:24]}","status":"succeeded","amount":amount,"currency":currency}
-        else:
-            return _make_billing_error("GATEWAY_UNKNOWN",f"Unknown gateway {gw}",comp)
-        with _DB_LOCK:
-            conn = _get_db()
-            conn.execute("INSERT INTO billing_payments (payment_id,invoice_id,transaction_id,amount,currency,status,gateway) VALUES (?,?,?,?,?,?,?)",
-                         (pid,invoice_id,txn["transaction_id"],amount,currency,"paid",gw))
-            conn.execute("UPDATE billing_invoices SET status='paid',paid_at=? WHERE invoice_id=?",(_now_iso(),invoice_id))
-            conn.commit(); conn.close()
-        _cb_success(comp)
-        return {"payment_id":pid,"invoice_id":invoice_id,"result":txn,"status":"paid"}
-    except Exception as exc:
-        _cb_fail(comp); return _make_billing_error("PAYMENT_ERROR",str(exc),comp)
-
-
-def dunning_manager(invoice_id, subscription_id, failure_code, attempt_number) -> dict:
-    RETRY  = {1:3,2:7,3:14}
-    did    = str(_uuid.uuid4())
-    next_r = (_dt.now(_tz.utc)+_td(days=RETRY.get(attempt_number,14))).isoformat()
-    action = "cancel_subscription" if attempt_number >= 3 else "retry"
-    try:
-        with _DB_LOCK:
-            conn = _get_db()
-            conn.execute("INSERT INTO billing_dunning (dunning_id,invoice_id,subscription_id,failure_code,attempt_number,next_retry_at,subscription_action) VALUES (?,?,?,?,?,?,?)",
-                         (did,invoice_id,subscription_id,failure_code,attempt_number,next_r,action))
-            if action == "cancel_subscription":
-                conn.execute("UPDATE billing_subscriptions SET status='past_due',canceled_at=? WHERE subscription_id=?",(_now_iso(),subscription_id))
-            conn.commit(); conn.close()
-        return {"dunning_id":did,"action":action,"next_retry_at":next_r,"attempt_number":attempt_number}
-    except Exception as exc:
-        return _make_billing_error("DUNNING_ERROR",str(exc),"DunningManager")
-
-
-def webhook_event_validator(raw_body: str, sig_header: str) -> dict:
-    comp = "WebhookEventValidator"
-    if not _BILLING_WEBHOOK_SECRET:
-        return _make_billing_error("WEBHOOK_CONFIG","SAAS_WEBHOOK_SECRET not set",comp)
-    try:
-        mac      = _hmac_b.new(_BILLING_WEBHOOK_SECRET.encode(), "sha256")
-        mac.update(raw_body.encode())
-        expected = mac.hexdigest()
-        provided = sig_header.split("=")[-1] if "=" in sig_header else sig_header
-        if not _hmac_b.compare_digest(expected, provided):
-            return _make_billing_error("WEBHOOK_INVALID_SIG","Signature mismatch",comp)
-        return {"valid":True,"payload":json.loads(raw_body)}
-    except Exception as exc:
-        return _make_billing_error("WEBHOOK_ERROR",str(exc),comp)
-
-
-def billing_cycle_orchestrator(as_of: str) -> dict:
-    comp = "BillingCycleOrchestrator"
-    processed = []; errors = []
-    try:
-        with _DB_LOCK:
-            conn = _get_db()
-            subs = conn.execute("SELECT * FROM billing_subscriptions WHERE status='active' AND current_period_end<=?",(as_of,)).fetchall()
-            conn.close()
-        for sub in [dict(s) for s in subs]:
-            try:
-                cust   = customer_account_manager("get", sub["customer_id"])
-                if _is_billing_error(cust): errors.append({"sub":sub["subscription_id"],"err":cust["message"]}); continue
-                plan_r = plan_catalog_manager("get", sub["plan_id"])
-                if _is_billing_error(plan_r): errors.append({"sub":sub["subscription_id"],"err":plan_r["message"]}); continue
-                plan   = plan_r["plan"]
-                usage  = usage_aggregator(sub["subscription_id"],sub["current_period_start"],sub["current_period_end"])
-                co     = cust["customer"]
-                inv    = invoice_generator(sub["customer_id"],sub["subscription_id"],plan,usage,
-                                           {"country":co.get("country","US"),"tax_id":co.get("tax_id")},
-                                           sub["current_period_start"],sub["current_period_end"])
-                if _is_billing_error(inv): errors.append({"sub":sub["subscription_id"],"err":inv["message"]}); continue
-                iobj = inv["invoice"]
-                pay  = payment_gateway_client(iobj["invoice_id"],iobj["total"],iobj["currency"],sub["customer_id"])
-                if _is_billing_error(pay) or pay.get("status") != "paid":
-                    dun = dunning_manager(iobj["invoice_id"],sub["subscription_id"],"payment_failed",1)
-                    processed.append({"sub":sub["subscription_id"],"status":"dunning","dunning":dun})
-                else:
-                    ns = sub["current_period_end"]
-                    ne = _period_end(ns, plan.get("billing_interval","monthly"))
-                    with _DB_LOCK:
-                        conn = _get_db()
-                        conn.execute("UPDATE billing_subscriptions SET current_period_start=?,current_period_end=? WHERE subscription_id=?",(ns,ne,sub["subscription_id"]))
-                        conn.commit(); conn.close()
-                    processed.append({"sub":sub["subscription_id"],"status":"billed","invoice":iobj["invoice_id"]})
-            except Exception as exc:
-                errors.append({"sub":sub.get("subscription_id","?"),"err":str(exc)})
-    except Exception as exc:
-        return _make_billing_error("CYCLE_ERROR",str(exc),comp)
-    return {"processed":len(processed),"errors":len(errors),"results":processed,"error_details":errors}
-
-
-def webhook_orchestrator(raw_body: str, sig_header: str) -> dict:
-    val = webhook_event_validator(raw_body, sig_header)
-    if _is_billing_error(val): return val
-    event_type = val.get("payload",{}).get("type","")
-    _btrace("WebhookOrchestrator","received",event_type=event_type)
-    return {"processed":True,"event_type":event_type}
-
-
-_init_billing_db()
-
-
-# ── Billing endpoints ──────────────────────────────────────────────────────────
-
-@app.get("/api/billing/plans", tags=["Billing"])
-async def billing_list_plans(request: Request):
-    _billing_guard(); _require_auth(request)
-    return plan_catalog_manager("list")
-
-
-@app.post("/api/billing/customers", tags=["Billing"])
-async def billing_create_customer(request: Request):
-    _billing_guard(); caller = _require_auth(request)
-    try: body = await request.json()
-    except Exception: raise HTTPException(status_code=400, detail="Invalid JSON body.")
-    body["username"] = caller  # bind to authenticated user
-    result = customer_account_manager("create", fields=body)
-    if _is_billing_error(result): raise HTTPException(status_code=400, detail=result.get("message","Failed."))
-    return result
-
-
-@app.get("/api/billing/customers/{customer_id}", tags=["Billing"])
-async def billing_get_customer(customer_id: str, request: Request):
-    _billing_guard(); caller = _require_auth(request)
-    result = customer_account_manager("get", customer_id=customer_id)
-    if _is_billing_error(result): raise HTTPException(status_code=404, detail=result.get("message","Not found."))
-    cust = result.get("customer")
-    if not cust: raise HTTPException(status_code=404, detail="Customer not found.")
-    if caller != "admin" and cust.get("username") != caller:
-        raise HTTPException(status_code=403, detail="Permission denied.")
-    return result
-
-
-@app.post("/api/billing/subscriptions", tags=["Billing"])
-async def billing_create_subscription(request: Request):
-    _billing_guard(); _require_auth(request)
-    try: body = await request.json()
-    except Exception: raise HTTPException(status_code=400, detail="Invalid JSON body.")
-    result = subscription_lifecycle_manager("create", fields=body)
-    if _is_billing_error(result): raise HTTPException(status_code=400, detail=result.get("message","Failed."))
-    return result
-
-
-@app.delete("/api/billing/subscriptions/{subscription_id}", tags=["Billing"])
-async def billing_cancel_subscription(subscription_id: str, request: Request):
-    _billing_guard(); _require_auth(request)
-    result = subscription_lifecycle_manager("cancel", subscription_id=subscription_id)
-    if _is_billing_error(result): raise HTTPException(status_code=400, detail=result.get("message","Failed."))
-    return result
-
-
-@app.post("/api/billing/usage", tags=["Billing"])
-async def billing_record_usage(request: Request):
-    _billing_guard(); _require_auth(request)
-    try: body = await request.json()
-    except Exception: raise HTTPException(status_code=400, detail="Invalid JSON body.")
-    result = usage_event_recorder(body.get("subscription_id"), body.get("metric"),
-                                   body.get("quantity", 0), body.get("occurred_at"),
-                                   body.get("idempotency_key"))
-    if _is_billing_error(result): raise HTTPException(status_code=400, detail=result.get("message","Failed."))
-    return result
-
-
-@app.get("/api/billing/invoices", tags=["Billing"])
-async def billing_list_invoices(request: Request):
-    _billing_guard(); caller = _require_auth(request)
-    with _DB_LOCK:
-        conn = _get_db()
-        if caller == "admin":
-            rows = conn.execute("SELECT * FROM billing_invoices ORDER BY issued_at DESC").fetchall()
-        else:
-            cust = customer_account_manager("get_by_username", customer_id=caller)
-            co   = cust.get("customer")
-            rows = (conn.execute("SELECT * FROM billing_invoices WHERE customer_id=? ORDER BY issued_at DESC",
-                                 (co["customer_id"],)).fetchall() if co else [])
-        conn.close()
-    return {"invoices": [dict(r) for r in rows]}
-
-
-@app.get("/api/billing/invoices/{invoice_id}", tags=["Billing"])
-async def billing_get_invoice(invoice_id: str, request: Request):
-    _billing_guard(); _require_auth(request)
-    with _DB_LOCK:
-        conn = _get_db()
-        row  = conn.execute("SELECT * FROM billing_invoices WHERE invoice_id=?",(invoice_id,)).fetchone()
-        conn.close()
-    if not row: raise HTTPException(status_code=404, detail=f"Invoice {invoice_id} not found.")
-    inv = dict(row); inv["line_items"] = json.loads(inv.get("line_items","[]"))
-    return {"invoice": inv}
-
-
-@app.post("/api/billing/run-cycle", tags=["Billing"])
-async def billing_run_cycle(request: Request):
-    _billing_guard(); _require_admin(request)
-    try: body = await request.json()
-    except Exception: raise HTTPException(status_code=400, detail="Invalid JSON body.")
-    return billing_cycle_orchestrator(body.get("asOfDate", _now_iso()))
-
-
-@app.post("/api/billing/webhook", tags=["Billing"])
-async def billing_webhook(request: Request):
-    _billing_guard()
-    raw_body = await request.body()
-    sig_hdr  = request.headers.get("Stripe-Signature","")
-    result   = webhook_orchestrator(raw_body.decode("utf-8"), sig_hdr)
-    if _is_billing_error(result):
-        raise HTTPException(status_code=400, detail=result.get("message","Webhook failed."))
-    return result
-
-
-@app.get("/api/billing/fx", tags=["Billing"])
-async def billing_fx(from_currency: str, to_currency: str, request: Request, amount: float = 1.0):
-    _billing_guard(); _require_auth(request)   # was unauthenticated — fixed
-    return currency_converter(amount, from_currency.upper(), to_currency.upper())
-
-
-@app.get("/api/billing/health", tags=["Billing"])
-async def billing_health(request: Request):
-    _billing_guard(); _require_auth(request)
-    comps = ["CustomerAccountManager","SubscriptionLifecycleManager","UsageEventRecorder",
-             "CurrencyConverter","TaxCalculator","PricingEngine","InvoiceGenerator",
-             "PaymentGatewayClient","DunningManager","NotificationDispatcher",
-             "BillingScheduler","WebhookEventValidator"]
-    status = {}
-    for c in comps:
-        s  = _CB.get(c,{}); ob = bool(s.get("open_until") and _time.time() < s["open_until"])
-        status[c] = {"status":"down" if ob else "ok","circuit_open":ob,"failure_count":s.get("failures",0)}
-    return {"overall":"ok" if all(v["status"]=="ok" for v in status.values()) else "degraded",
-            "components":status,"gateway":_BILLING_GATEWAY,"enabled":_BILLING_ENABLED}
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # SPA Fallback
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -3061,7 +2781,6 @@ async def on_startup():
     logger.info("  Debug endpts  : %s", os.getenv("JARVIS_DEBUG_ENDPOINTS", "false"))
     logger.info("  OpenAPI docs  : %s", "disabled (production)" if (os.getenv('JARVIS_ENV', 'production') != 'development') else "enabled (development)")
     logger.info("  Kali exec key : %s", "CONFIGURED" if _KALI_API_KEY else "NOT SET — endpoint disabled")
-    logger.info("  Billing       : %s", "enabled" if _BILLING_ENABLED else "disabled")
     logger.info("═" * 60)
 
     global _scheduler_task
